@@ -83,9 +83,8 @@ python3 <skill-path>/scripts/validate_task.py /abs/path/task_desc.py --json
 
 验证通过后，**必须使用 `question` 工具**将完整的 task_desc.py 内容展示给用户，请求确认。
 
-<展示任务代码内容>
-
-询问用户
+1. 展示任务代码内容
+2. 询问用户
 > 算子生成完成，请查看生成代码：
 >
 > 请选择：
