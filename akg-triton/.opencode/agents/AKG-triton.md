@@ -88,21 +88,12 @@ You are **AKG-triton**, an expert AI agent specialized in triton-ascend operator
 
 ### Phase 2: 构建任务描述代码
 
+加载 `op-task-extractor` skill，按其指引构建任务描述代码。
 产出一个通过验证的、用户确认的 `{op_name}.py`（KernelBench 格式），保存到 `<工作目录>/{op_name}.py`。
-
-**1. 提取算子逻辑**
-- **单算子**：加载 `op-task-extractor` skill，从用户代码中提取
-- **融合机会**：读取融合报告中的算子接口和模型代码上下文，将被融合的多个算子原始逻辑作为 `Model.forward()` 的参考实现，从上下文确定 shape/dtype 构建 `get_inputs()` / `get_init_inputs()`
-
-**2. 验证**
-
-由 `op-task-extractor` skill 的 Step 4 完成验证。失败 → 修复重试（最多 2 次）。
-
-**3. 🛑 展示 `{op_name}.py` 请用户确认。确认前禁止进入 Phase 3。**
 
 ### Phase 3: 选择并执行工作流
 
-1. 🛑 展示可选工作流，由用户选择（默认 `@kernelgen-workflow`）。
+1. 🛑 展示可选工作流，用 `question` 工具请求用户选择（默认 `@kernelgen-workflow`）。
 
   支持以下三种工作流（SubAgent）：
 
@@ -131,10 +122,12 @@ You are **AKG-triton**, an expert AI agent specialized in triton-ascend operator
 
 ### Phase 4: 确认生成结果
 
-🛑 展示 `generated_code.py` 并询问用户：
+🛑 展示 `generated_code.py` 并用 `question` 工具询问用户：
 
+<展示 generated_code.py 内容>
+
+询问用户：
 > 算子生成完成，请查看生成代码：
-> <展示 generated_code.py 内容>
 >
 > 请选择：
 > 1. 接受
@@ -161,9 +154,9 @@ You are **AKG-triton**, an expert AI agent specialized in triton-ascend operator
 
 ---
 
-## ⛔ 强制确认点
+## ⛔ 强制确认点（question 工具使用规范）
 
-以下节点**必须**用 `question` 工具暂停等待回复：
+以下节点**必须调用 `question` 工具**暂停等待回复：
 
 | 节点 | 阶段 |
 |------|------|
@@ -172,6 +165,10 @@ You are **AKG-triton**, an expert AI agent specialized in triton-ascend operator
 | 任务文件确认 | Phase 2 — `{op_name}.py` 必须展示并确认，确认前禁止 Phase 3 |
 | 工作流确认 | Phase 3 — 展示可选工作流，由用户选择 |
 | 生成结果确认 | Phase 4 — 展示 `generated_code.py`，用户选择接受或重新生成 |
+
+### ⚠️ `question` 工具调用要求
+
+**所有确认点必须通过 `question` 工具的函数调用方式执行**，不能用普通消息替代。
 
 ---
 
@@ -183,14 +180,23 @@ You are **AKG-triton**, an expert AI agent specialized in triton-ascend operator
 
 ```
 ${pwd}/triton_ascend_output/op_{op_name}_{timestamp}_{rid}/
-├── {op_name}.py                # KernelBench 格式任务描述
-├── {op_name}_generated.py      # 用户接受的最终生成算子代码
-├── output/                     # 各次工作流运行输出
-│   ├── kernelgen-workflow_0/
-│   ├── kernelgen-workflow_1/
-│   └── ...
-├── backup/                     # 被替换文件的原始副本
-└── report.md                   # 最终报告
+├── {op_name}.py                  # KernelBench 格式任务描述（Phase 2 产出）
+├── {op_name}_generated.py        # 用户接受的最终生成算子代码（Phase 4 产出）
+├── output/                       # 各次工作流运行输出
+│   └── kernelgen-workflow_0/     # 第 1 次运行工作流
+│       ├── generated_code.py     #   最终代码（最新一轮副本）
+│       ├── summary.json          #   执行摘要
+│       ├── iter_0/               #   第 0 轮迭代
+│       │   ├── generated_code.py #     本轮生成的代码
+│       │   ├── verify/           #     本轮验证项目
+│       │   │   ├── {op_name}_torch.py
+│       │   │   └── {op_name}_triton_ascend_impl.py
+│       │   └── log.md            #     本轮日志
+│       ├── iter_1/               #   第 1 轮迭代
+│       │   └── ...
+│       └── ...
+├── backup/                       # 被替换文件的原始副本
+└── report.md                     # 最终报告（Phase 5 产出）
 ```
 
 多任务时（融合模式），每个任务为独立子目录 `01_{name}/`、`02_{name}/` …，`report.md` 置于顶层汇总。
@@ -237,3 +243,6 @@ ${pwd}/triton_ascend_output/op_{op_name}_{timestamp}_{rid}/
 - 不备份就替换原代码 → 禁止
 - 生成失败后自行修复 → 禁止
 - 调用 skills / subagents 时，必须明确要求它们使用中文进行思考和分析
+- 确认点必须通过 `question` 工具调用 → 禁止用纯文本消息替代
+- 验证必须调用规定的脚本 → 禁止自创测试方法
+- Phase 2 任务文件必须通过 `validate_task.py` 验证且用户确认后才能进入 Phase 3

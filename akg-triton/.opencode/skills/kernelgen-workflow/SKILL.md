@@ -80,20 +80,10 @@ argument-hint: >
 
 1. **解析输入**：从主 Agent 传入的信息中提取所有参数
 2. **读取任务文件**：读取 task-file 内容，提取 `op_name`（从 Model 类或文件名推断）
-3. **创建输出目录**：
-   ```
-   {output-path}/
-   ├── generated_code.py       # 最终代码（持续更新为最新一轮）
-   ├── summary.json            # 执行摘要
-   ├── logs/                   # 日志
-   └── iterations/             # 每轮迭代快照
-       ├── iter_0/
-       ├── iter_1/
-       └── ...
-   ```
+3. **创建输出目录**：创建 `{output-path}/` 目录。迭代过程中按需创建子目录。
 4. **初始化状态**：
    - `iteration = 0`
-   - `max_iterations = 10`（或输入参数）
+   - `max_iterations = 5`（或输入参数）
    - `history_attempts = []`
    - `previous_code = ""`
    - `verifier_error = ""`
@@ -116,14 +106,19 @@ argument-hint: >
   - `conductor_suggestion`：Conductor 生成的修复建议
 
 **保存产物**：
-- 将生成的代码保存到 `{output-path}/iterations/iter_{iteration}/generated_code.py`
-- 同时更新 `{output-path}/generated_code.py`（始终为最新一轮）
+- 创建 `{output-path}/iter_{iteration}/` 目录
+- 将生成的代码保存到 `{output-path}/iter_{iteration}/generated_code.py`
+- 同时复制到 `{output-path}/generated_code.py`（始终为最新一轮）
 
 ---
 
-### Step 3: 代码验证
+### Step 3: 代码验证（⚠️ 必须严格按 kernel-verifier skill 执行）
 
-加载 `kernel-verifier` skill，按其指引验证生成的代码。
+加载 `kernel-verifier` skill，**严格按照其指引的三步流程**验证生成的代码：
+
+1. **创建验证项目**：在 `{output-path}/iter_{iteration}/verify/` 下创建 `{op_name}_torch.py` 和 `{op_name}_triton_ascend_impl.py`（每轮迭代的验证目录独立，不复用）
+2. **调用 `scripts/verify.py` 脚本**：使用 `bash` 工具执行 kernel-verifier skill 自带的验证脚本
+3. **收集结果**：根据脚本退出码和输出判断结果
 
 **传入参数**：
 - 任务文件路径：task-file
@@ -137,6 +132,11 @@ argument-hint: >
 **路由决策**：
 - **验证通过** → 直接进入 **Step 5（完成）**
 - **验证失败** → 进入 **Step 4（Conductor 分析）**
+
+**⛔ 禁止事项**：
+- 禁止自己编写测试代码替代 `scripts/verify.py`
+- 禁止使用 `torch.allclose` 或其他自创方法进行精度比较
+- 禁止不调用验证脚本就直接报告验证结果
 
 ---
 
@@ -166,7 +166,7 @@ argument-hint: >
 |------|------|
 | 文件路径错误 | FileNotFoundError、路径不存在 |
 | 编码错误 | UnicodeDecodeError |
-| 设备不可用 | CUDA out of memory、device not found |
+| 设备不可用 | NPU out of memory、device not found |
 | 依赖缺失 | ModuleNotFoundError（非代码导致的） |
 | 超时 | Timeout、进程被杀死 |
 | 配置错误 | 环境变量缺失、设备配置问题 |
@@ -251,7 +251,11 @@ history_attempts.append({
 iteration += 1
 ```
 
-同时将本轮详细日志保存到 `{output-path}/logs/iteration_{iteration}.log`。
+同时将本轮详细日志保存到 `{output-path}/iter_{iteration}/log.md`，内容包括：
+- 错误分类（A/B/C）
+- 完整的验证错误信息
+- 修复建议（如有）
+- 决策结果（重新生成 / 终止）
 
 **决策为"重新生成"** → 回到 **Step 2**
 **决策为"终止"** → 进入 **Step 5**
@@ -260,53 +264,51 @@ iteration += 1
 
 ### Step 5: 完成与输出
 
-#### 成功时
+无论成功还是失败，都**必须**执行以下操作：
 
-- 确保 `{output-path}/generated_code.py` 为最终通过验证的代码
-- 生成 `{output-path}/summary.json`：
+#### 5.1 确保最终代码
+
+- `{output-path}/generated_code.py` 必须存在，内容为最后一轮生成的代码
+
+#### 5.2 生成 summary.json
+
+使用 `write` 工具将以下内容写入 `{output-path}/summary.json`：
+
+**成功时**：
 
 ```json
 {
-  "subagent": "kernelgen-workflow",
   "success": true,
-  "iterations": 3,
-  "final_status": "success",
+  "iterations": 2,
+  "final_iteration": 1,
+  "error_history": [
+    {"iteration": 0, "error_type": "A", "error_message": "..."}
+  ]
+}
+```
+
+**失败时**：
+
+```json
+{
+  "success": false,
+  "iterations": 5,
+  "final_iteration": 4,
+  "failure_reason": "达到最大迭代次数",
   "error_history": [
     {"iteration": 0, "error_type": "A", "error_message": "..."},
     {"iteration": 1, "error_type": "A", "error_message": "..."}
   ],
-  "profile": {
-    "gen_time_us": 45.2,
-    "base_time_us": 89.5,
-    "speedup": 1.98
-  }
-}
-```
-
-#### 失败时
-
-- 保留最后一次生成的代码
-- 生成 `{output-path}/summary.json`：
-
-```json
-{
-  "subagent": "kernelgen-workflow",
-  "success": false,
-  "iterations": 5,
-  "final_status": "fail",
-  "failure_reason": "达到最大迭代次数",
-  "error_history": [...],
   "last_error": "..."
 }
 ```
 
-#### 最终报告
+#### 5.3 汇报结果
 
 向主 Agent 汇报执行结果，包括：
 - 是否成功
 - 总迭代次数
 - `generated_code.py` 路径
-- 性能数据（如有）
 - 失败原因（如有）
 
 ---
@@ -315,19 +317,27 @@ iteration += 1
 
 ```
 {output-path}/
-├── generated_code.py          # 最终生成的算子代码
-├── summary.json               # 执行摘要
-├── logs/                      # 日志
-│   ├── iteration_0.log
-│   ├── iteration_1.log
-│   └── ...
-└── iterations/                # 每轮迭代快照
-    ├── iter_0/
-    │   └── generated_code.py
-    ├── iter_1/
-    │   └── generated_code.py
-    └── ...
+├── generated_code.py          # 最终代码（始终为最新一轮的副本）
+├── summary.json               # 执行摘要（⚠️ 必须生成）
+├── iter_0/                    # 第 0 轮迭代
+│   ├── generated_code.py      # 本轮生成的代码
+│   ├── verify/                # 本轮验证项目（独立目录，不复用）
+│   │   ├── {op_name}_torch.py
+│   │   └── {op_name}_triton_ascend_impl.py
+│   └── log.md                 # 本轮日志（错误分类、建议、决策）
+├── iter_1/                    # 第 1 轮迭代
+│   ├── generated_code.py
+│   ├── verify/
+│   │   └── ...
+│   └── log.md
+└── ...
 ```
+
+**关键设计**：
+- 每轮迭代有独立的 `iter_{n}/` 目录，包含代码、验证项目、日志
+- 验证目录 `verify/` 在每轮迭代内，不会互相覆盖
+- 顶层 `generated_code.py` 始终是最新一轮的副本
+- `summary.json` 在所有迭代完成后写入
 
 ---
 

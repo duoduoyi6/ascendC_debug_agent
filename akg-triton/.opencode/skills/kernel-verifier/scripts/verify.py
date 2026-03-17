@@ -131,34 +131,22 @@ def verify_implementations(op_name, verify_dir):
     impl_module = __import__(f"{op_name}_triton_ascend_impl")
     ModelNew = impl_module.ModelNew
 
-    device = torch.device(
-        "npu" if hasattr(torch, "npu") and torch.npu.is_available()
-        else "cuda" if torch.cuda.is_available()
-        else "cpu"
-    )
+    import torch_npu  # noqa: F401
+    device = torch.device("npu")
 
     torch.manual_seed(0)
-    if device.type == "npu":
-        torch.npu.manual_seed(0)
-    elif device.type == "cuda":
-        torch.cuda.manual_seed(0)
+    torch.npu.manual_seed(0)
 
     init_params = get_init_inputs()
     framework_model = FrameworkModel(*init_params).to(device)
     impl_model = ModelNew(*init_params).to(device)
 
     torch.manual_seed(0)
-    if device.type == "npu":
-        torch.npu.manual_seed(0)
-    elif device.type == "cuda":
-        torch.cuda.manual_seed(0)
+    torch.npu.manual_seed(0)
     inputs_for_impl = [x.to(device) if isinstance(x, torch.Tensor) else x for x in get_inputs()]
 
     torch.manual_seed(0)
-    if device.type == "npu":
-        torch.npu.manual_seed(0)
-    elif device.type == "cuda":
-        torch.cuda.manual_seed(0)
+    torch.npu.manual_seed(0)
     inputs_for_framework = [x.to(device) if isinstance(x, torch.Tensor) else x for x in get_inputs()]
 
     with torch.no_grad():

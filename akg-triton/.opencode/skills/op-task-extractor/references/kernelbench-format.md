@@ -31,7 +31,9 @@ class Model(nn.Module):
 ```python
 def get_inputs():
     """返回 forward() 的输入参数列表"""
-    return [torch.randn(batch_size, dim)]
+    input1 = torch.randn(batch_size, dim)
+    input2 = torch.randn(batch_size, dim)
+    return [input1, input2]
 ```
 
 ### 4. `get_init_inputs()` 函数

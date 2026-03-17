@@ -52,40 +52,58 @@ argument-hint: >
 - 将所有依赖的自定义函数内联到文件中（禁止 import 外部模块）
 - 根据 shape/dtype 信息构建 `get_inputs()` 和 `get_init_inputs()`
 - 如果用户未提供 shape/dtype，从代码上下文推断合理默认值
-- 确保 `get_inputs()` 中的设备参数为 `device='cuda'`（或根据目标后端调整）
 
-### Step 4: 验证
+### Step 4: 验证（必须执行，禁止跳过）
 
-- 验证生成的 task_desc.py 是否符合 KernelBench 格式规范
-- 验证方法（使用 `bash` 工具执行）：
-  ```bash
-  python3 -c "
-  import importlib.util, torch, json
-  spec = importlib.util.spec_from_file_location('task', '/abs/path/task_desc.py')
-  mod = importlib.util.module_from_spec(spec)
-  spec.loader.exec_module(mod)
-  # 检查必需组件
-  assert hasattr(mod, 'Model'), 'Missing class Model'
-  assert hasattr(mod, 'get_inputs'), 'Missing function get_inputs'
-  assert hasattr(mod, 'get_init_inputs'), 'Missing function get_init_inputs'
-  # 检查可运行性
-  model = mod.Model(*mod.get_init_inputs())
-  inputs = mod.get_inputs()
-  output = model.forward(*inputs)
-  # 检查输出有效性
-  if isinstance(output, torch.Tensor):
-      assert not output.isnan().any(), 'Output contains NaN'
-      assert not output.isinf().any(), 'Output contains Inf'
-  print('Validation passed')
-  "
-  ```
-  将 `/abs/path/task_desc.py` 替换为实际的绝对路径。
-- 如果验证不通过，根据错误信息修复并重试（最多 2 次）
-- 如果验证通过，进入 Step 5 请求用户确认
+**使用本 skill 自带的验证脚本**进行静态检查和运行时检查。
 
-### Step 5: 用户确认
-- 使用 `question` 工具将完整的 task_desc.py 内容展示给用户，请求确认。
-- 若用户确认 task_desc 符合预期，算子提取任务完成，否则结合用户反馈返回 Step 3 重新生成。
+**验证命令**（使用 `bash` 工具执行）：
+
+```bash
+python3 <skill-path>/scripts/validate_task.py /abs/path/task_desc.py --json
+```
+
+其中 `<skill-path>` 为本 skill 所在目录的绝对路径。
+
+**验证脚本检查项**：
+1. **静态检查**：`class Model(nn.Module)`、`forward`、`get_inputs`、`get_init_inputs` 是否齐全
+2. **运行时检查**：`exec` → `Model(*get_init_inputs())` → `model(*get_inputs())` → NaN/Inf 检查 → 两次运行一致性检查
+
+**结果处理**：
+- 脚本退出码为 0 且输出 `[VALID]` → 验证通过，进入 Step 5
+- 脚本退出码非 0 且输出 `[INVALID]` → 根据错误信息修复代码，**重新运行验证脚本**（最多重试 2 次）
+- 重试 2 次仍失败 → 向用户报告错误，请求协助
+
+**⛔ 禁止事项**：
+- 禁止跳过验证直接进入 Step 5
+- 禁止用自创的方法替代验证脚本
+- 禁止仅做静态检查就认为验证通过（必须同时通过运行时检查）
+
+### Step 5: 用户确认（必须执行，禁止跳过）
+
+验证通过后，**必须使用 `question` 工具**将完整的 task_desc.py 内容展示给用户，请求确认。
+
+<展示任务代码内容>
+
+询问用户
+> 算子生成完成，请查看生成代码：
+>
+> 请选择：
+> 1. 接受
+> 2. <让用户输入修改要求>
+
+**具体要求**：
+- **必须调用 `question` 工具**，不能只打印文本让用户选择
+- 在 `question` 的描述中展示 task_desc.py 的完整内容
+- 提供"确认"和"需要修改"两个选项
+
+**处理回复**：
+- 用户确认 → 算子提取任务完成
+- 用户要求修改 → 结合用户反馈返回 Step 3 重新生成
+
+**⛔ 禁止事项**：
+- 禁止不经用户确认就结束此 skill
+- 禁止用普通文本消息替代 `question` 工具调用
 
 ---
 
@@ -129,7 +147,7 @@ class Model(nn.Module):
 def get_inputs():
     batch_size = 32
     in_features = 1024
-    return [torch.randn(batch_size, in_features, device='cuda')]
+    return [torch.randn(batch_size, in_features)]
 
 
 def get_init_inputs():

@@ -33,7 +33,7 @@ argument-hint: >
 
 ## Step 1: 创建验证项目
 
-在验证目录（如 `{output-path}/verify/`）下创建两个文件：
+在当前迭代的验证目录（如 `{output-path}/iter_{iteration}/verify/`）下创建两个文件：
 
 ### 文件 1: `{op_name}_torch.py`
 
@@ -45,13 +45,14 @@ argument-hint: >
 
 ---
 
-## Step 2: 执行验证
+## Step 2: 执行验证（⚠️ 必须使用本脚本，禁止自创测试方法）
 
-使用 `bash` 工具调用本 skill 自带的验证脚本：
+**必须使用** `bash` 工具调用本 skill 自带的 `scripts/verify.py` 脚本。
+
+**命令模板**：
 
 ```bash
-SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-python3 <skill-path>/scripts/verify.py \
+python3 <本skill所在目录的绝对路径>/scripts/verify.py \
     --op_name <算子名> \
     --verify_dir <验证目录> \
     --timeout 300
@@ -75,6 +76,11 @@ python3 /path/to/kernel-verifier/scripts/verify.py \
 | `--timeout` | 否 | 超时秒数，默认 300 |
 
 **超时设置**：默认 300 秒，复杂算子可适当增加。
+
+**⛔ 禁止事项**：
+- 禁止自己编写 Python 代码来测试算子（如手动 import 并 forward 比较）
+- 禁止使用 `torch.allclose` 或其他自创方法替代 `scripts/verify.py`
+- 禁止跳过此步骤直接报告验证结果
 
 ---
 
