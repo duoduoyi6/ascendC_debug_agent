@@ -19,6 +19,7 @@ tools:
 # Skills Registry
 skills:
   - op-task-extractor
+  - kernel-verifier
 
 # SubAgent Registry
 subagents:
