@@ -44,9 +44,9 @@ argument-hint: >
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `benchmark_path` | str | `/mnt/w00934874/agent/benchmark/KernelBench` | Benchmark 根目录 |
+| `benchmark_path` | str | `./benchmarks/KernelBench` | Benchmark 根目录 |
 | `output_root` | str | `./benchmark_results` | 输出根目录 |
-| `arch` | str | `ascend910b1` | 目标硬件架构 |
+| `arch` | str | `ascend910b2` | 目标硬件架构 |
 | `resume` | bool | `true` | 是否断点续跑 |
 | `timeout_per_task` | int | 2400 | 单任务超时（秒）|
 | `warmup` | int | 5 | 性能测试 warmup 次数 |
