@@ -197,7 +197,7 @@ skills:
 ---
 ```
 
-验证时将使用验证 skill 中的 `scripts/verify.py` 和 `scripts/benchmark.py`。
+验证时将使用 `kernel-verifier` skill 中的 `scripts/verify.py` 和 `scripts/benchmark.py`。
 
 ## 输出目录结构
 
@@ -340,11 +340,17 @@ def update_report_incrementally(task_result, report_path):
 
 ## Agent 要求
 
-**实现方式**：此 skill 调用 my-agent 流程，也可以调用 my-agent 的subagent。执行期间默认同意所有权限，有多个强制确认点（默认确认yes）
+**实现方式**：此 skill **直接调用 kernelgen-workflow subagent**，无需通过 AKG-triton primary agent。
+
+### 为什么直接调用 kernelgen-workflow？
+
+1. **非阻塞执行**：AKG-triton 是交互式 agent，有多个强制确认点（question 工具），无法自动化执行
+2. **效率更高**：跳过 AKG-triton 的编排层，直接执行代码生成和验证
+3. **结果一致**：kernelgen-workflow 内部已经包含完整的生成-验证-测试流程
 
 ### Agent 配置
 
-需要指定 my-agent（如果有subagent，也要保护 subagent 的工作目录）：
+需要指定 agent_workspace（包含 kernelgen-workflow 的工作目录）：
 
 ```markdown
 ---
@@ -368,7 +374,7 @@ opencode run --agent kernelgen-workflow "生成并验证算子代码..."
 ```
 benchmark-evaluator
     ↓
-调用 my-agent 或者 subagent
+直接调用 kernelgen-workflow subagent
     ↓
 内部执行：
     ├── 代码生成（code-generator skill）
