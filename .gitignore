@@ -2,3 +2,6 @@ node_modules
 package.json
 bun.lock
 benchmark_results/*
+benchmark_eval*
+kernel_meta/*
+__pycache__/*
