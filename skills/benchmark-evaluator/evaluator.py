@@ -34,7 +34,7 @@ class TaskConfig:
     agent_workspace: str
     level_problems: Dict[int, Optional[Any]]  # {level: [problem_ids] or None}
     benchmark_path: str = ""  # 空字符串表示自动推导: agent_workspace/KernelBench/KernelBench
-    output_root: str = "./benchmark_results"
+    output_path: str = ""  # 根输出目录的绝对路径，由 Agent 创建并传入
     arch: str = "ascend910b1"
     resume: bool = True
     timeout_per_task: int = 2400
@@ -144,7 +144,16 @@ class TaskScanner:
     
     @staticmethod
     def parse_problem_ids(problem_ids: Optional[Any]) -> Optional[List[int]]:
-        """解析 problem_ids 参数"""
+        """解析 problem_ids 参数
+        
+        支持格式:
+        - None: 表示全选
+        - List[int]: [1, 2, 3] 或 [20, 30]
+        - str: 
+            - JSON 列表: "[1, 2, 3]" 或 "[20, 30]"
+            - 范围格式: "1-10"
+            - 逗号分隔: "1,2,3"
+        """
         if problem_ids is None:
             return None
         
@@ -152,10 +161,19 @@ class TaskScanner:
             return problem_ids
         
         if isinstance(problem_ids, str):
+            # 尝试解析为 JSON 列表（处理 "[20,30]" 这种格式）
+            try:
+                parsed = json.loads(problem_ids)
+                if isinstance(parsed, list):
+                    return [int(x) for x in parsed]
+            except json.JSONDecodeError:
+                pass  # 不是 JSON 格式，继续其他解析
+            
             # 支持 "1-10" 或 "1,2,3" 格式
             result = []
             parts = problem_ids.split(',')
             for part in parts:
+                part = part.strip()
                 if '-' in part:
                     start, end = part.split('-')
                     result.extend(range(int(start), int(end) + 1))
@@ -808,13 +826,8 @@ class BenchmarkEvaluator:
     
     def __init__(self, config: TaskConfig):
         self.config = config
-        self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.run_id = f"run_{self.timestamp}"
-        self.output_dir = os.path.join(
-            config.output_root, 
-            self.run_id,
-            f"agent_{config.agent_name}"
-        )
+        # 直接使用传入的 output_path 作为根目录，不再创建 run_{timestamp}/agent_{agent_name}/ 层级
+        self.output_dir = config.output_path
         os.makedirs(self.output_dir, exist_ok=True)
         
         # 如果 benchmark_path 为空，自动推导
@@ -919,16 +932,41 @@ class BenchmarkEvaluator:
 
 def main():
     """主函数"""
-    # 示例配置 - 使用 agent workspace 内的 KernelBench
-    # 直接调用 kernelgen-workflow subagent
-    agent_workspace = "."
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Benchmark Evaluator for KernelBench')
+    parser.add_argument('--agent_name', type=str, required=True, help='Agent name')
+    parser.add_argument('--agent_workspace', type=str, required=True, help='Agent workspace path')
+    parser.add_argument('--level_problems', type=str, required=True, help='Level problems dict as JSON string')
+    parser.add_argument('--benchmark_path', type=str, default='', help='Benchmark path')
+    parser.add_argument('--arch', type=str, default='ascend910b1', help='Target architecture')
+    parser.add_argument('--npu_id', type=int, default=0, help='NPU device ID')
+    parser.add_argument('--output_path', type=str, required=True, help='Root output directory absolute path (created by Agent)')
+    parser.add_argument('--resume', type=bool, default=True, help='Resume from checkpoint')
+    parser.add_argument('--timeout_per_task', type=int, default=2400, help='Timeout per task in seconds')
+    parser.add_argument('--warmup', type=int, default=5, help='Warmup iterations')
+    parser.add_argument('--repeats', type=int, default=50, help='Performance test repeats')
+    
+    args = parser.parse_args()
+    
+    # Parse level_problems from JSON string
+    import json
+    level_problems = json.loads(args.level_problems)
+    
+    # Set NPU environment variable
+    os.environ['ASCEND_RT_VISIBLE_DEVICES'] = str(args.npu_id)
     
     config = TaskConfig(
         agent_name=args.agent_name,
         agent_workspace=args.agent_workspace,
         level_problems=level_problems,
-        # benchmark_path 留空，自动推导为 agent_workspace/KernelBench/KernelBench
-        arch=args.arch
+        benchmark_path=args.benchmark_path,
+        output_path=args.output_path,
+        arch=args.arch,
+        resume=args.resume,
+        timeout_per_task=args.timeout_per_task,
+        warmup=args.warmup,
+        repeats=args.repeats
     )
     
     evaluator = BenchmarkEvaluator(config)

@@ -85,7 +85,7 @@ argument-hint: >
 
 1. **解析输入**：从主 Agent 传入的信息中提取所有参数
 2. **读取任务文件**：读取 task-file 内容，提取 `op_name`（从 Model 类或文件名推断）
-3. **创建输出目录**：创建 `{output-path}/` 目录。迭代过程中按需创建子目录。
+3. **创建输出目录**：在 `{output-path}/` 目录中按需创建子目录。
 4. **初始化状态**：
    - `iteration = 0`
    - `max_iterations = 5`（或输入参数）
