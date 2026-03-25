@@ -162,7 +162,9 @@ argument-hint: >
 
 ### Step 5: 验证（⚠️ 必须严格按 kernel-verifier skill 执行）
 
-**⚠️ 核心要求：必须生成三种文件并进行两次精度比对**
+**⚠️ 核心要求**：
+- 三种文件仅需符合 KernelBench 格式，**不包含测试驱动代码**
+- 测试用例和测试驱动由 `kernel-verifier` skill 负责生成和执行
 
 加载 `kernel-verifier` skill，按其指引执行验证流程。
 
@@ -172,13 +174,15 @@ argument-hint: >
 
 | 文件 | 来源 | 说明 |
 |------|------|------|
-| `{op_name}_torch.py` | 来自 task-file-path | PyTorch 参考实现（用于精度基准） |
-| `{op_name}_triton_baseline.py` | 来自 code-file-path | 原始 Triton 实现 |
-| `{op_name}_triton_optimized.py` | 优化后的代码 | 优化后的 Triton 实现 |
+| `{op_name}_torch.py` | 来自 task-file-path | PyTorch 参考实现（用于精度基准，**仅需符合 KernelBench 格式，不包含测试驱动**） |
+| `{op_name}_triton_baseline.py` | 来自 code-file-path | 原始 Triton 实现（**仅需符合 KernelBench 格式，不包含测试驱动**） |
+| `{op_name}_triton_optimized.py` | 优化后的代码 | 优化后的 Triton 实现（**仅需符合 KernelBench 格式，不包含测试驱动**） |
+
+> ⚠️ **重要说明**：这三种文件仅需符合 KernelBench 格式即可，**不包含测试驱动代码**。测试驱动由 `kernel-verifier` skill 负责生成和执行。
 
 #### 两次精度比对
 
-调用 `kernel-verifier` skill 执行两次比对：
+调用 `kernel-verifier` skill 执行两次比对（**测试用例由 kernel-verifier skill 负责生成**）：
 
 1. **第一次比对**：PyTorch vs 原始 Triton
    - 比对文件：`{op_name}_torch.py` vs `{op_name}_triton_baseline.py`
@@ -381,7 +385,7 @@ python3 <kernel-verifier路径>/scripts/benchmark.py \
 **关键设计**：
 - 每轮迭代有独立的 `opt_iter_{n}/` 目录（与 kernelgen-workflow 的 `iter_{n}/` 区分）
 - 验证目录 `verify/` 在每轮迭代内独立
-- 验证目录包含三种文件：torch、triton_baseline、triton_optimized
+- 验证目录包含三种文件：torch、triton_baseline、triton_optimized（**仅需符合 KernelBench 格式，不包含测试驱动**）
 - 顶层 `optimized_code.py` 和 `perf_result.json` 始终是最佳结果的副本
 - `summary.json` 包含最终结果和性能数据
 
@@ -396,6 +400,7 @@ python3 <kernel-verifier路径>/scripts/benchmark.py \
 | 目标加速比 | 用户未指定时进行自动优化（无目标上限）；用户指定时需达到目标 |
 | 文件操作范围 | 所有文件操作限制在 output-path 内 |
 | 语言 | 所有思考、分析、日志必须使用中文 |
+| 文件格式 | verify/ 目录下的三种文件仅需符合 KernelBench 格式，**不包含测试驱动代码**（测试驱动由 kernel-verifier skill 负责） |
 
 ## 适用场景
 
