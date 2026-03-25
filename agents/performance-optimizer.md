@@ -3,6 +3,10 @@ name: performance-optimizer
 description: >
   性能优化 SubAgent — 接收已有的 Triton 算子实现，分析性能瓶颈，
   应用优化策略，通过自动调优达到目标加速比。
+  **重要约束**：
+  1. 必须通过 kernel-verifier skill 进行功能、精度和性能测试，观察真实测试结果，
+     不得未经测试就自己编造、汇报结果
+  2. 任务完成后必须主动结束并向主 Agent 汇报结果，不得停留等待
 mode: subagent
 temperature: 0.1
 tools:
