@@ -210,7 +210,7 @@ else：
 
 ### Phase 2: 执行性能优化
 
-1. 确定输出子目录：`<工作目录>/output/opt_{n}/`（n 为下一可用序号）
+1. 确定输出子目录：`<工作目录>/output/`（performance-optimizer 会自行创建 `opt_iter_{n}/` 子目录）
 
 2. **使用 `task` 工具调用 `performance-optimizer` SubAgent**：
 
@@ -222,7 +222,7 @@ else：
      subagent_type="performance-optimizer",
      load_skills=[],
      description="优化 {op_name} 算子性能",
-     prompt="任务文件路径: <工作目录>/{op_name}.py\n代码文件路径: {code-file-path}\n输出路径: <工作目录>/output/opt_{n}/\narch: {arch}\n目标加速比: {target-speedup}x\n框架: torch\n后端: ascend\nDSL: triton_ascend\nwarmup: 5\nrepeats: 50",
+     prompt="任务文件路径: <工作目录>/{op_name}.py\n代码文件路径: {code-file-path}\n输出路径: <工作目录>/output/\narch: {arch}\n目标加速比: {target-speedup}x\n框架: torch\n后端: ascend\nDSL: triton_ascend\nwarmup: 5\nrepeats: 50",
      run_in_background=false
    )
    ```
@@ -233,7 +233,7 @@ else：
      subagent_type="performance-optimizer",
      load_skills=[],
      description="优化 {op_name} 算子性能",
-     prompt="任务文件路径: <工作目录>/{op_name}.py\n代码文件路径: {code-file-path}\n输出路径: <工作目录>/output/opt_{n}/\narch: {arch}\n目标加速比: 无（自动优化）\n框架: torch\n后端: ascend\nDSL: triton_ascend\nwarmup: 5\nrepeats: 50",
+     prompt="任务文件路径: <工作目录>/{op_name}.py\n代码文件路径: {code-file-path}\n输出路径: <工作目录>/output/\narch: {arch}\n目标加速比: 无（自动优化）\n框架: torch\n后端: ascend\nDSL: triton_ascend\nwarmup: 5\nrepeats: 50",
      run_in_background=false
    )
    ```
@@ -355,21 +355,19 @@ ${pwd}/triton_ascend_output/op_{op_name}_{YYYYMMDD_HHMM}_{4位随机数}/
 
 ```
 ${pwd}/triton_ascend_output/opt_{op_name}_{timestamp}_{rid}/
+├── {op_name}.py                    # PyTorch 版本任务描述（Phase 1 产出，仅用于精度比对）
 ├── {op_name}_original.py          # 用户提供的原始代码（Phase 1 备份）
 ├── {op_name}_optimized.py        # 用户接受的优化后算子代码（Phase 3 产出）
-├── output/                       # 优化器运行输出
-│   └── opt_0/                   # 第 1 次运行优化器
-│       ├── optimized_code.py      #   优化后的代码（最新一轮副本）
-│       ├── summary.json          #   执行摘要
-│       ├── iter_0/               #   第 0 轮迭代
-│       │   ├── optimized_code.py #     本轮优化后的代码
-│       │   ├── verify/           #     本轮验证项目
-│       │   │   ├── {op_name}_torch.py
-│       │   │   └── {op_name}_triton_ascend_impl.py
-│       │   ├── log.md            #     本轮日志
-│       │   └── perf_result.json  #     本轮性能报告
-│       ├── iter_1/               #   第 1 轮迭代
-│       │   └── ...
+├── output/                       # performance-optimizer 运行输出
+│   └── opt_iter_0/              # 第 0 轮优化迭代
+│       ├── optimized_code.py      #   本轮优化后的代码
+│       ├── verify/               #   本轮验证目录
+│       │   ├── {op_name}_torch.py
+│       │   ├── {op_name}_triton_baseline.py
+│       │   └── {op_name}_triton_optimized.py
+│       ├── log.md                #   本轮日志
+│       └── perf_result.json      #   本轮性能报告
+│   └── opt_iter_1/              # 第 1 轮优化迭代
 │       └── ...
 └── report.md                     # 最终报告（Phase 4 产出）
 ```

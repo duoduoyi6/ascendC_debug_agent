@@ -48,31 +48,36 @@ argument-hint: >
                              ↓
            ┌─────────────────────────────────┐
            │ 5. 验证 (kernel-verifier)       │ ← skill
+           │  生成三种文件，执行两次比对        │
+           │  - PyTorch vs 原始 Triton        │
+           │  - PyTorch vs 优化 Triton        │
            └─────────────────┬───────────────┘
                        ┌─────┴─────┐
                        ↓           ↓
-                    [通过]      [失败]
+                   [两次都通过]  [任一失败]
                        ↓           ↓
-    ┌────────────────────────┐  ┌───────────────────────┐
-    │ 6. 自动调优             │  │ 7. 分析决策            │
-    │ (latency-optimizer)    │  └───────────┬───────────┘
-    └────────────────┬───────┘              ┌─────┴─────┐
-                     ↓                      ↓           ↓
-              ┌──────────┐            [重新优化]    [终止]
-              │ 8. 性能评估 │                 ↓           ↓
-              └─────┬──────┘           (回到步骤2)  ┌──────────┐
-                    ↓                         │ 9. 完成   │
-           ┌────────┴────────┐                  └──────────┘
-           ↓                 ↓
-      [达标]            [未达标]
-           ↓                 ↓
-     ┌──────────┐    ┌───────────────┐
-     │ 9. 完成  │    │ 继续自动调优   │
-     └──────────┘    │ 或重新优化     │
-                     └───────┬───────┘
-                             ↓
-                      (回到步骤6)
+           ┌────────────────────┐  ┌───────────────────────┐
+           │ 6. 性能评估          │  │ 8. 分析决策            │
+           │ (latency-optimizer) │  └───────────┬───────────┘
+           └─────────┬──────────┘              ┌─────┴─────┐
+                     ↓                        ↓           ↓
+           ┌─────────────────────┐    [重新优化]      [终止]
+           │ 7. 性能结果判定       │         ↓
+           └─────────┬─────────────┘    (回到步骤2)
+                     ↓
+          ┌──────────┴──────────┐
+          ↓                      ↓
+     [终止条件满足]        [继续优化]
+          ↓                      ↓
+    ┌──────────┐         ┌───────────────┐
+    │ 9. 完成  │         │ 回到步骤2      │
+    └──────────┘         └───────────────┘
 ```
+
+**⚠️ 关键说明**：
+- Step 5 验证阶段必须生成三种文件（PyTorch、原始 Triton、优化 Triton）并执行两次比对
+- Step 6 性能评估对比的是**原始 Triton vs 优化 Triton**的耗时
+- 两次比对都通过后才能进入性能评估
 
 ## 输入参数
 
@@ -149,8 +154,8 @@ argument-hint: >
 应用优化策略重写算子代码。
 
 **保存产物**：
-- 创建 `{output-path}/iter_{iteration}/` 目录
-- 将优化后的代码保存到 `{output-path}/iter_{iteration}/optimized_code.py`
+- 创建 `{output-path}/opt_iter_{iteration}/` 目录
+- 将优化后的代码保存到 `{output-path}/opt_iter_{iteration}/optimized_code.py`
 - 同时复制到 `{output-path}/optimized_code.py`（始终为最新一轮）
 
 ---
@@ -163,7 +168,7 @@ argument-hint: >
 
 #### 三种文件
 
-在 `{output-path}/iter_{iteration}/verify/` 目录下，验证阶段需要生成三种文件：
+在 `{output-path}/opt_iter_{iteration}/verify/` 目录下，验证阶段需要生成三种文件：
 
 | 文件 | 来源 | 说明 |
 |------|------|------|
@@ -198,35 +203,31 @@ argument-hint: >
 
 ---
 
-### Step 6: 自动调优
+### Step 6: 性能评估
 
-使用 `latency-optimizer` skill 进行参数自动调优。
+**⚠️ 性能效果计算基准：原始 Triton vs 优化 Triton**
 
-**调优参数**：
-- BLOCK_SIZE（块大小）
-- num_stages（流水线阶段数）
-- split_k（分割维度）
-- 其他算子特定参数
+使用 `latency-optimizer` skill 进行性能评估。
+
+**评估指标**：
+- `speedup_vs_torch`：优化 Triton 相比 PyTorch 原生的加速比
+- `speedup_vs_baseline`：**优化 Triton 相比原始 Triton 的加速比**（核心指标）
 
 **调用 benchmark**：
 ```bash
 python3 <kernel-verifier路径>/scripts/benchmark.py \
     --op_name <op_name> \
-    --verify_dir {output-path}/iter_{iteration}/verify/ \
+    --verify_dir {output-path}/opt_iter_{iteration}/verify/ \
     --warmup <warmup> \
     --repeats <repeats> \
-    --output {output-path}/iter_{iteration}/perf_result.json
+    --output {output-path}/opt_iter_{iteration}/perf_result.json
 ```
+
+**⚠️ 注意**：性能评估必须基于**原始 Triton 算子耗时 vs 优化 Triton 算子耗时**的对比，而不是与 PyTorch 的对比。
 
 ---
 
-### Step 7: 性能评估
-
-收集性能结果，判断是否达到目标加速比。
-
-**评估指标**：
-- `speedup_vs_torch`：相比 PyTorch 原生的加速比
-- `speedup_vs_baseline`：相比优化前版本的加速比
+### Step 7: 性能结果判定
 
 **终止条件（满足任一条件即终止）**：
 1. **用户指定了目标加速比且已达到**：当 `speedup_vs_torch >= target_speedup` 时，优化成功终止
@@ -250,9 +251,11 @@ python3 <kernel-verifier路径>/scripts/benchmark.py \
 
 ---
 
-### Step 8: 分析决策（验证失败或优化未达标时执行）
+### Step 8: 分析决策（验证失败时执行）
 
-分析失败原因，制定下一轮优化策略。
+分析验证失败原因，制定下一轮优化策略。
+
+**⚠️ 注意**：验证（Step 5）失败才进入此步骤，性能评估（Step 6）在验证通过后才执行。
 
 #### 错误分类
 
@@ -279,7 +282,7 @@ python3 <kernel-verifier路径>/scripts/benchmark.py \
    → 如果是 B 类：终止
    → 如果是 C 类：终止
 
-2. 优化未达标（Step 7 评估未达标）
+2. 验证通过但优化未达标（Step 6/7）
    → 分析不出优化点 → 终止（保留最佳结果）
    → iteration >= max_iterations → 终止（保留最佳结果）
    → 否则继续优化
@@ -358,14 +361,15 @@ python3 <kernel-verifier路径>/scripts/benchmark.py \
 ├── optimized_code.py        # 最终优化代码（最佳结果）
 ├── summary.json              # 执行摘要（⚠️ 必须生成）
 ├── perf_result.json         # 最新一轮性能报告
-├── iter_0/                  # 第 0 轮迭代
+├── opt_iter_0/              # 第 0 轮迭代
 │   ├── optimized_code.py    # 本轮优化后的代码
 │   ├── verify/              # 本轮验证目录
 │   │   ├── {op_name}_torch.py
-│   │   └── {op_name}_triton_ascend_impl.py
+│   │   ├── {op_name}_triton_baseline.py
+│   │   └── {op_name}_triton_optimized.py
 │   ├── log.md                # 本轮日志
 │   └── perf_result.json      # 本轮性能报告
-├── iter_1/                   # 第 1 轮迭代
+├── opt_iter_1/              # 第 1 轮迭代
 │   ├── optimized_code.py
 │   ├── verify/
 │   │   └── ...
@@ -375,8 +379,9 @@ python3 <kernel-verifier路径>/scripts/benchmark.py \
 ```
 
 **关键设计**：
-- 每轮迭代有独立的 `iter_{n}/` 目录
+- 每轮迭代有独立的 `opt_iter_{n}/` 目录（与 kernelgen-workflow 的 `iter_{n}/` 区分）
 - 验证目录 `verify/` 在每轮迭代内独立
+- 验证目录包含三种文件：torch、triton_baseline、triton_optimized
 - 顶层 `optimized_code.py` 和 `perf_result.json` 始终是最佳结果的副本
 - `summary.json` 包含最终结果和性能数据
 
