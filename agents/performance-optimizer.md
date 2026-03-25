@@ -157,15 +157,44 @@ argument-hint: >
 
 ### Step 5: 验证（⚠️ 必须严格按 kernel-verifier skill 执行）
 
-加载 `kernel-verifier` skill，验证优化后的代码正确性。
+**⚠️ 核心要求：必须生成三种文件并进行两次精度比对**
 
-**⚠️ 重要约束**：
-- 优化后的代码必须保持与原始实现的**功能一致性**
-- 验证不通过时，**不能**进入自动调优步骤
+加载 `kernel-verifier` skill，按其指引执行验证流程。
 
-**路由决策**：
-- **验证通过** → 进入 **Step 6（自动调优）**
-- **验证失败** → 进入 **Step 7（分析决策）**
+#### 三种文件
+
+在 `{output-path}/iter_{iteration}/verify/` 目录下，验证阶段需要生成三种文件：
+
+| 文件 | 来源 | 说明 |
+|------|------|------|
+| `{op_name}_torch.py` | 来自 task-file-path | PyTorch 参考实现（用于精度基准） |
+| `{op_name}_triton_baseline.py` | 来自 code-file-path | 原始 Triton 实现 |
+| `{op_name}_triton_optimized.py` | 优化后的代码 | 优化后的 Triton 实现 |
+
+#### 两次精度比对
+
+调用 `kernel-verifier` skill 执行两次比对：
+
+1. **第一次比对**：PyTorch vs 原始 Triton
+   - 比对文件：`{op_name}_torch.py` vs `{op_name}_triton_baseline.py`
+   - 目的：验证原始 Triton 实现与 PyTorch 参考实现的精度一致性
+   - **必须通过**，否则原始实现本身有问题
+
+2. **第二次比对**：PyTorch vs 优化 Triton
+   - 比对文件：`{op_name}_torch.py` vs `{op_name}_triton_optimized.py`
+   - 目的：验证优化后的 Triton 实现与 PyTorch 参考实现的精度一致性
+   - **必须通过**，否则优化引入了精度问题
+
+#### 验证约束
+
+- **两次比对都必须通过**，才能进入 Step 6（性能评估）
+- 验证不通过时，**不能**进入性能评估步骤
+- 性能效果计算：**原始 Triton 算子耗时 vs 优化 Triton 算子耗时**
+
+#### 路由决策
+
+- **两次比对都通过** → 进入 **Step 6（性能评估）**
+- **任一比对失败** → 进入 **Step 7（分析决策）**
 
 ---
 
