@@ -41,7 +41,7 @@ subagents:
 | `level_problems` | dict | 评测范围 | `{1: [1,2], 2: null}` | Agent |
 | `arch` | str | 硬件架构 | `"ascend910b2"` | **Agent 检测后传入** |
 | `npu_id` | int | NPU 设备 ID | `0` | **Agent 选择后传入** |
-| `output_path` | str | **根输出目录的绝对路径** | `"/root/.opencode/benchmark_results/triton-ascend_20250324_103000_1234"` | **Agent 创建并传入** |
+| `output_path` | str | **根输出目录的绝对路径** | `"/root/.opencode/benchmark_results/triton-ascend_20250325_1659_3847"` | **Agent 创建并传入** |
 
 ### 可选参数
 
@@ -136,7 +136,7 @@ mkdir -p {output_path}/level_{level}/{problem_id}_{op_name}
 ```
 task(
   subagent_type="kernelgen-workflow",
-  load_skills=[],
+  load_skills=["code-generator", "kernel-verifier"],
   description="评测 Level{level} Problem{problem_id} {op_name} 算子",
   prompt="任务文件路径: {task_file}\n输出路径: {output_path}/level_{level}/{problem_id}_{op_name}/\narch: {arch}\n框架: torch\n后端: ascend\nDSL: triton_ascend\nwarmup: {warmup}\nrepeats: {repeats}\n\n请直接执行生成和验证流程。",
   run_in_background=false
@@ -145,7 +145,7 @@ task(
 
 **参数说明**：
 - `subagent_type`: 固定为 `kernelgen-workflow`
-- `load_skills`: 传 `[]`，SubAgent 会自行加载 `code-generator` 和 `kernel-verifier` skill
+- `load_skills`: 传 `["code-generator", "kernel-verifier"]`，显式加载 SubAgent 所需 skill
 - `run_in_background`: 设为 `false`，同步等待完成
 
 #### Step 3: 收集结果
@@ -247,13 +247,14 @@ Skill 在传入的 `output_path` 目录下创建任务子目录：
 {output_path}/                                      ← 由 Agent 创建并传入
 ├── level_{n}/                                      ← Skill 创建
 │   └── {problem_id}_{op_name}/                     ← Skill 创建
-│       ├── generated_code.py                       ← kernelgen-workflow 输出
+│       ├── generated_code.py                       ← 最终验证通过的代码（仅验证通过时存在）
 │       ├── summary.json                            ← kernelgen-workflow 输出
-│       ├── perf_result.json                        ← kernelgen-workflow 输出（验证通过时）
-│       └── iter_{n}/                               ← kernelgen-workflow 各轮迭代
+│       ├── perf_result.json                        ← 最终性能报告（仅验证通过时存在）
+│       └── iter_{n}/                               ← 各轮迭代（iter_0 始终存在）
 │           ├── generated_code.py
 │           ├── verify/
-│           └── log.md
+│           ├── log.md
+│           └── perf_result.json                    ← 本轮性能报告（仅本轮验证通过时）
 └── ...
 ```
 
