@@ -128,7 +128,6 @@ else：
   **性能测试参数**（可选）：
   - `warmup`: 性能测试 warmup 次数（默认 5）
   - `repeats`: 性能测试正式运行次数（默认 50）
-  ```
 
   **参数说明**：
   - `subagent_type`: 固定为 `kernelgen-workflow`
@@ -178,9 +177,9 @@ else：
 使用 `question` 工具请用户确认以下参数：
 - **arch**: 硬件架构（如 `ascend910b4`、`ascend910b2` 等）
 - **code-file-path**: 已有 Triton 算子代码文件的**绝对路径**
-- **target-speedup**: 目标加速比（默认 1.5x）
+- **target-speedup**: 目标加速比（**用户未指定时默认不设置**，由 performance-optimizer 自动优化）
 
-### Phase 1: 构建任务描述代码
+### Phase 1: 生成精度比对基准
 
 加载 `op-task-extractor` skill，按其指引从用户提供的代码文件中提取算子实现，构建 KernelBench 格式的任务描述文件。
 
@@ -188,6 +187,7 @@ else：
 - op-task-extractor 会将用户提供的 Triton 算子代码转换为 KernelBench 格式
 - 转换后的任务文件包含 `Model` 类（基线 Triton 实现）、`get_inputs()`、`get_init_inputs()`
 - 转换过程中**不会修改原始算子的计算逻辑**，只改变文件格式结构
+- 该任务文件**仅用于精度比对**，不参与性能优化流程
 
 产出一个通过验证的、用户确认的 `{op_name}.py`（KernelBench 格式），保存到 `<工作目录>/{op_name}.py`。
 
@@ -199,13 +199,24 @@ else：
 
    ⚠️ **必须使用 `task` 工具**
 
-   调用格式：
+   **调用格式（用户指定了目标加速比时）**：
    ```
    task(
      subagent_type="performance-optimizer",
      load_skills=[],
      description="优化 {op_name} 算子性能",
      prompt="任务文件路径: <工作目录>/{op_name}.py\n代码文件路径: {code-file-path}\n输出路径: <工作目录>/output/opt_{n}/\narch: {arch}\n目标加速比: {target-speedup}x\n框架: torch\n后端: ascend\nDSL: triton_ascend\nwarmup: 5\nrepeats: 50",
+     run_in_background=false
+   )
+   ```
+
+   **调用格式（用户未指定目标加速比时，默认自动优化）**：
+   ```
+   task(
+     subagent_type="performance-optimizer",
+     load_skills=[],
+     description="优化 {op_name} 算子性能",
+     prompt="任务文件路径: <工作目录>/{op_name}.py\n代码文件路径: {code-file-path}\n输出路径: <工作目录>/output/opt_{n}/\narch: {arch}\n目标加速比: 无（自动优化）\n框架: torch\n后端: ascend\nDSL: triton_ascend\nwarmup: 5\nrepeats: 50",
      run_in_background=false
    )
    ```
@@ -226,13 +237,22 @@ else：
 
 1. 展示 optimized_code.py 内容
 2. 展示性能对比数据（优化前 vs 优化后）
-3. 询问用户：
-   > 性能优化完成，目标加速比 {target-speedup}x，实际达到 {achieved_speedup}x
-   >
-   > 请选择：
-   > 1. 接受
-   > 2. 继续优化（增加迭代次数）
-   > 3. 放弃
+
+**用户指定了目标加速比时**，询问用户：
+> 性能优化完成，目标加速比 {target-speedup}x，实际达到 {achieved_speedup}x
+>
+> 请选择：
+> 1. 接受
+> 2. 继续优化（增加迭代次数）
+> 3. 放弃
+
+**用户未指定目标加速比（自动优化）时**，询问用户：
+> 性能优化完成，实际加速比 {achieved_speedup}x
+>
+> 请选择：
+> 1. 接受
+> 2. 继续优化（增加迭代次数）
+> 3. 放弃
 
 **处理回复**：
 - **接受** → 进入 Phase 4
@@ -267,7 +287,7 @@ else：
 
 | 节点 | 阶段 |
 |------|------|
-| 参数确认 | Phase 0 — arch + code-file-path + target-speedup |
+| 参数确认 | Phase 0 — arch + code-file-path + target-speedup（可选） |
 | 任务文件确认 | Phase 1 — `{op_name}.py` 必须展示并确认，确认前禁止 Phase 2 |
 | 优化结果确认 | Phase 3 — 展示 `optimized_code.py` 和性能数据，用户选择接受/继续优化/放弃 |
 

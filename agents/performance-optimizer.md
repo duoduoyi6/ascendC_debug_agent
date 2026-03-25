@@ -15,8 +15,8 @@ skills:
   - latency-optimizer
   - kernel-verifier
 argument-hint: >
-  必需：task-file-path、code-file-path、arch、output-path、target-speedup（默认1.5）。
-  可选：warmup、repeats、max-iterations。
+  必需：task-file-path、code-file-path、arch、output-path。
+  可选：target-speedup（用户未指定时不设置，进行自动优化）、warmup、repeats、max-iterations。
   固定参数：framework=torch、backend=ascend、dsl=triton_ascend。
 ---
 
@@ -84,12 +84,14 @@ argument-hint: >
 | code-file-path | 是 | 原始 Triton 算子代码文件的**绝对路径** |
 | arch | 是 | 硬件架构（如 `ascend910b4`、`ascend910b2` 等） |
 | output-path | 是 | 输出目录的**绝对路径** |
-| target-speedup | 否 | 目标加速比（默认 1.5） |
+| target-speedup | 否 | 目标加速比（用户未指定时进行自动优化，不设置目标） |
 | warmup | 否 | 性能测试 warmup 次数（默认 5） |
 | repeats | 否 | 性能测试正式运行次数（默认 50） |
 | max-iterations | 否 | 最大优化迭代次数（默认 5） |
 
 > **固定参数**：`framework=torch`、`backend=ascend`、`dsl=triton_ascend`，无需传入。
+>
+> **关于 target-speedup**：用户未指定时，agent 将进行自动优化，直到达到迭代上限或分析不出优化点为止。
 
 ---
 
@@ -106,7 +108,7 @@ argument-hint: >
    - `max_iterations = 5`（或输入参数）
    - `warmup = 5`（或输入参数）
    - `repeats = 50`（或输入参数）
-   - `target_speedup = 1.5`（或输入参数）
+   - `target_speedup = None`（用户未指定时为 None，此时进行自动优化）
    - `history_attempts = []`
    - `current_code = ""`（当前优化的代码）
    - `best_code = ""`（最佳优化结果）
@@ -197,15 +199,23 @@ python3 <kernel-verifier路径>/scripts/benchmark.py \
 - `speedup_vs_torch`：相比 PyTorch 原生的加速比
 - `speedup_vs_baseline`：相比优化前版本的加速比
 
+**终止条件（满足任一条件即终止）**：
+1. **用户指定了目标加速比且已达到**：当 `speedup_vs_torch >= target_speedup` 时，优化成功终止
+2. **分析不出优化点**：latency-optimizer 分析认为没有更多优化空间
+3. **达到优化迭代次数上限**：`iteration >= max_iterations`
+
 **决策逻辑**：
 ```
-1. speedup_vs_torch >= target_speedup
+1. 用户指定了目标加速比且 speedup_vs_torch >= target_speedup
    → 优化成功，终止
 
-2. iteration >= max_iterations
-   → 达到最大迭代次数，保留最佳结果，终止
+2. 分析不出优化点（latency-optimizer 报告无可优化点）
+   → 终止，保留最佳结果
 
-3. speedup_vs_torch < target_speedup 且 iteration < max_iterations
+3. iteration >= max_iterations
+   → 达到最大迭代次数，终止，保留最佳结果
+
+4. 用户未指定目标加速比且以上条件均未满足
    → 继续优化，回到 Step 2
 ```
 
@@ -227,6 +237,10 @@ python3 <kernel-verifier路径>/scripts/benchmark.py \
 - 超时
 - 依赖缺失
 
+**C 类：无法继续优化**
+- latency-optimizer 分析认为没有更多优化空间
+- 所有可尝试的优化策略均已应用
+
 #### 决策逻辑
 
 ```
@@ -234,8 +248,10 @@ python3 <kernel-verifier路径>/scripts/benchmark.py \
    → 分析错误类型
    → 如果是 A 类：回退到上一版代码，调整优化策略
    → 如果是 B 类：终止
+   → 如果是 C 类：终止
 
 2. 优化未达标（Step 7 评估未达标）
+   → 分析不出优化点 → 终止（保留最佳结果）
    → iteration >= max_iterations → 终止（保留最佳结果）
    → 否则继续优化
 ```
@@ -343,7 +359,7 @@ python3 <kernel-verifier路径>/scripts/benchmark.py \
 |------|------|
 | 最大迭代次数 | 默认 5，可通过参数调整 |
 | 功能一致性 | 优化后的代码必须通过验证，保持功能一致 |
-| 目标加速比 | 默认 1.5x，可通过参数指定 |
+| 目标加速比 | 用户未指定时进行自动优化（无目标上限）；用户指定时需达到目标 |
 | 文件操作范围 | 所有文件操作限制在 output-path 内 |
 | 语言 | 所有思考、分析、日志必须使用中文 |
 
