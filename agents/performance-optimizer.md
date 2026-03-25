@@ -79,8 +79,11 @@ argument-hint: >
 ```
 
 **⚠️ 关键说明**：
-- Step 5 验证阶段必须生成三种文件（PyTorch、原始 Triton、优化 Triton）并执行两次比对
-- Step 6 性能评估对比的是**原始 Triton vs 优化 Triton**的耗时
+- Step 5 验证阶段需要生成三种文件（PyTorch、原始 Triton、优化 Triton）并执行两次 PyTorch vs Triton 比对
+- 由于 kernel-verifier skill 没有直接对比 triton vs triton 的接口，通过以下方式间接获取优化效果：
+  1. **第一次比对**：PyTorch vs 原始 Triton → 获取基线 triton 算子性能
+  2. **第二次比对**：PyTorch vs 优化 Triton → 获取优化后 triton 算子性能
+  3. **性能对比**：将两次比对的数值进行对比，即可得出优化效果
 - 两次比对都通过后才能进入性能评估
 
 ## 输入参数
@@ -213,13 +216,18 @@ argument-hint: >
 
 ### Step 6: 性能评估
 
-**⚠️ 性能效果计算基准：原始 Triton vs 优化 Triton**
+**⚠️ 性能效果计算方式：通过两次 PyTorch vs Triton 比对间接获取**
+
+由于 kernel-verifier skill 没有直接对比 triton vs triton 的接口，性能效果通过以下方式间接获取：
+1. **第一次比对**：PyTorch vs 原始 Triton → 记录基线 triton 算子性能（latency）
+2. **第二次比对**：PyTorch vs 优化 Triton → 记录优化后 triton 算子性能（latency）
+3. **性能对比**：将两次比对的 latency 数值进行对比，计算得出优化效果
 
 使用 `latency-optimizer` skill 进行性能评估。
 
 **评估指标**：
 - `speedup_vs_torch`：优化 Triton 相比 PyTorch 原生的加速比
-- `speedup_vs_baseline`：**优化 Triton 相比原始 Triton 的加速比**（核心指标）
+- `speedup_vs_baseline`：**优化 Triton 相比原始 Triton 的加速比**（核心指标，通过上述两次比对间接计算得出）
 
 **调用 benchmark**：
 ```bash
@@ -231,7 +239,7 @@ python3 <kernel-verifier路径>/scripts/benchmark.py \
     --output {output-path}/opt_iter_{iteration}/perf_result.json
 ```
 
-**⚠️ 注意**：性能评估必须基于**原始 Triton 算子耗时 vs 优化 Triton 算子耗时**的对比，而不是与 PyTorch 的对比。
+**⚠️ 注意**：性能评估通过 **PyTorch vs 原始 Triton** 和 **PyTorch vs 优化 Triton** 两次比对间接实现，而非直接对比 triton vs triton。
 
 ---
 
