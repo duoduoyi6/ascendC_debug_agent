@@ -98,8 +98,18 @@ else：
 
 ### Phase 0: 参数确认
 
-推断以下参数，使用 `question` 工具请用户确认：
-- **arch**: 硬件架构（如 `ascend910b4`、`ascend910b2` 等）
+**必须逐个询问，每个问题提供选项或允许用户自由描述，禁止一次性询问多个参数。**
+
+**第一步**：询问硬件架构
+
+使用 `question` 工具询问用户：
+
+> 请选择硬件架构，或描述您的硬件型号：
+> 1. ascend910b4
+> 2. ascend910b2
+> 3. 其他（请描述）
+
+确认 **arch** 后，进入下一步。
 
 ### Phase 1: 构建任务描述代码
 
@@ -174,10 +184,33 @@ else：
 
 ### Phase 0: 参数确认
 
-使用 `question` 工具请用户确认以下参数：
-- **arch**: 硬件架构（如 `ascend910b4`、`ascend910b2` 等）
-- **code-file-path**: 已有 Triton 算子代码文件的**绝对路径**
-- **target-speedup**: 目标加速比（**用户未指定时默认不设置**，由 performance-optimizer 自动优化）
+**必须逐个询问，每个问题提供选项或允许用户自由描述，禁止一次性询问多个参数。**
+
+**第一步**：询问硬件架构
+
+使用 `question` 工具询问用户：
+
+> 请选择硬件架构，或描述您的硬件型号：
+> 1. ascend910b4
+> 2. ascend910b2
+> 3. 其他（请描述）
+
+确认 **arch** 后，进入下一步。
+
+**第二步**：确认代码文件路径
+
+如果用户在上下文中已提供 Triton 算子代码路径 → 使用 `question` 工具请用户确认：
+
+> 请确认代码文件路径：
+> `{code-file-path}`
+
+如果用户没有提供路径 → 输出"未提供代码文件路径，无法进行性能优化"，任务直接结束。
+
+**第三步**：目标加速比
+
+如果用户在原始请求中已经指定了目标加速比 → 直接使用用户指定的值，无需再询问。
+
+如果用户没有主动提及 → 跳过此步骤，`target-speedup` 留空，由 `performance-optimizer` 自动优化。
 
 ### Phase 1: 生成精度比对基准（PyTorch 版本）
 
@@ -435,6 +468,8 @@ ${pwd}/triton_ascend_output/opt_{op_name}_{timestamp}_{rid}/
 - 必须在继续前验证每个阶段
 - 不能跳过流水线阶段
 - 只能使用注册的 skills / subagents
+- **禁止主agent自己生成算子代码** → 算子代码生成必须通过 `kernelgen-workflow` subagent 完成，主agent只负责编排和协调
+- **禁止主agent自己优化算子代码** → 性能优化必须通过 `performance-optimizer` subagent 完成，主agent只负责编排和协调
 - 调用 `kernelgen-workflow` 必须使用 `task` 工具 → 禁止使用 `call_omo_agent` 或编造不存在的工具
 - 调用 `performance-optimizer` 必须使用 `task` 工具 → 禁止使用 `call_omo_agent` 或编造不存在的工具
 - 不展示任务文件就生成 → 禁止
