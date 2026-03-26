@@ -118,7 +118,7 @@ def compare(fw_out, impl_out, limit, data_type):
         raise AssertionError(error_msg)
 
 
-def verify_implementations(op_name, verify_dir):
+def verify_implementations(op_name, verify_dir, triton_impl_name="triton_ascend_impl"):
     """验证框架实现和生成实现的结果一致性"""
     import torch
     sys.path.insert(0, verify_dir)
@@ -128,7 +128,7 @@ def verify_implementations(op_name, verify_dir):
     get_inputs = torch_module.get_inputs
     get_init_inputs = torch_module.get_init_inputs
 
-    impl_module = __import__(f"{op_name}_triton_ascend_impl")
+    impl_module = __import__(f"{op_name}_{triton_impl_name}")
     ModelNew = impl_module.ModelNew
 
     import torch_npu  # noqa: F401
@@ -193,6 +193,10 @@ if __name__ == "__main__":
     )
     parser.add_argument("--timeout", type=int, default=300, help="超时秒数（默认 300）")
     parser.add_argument(
+        "--triton_impl_name", default="triton_ascend_impl",
+        help="Triton 实现模块名（不含 op_name 前缀，默认 triton_ascend_impl）",
+    )
+    parser.add_argument(
         "--_run", action="store_true",
         help=argparse.SUPPRESS,  # 内部参数：子进程模式，直接执行验证
     )
@@ -206,7 +210,7 @@ if __name__ == "__main__":
     if args._run:
         # 子进程模式：直接执行验证逻辑
         try:
-            verify_implementations(args.op_name, verify_dir)
+            verify_implementations(args.op_name, verify_dir, args.triton_impl_name)
         except Exception as e:
             print(f"{e}", file=sys.stderr)
             sys.exit(1)
@@ -216,6 +220,7 @@ if __name__ == "__main__":
             sys.executable, os.path.abspath(__file__),
             "--op_name", args.op_name,
             "--verify_dir", verify_dir,
+            "--triton_impl_name", args.triton_impl_name,
             "--_run",
         ]
         try:

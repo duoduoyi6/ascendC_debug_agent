@@ -195,11 +195,29 @@ argument-hint: >
    - 比对文件：`{op_name}_torch.py` vs `{op_name}_triton_baseline.py`
    - 目的：验证原始 Triton 实现与 PyTorch 参考实现的精度一致性
    - **必须通过**，否则原始实现本身有问题
+   - **调用命令**：
+   ```bash
+   python3 <kernel-verifier路径>/scripts/verify.py \
+       --op_name <op_name> \
+       --verify_dir <验证目录> \
+       --triton_impl_name triton_baseline \
+       --timeout 300
+   ```
 
 2. **第二次比对**：PyTorch vs 优化 Triton
    - 比对文件：`{op_name}_torch.py` vs `{op_name}_triton_optimized.py`
    - 目的：验证优化后的 Triton 实现与 PyTorch 参考实现的精度一致性
    - **必须通过**，否则优化引入了精度问题
+   - **调用命令**：
+   ```bash
+   python3 <kernel-verifier路径>/scripts/verify.py \
+       --op_name <op_name> \
+       --verify_dir <验证目录> \
+       --triton_impl_name triton_optimized \
+       --timeout 300
+   ```
+
+> **参数说明**：`--triton_impl_name` 指定 Triton 实现模块名（不含 `{op_name}_` 前缀），默认值为 `triton_ascend_impl`。performance optimizer 生成的文件使用 `triton_baseline` 和 `triton_optimized`，因此需要显式指定。
 
 #### 验证约束
 
@@ -230,14 +248,32 @@ argument-hint: >
 - `speedup_vs_baseline`：**优化 Triton 相比原始 Triton 的加速比**（核心指标，通过上述两次比对间接计算得出）
 
 **调用 benchmark**：
+
+由于需要分别获取 baseline 和 optimized 的性能数据，需执行两次 benchmark：
+
+1. **第一次 benchmark**：获取原始 Triton 性能
 ```bash
 python3 <kernel-verifier路径>/scripts/benchmark.py \
     --op_name <op_name> \
-    --verify_dir {output-path}/opt_iter_{iteration}/verify/ \
+    --verify_dir <验证目录> \
+    --triton_impl_name triton_baseline \
     --warmup <warmup> \
     --repeats <repeats> \
-    --output {output-path}/opt_iter_{iteration}/perf_result.json
+    --output {output-path}/opt_iter_{iteration}/baseline_perf_result.json
 ```
+
+2. **第二次 benchmark**：获取优化后 Triton 性能
+```bash
+python3 <kernel-verifier路径>/scripts/benchmark.py \
+    --op_name <op_name> \
+    --verify_dir <验证目录> \
+    --triton_impl_name triton_optimized \
+    --warmup <warmup> \
+    --repeats <repeats> \
+    --output {output-path}/opt_iter_{iteration}/optimized_perf_result.json
+```
+
+> **注意**：两次 benchmark 的 `--triton_impl_name` 参数分别指定为 `triton_baseline` 和 `triton_optimized`，以匹配 verify 目录下的文件名。
 
 **⚠️ 注意**：性能评估通过 **PyTorch vs 原始 Triton** 和 **PyTorch vs 优化 Triton** 两次比对间接实现，而非直接对比 triton vs triton。
 

@@ -20,7 +20,7 @@ import time
 import statistics
 
 
-def benchmark_implementations(op_name, verify_dir, warmup=5, repeats=50):
+def benchmark_implementations(op_name, verify_dir, triton_impl_name="triton_ascend_impl", warmup=5, repeats=50):
     """测试框架实现和生成实现的性能"""
     import torch
     import torch_npu  # noqa: F401
@@ -33,7 +33,7 @@ def benchmark_implementations(op_name, verify_dir, warmup=5, repeats=50):
     get_inputs = torch_module.get_inputs
     get_init_inputs = torch_module.get_init_inputs
     
-    impl_module = __import__(f"{op_name}_triton_ascend_impl")
+    impl_module = __import__(f"{op_name}_{triton_impl_name}")
     ModelNew = impl_module.ModelNew
     
     device = torch.device("npu")
@@ -139,6 +139,10 @@ def main():
     parser = argparse.ArgumentParser(description="性能测试脚本")
     parser.add_argument("--op_name", required=True, help="算子名称")
     parser.add_argument("--verify_dir", default=".", help="验证目录路径（默认当前目录）")
+    parser.add_argument(
+        "--triton_impl_name", default="triton_ascend_impl",
+        help="Triton 实现模块名（不含 op_name 前缀，默认 triton_ascend_impl）",
+    )
     parser.add_argument("--warmup", type=int, default=5, help="warmup 次数（默认 5）")
     parser.add_argument("--repeats", type=int, default=50, help="正式测试次数（默认 50）")
     parser.add_argument("--output", help="输出文件路径（JSON 格式）")
@@ -153,6 +157,7 @@ def main():
         result = benchmark_implementations(
             args.op_name, 
             verify_dir, 
+            triton_impl_name=args.triton_impl_name,
             warmup=args.warmup, 
             repeats=args.repeats
         )
