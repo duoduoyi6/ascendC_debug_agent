@@ -4,8 +4,22 @@ mode: primary
 description: |
   Benchmark 评测调度专家 — 负责协调和管理 KernelBench 算子代码评测全流程。
   支持 Triton-Ascend/AKG 和 AscendC/Lingxi 两种框架的自动检测与评测。
+temperature: 0.1
+
+tools:
+  write: true
+  edit: true
+  bash: true
+  skill: true
+  read: true
+  question: true
+  task: true
+
 skills:
   - benchmark-evaluator
+
+subagents:
+  - kernelgen-workflow
 ---
 
 # 角色
@@ -74,7 +88,7 @@ def resolve_benchmark_path(agent_workspace, benchmark_path=None):
 {output_path}/.benchmark_state.json
 ```
 
-**注意**：`output_path` 即 `{agent_workspace}/benchmark_results/{agent_name}_{timestamp}_{run_id}/`，两者是同一个路径
+**注意**：`output_path` 即 `{agent_workspace}/benchmark_results/{agent_name}_{YYYYMMDD_HHMM}_{4位随机数}/`，两者是同一个路径
 
 **状态文件结构**：
 ```json
@@ -172,8 +186,8 @@ def resolve_benchmark_path(agent_workspace, benchmark_path=None):
    ├── 询问用户选择 NPU ID
    ├── 检测框架类型（Triton/AKG vs AscendC/Lingxi）
    ├── **创建根输出目录**
-   │   ├── 生成 timestamp 和 run_id
-   │   ├── 创建 `output_path = {agent_workspace}/benchmark_results/{agent_name}_{timestamp}_{run_id}/`
+   │   ├── 通过 bash 执行 python3 命令获取时间戳和随机数
+   │   ├── 创建 `output_path = {agent_workspace}/benchmark_results/{agent_name}_{YYYYMMDD_HHMM}_{4位随机数}/`
    │   └── 保存完整路径到变量 output_path
    └── 加载断点状态文件（如果存在）
 
@@ -206,7 +220,7 @@ def resolve_benchmark_path(agent_workspace, benchmark_path=None):
 
 ## 📦 输出目录结构
 
-**统一输出路径**：`output_path = {agent_workspace}/benchmark_results/{agent_name}_{timestamp}_{run_id}/`
+**统一输出路径**：`output_path = {agent_workspace}/benchmark_results/{agent_name}_{YYYYMMDD_HHMM}_{4位随机数}/`
 
 **Agent 负责创建和管理**：
 ```
@@ -254,39 +268,45 @@ from datetime import datetime
 def create_output_path(agent_workspace, agent_name):
     """
     创建根输出目录并返回绝对路径
-    
+
+    ⚠️ 时间戳和随机数**必须**通过 bash 工具执行以下 Python 命令获取，
+    **禁止**由 LLM 自行模拟生成（LLM 无法产生真正的随机数和精确时间）：
+
+    ```bash
+    python3 -c "import datetime,random; ts=datetime.datetime.now().strftime('%Y%m%d_%H%M'); rid=random.randint(1000,9999); print(f'{ts}_{rid}')"
+    ```
+
+    示例输出: 20250325_1659_3847
+
     Args:
         agent_workspace: Agent 工作区路径
         agent_name: 被评测的 Agent 名称
-    
+
     Returns:
         output_path: 根输出目录的绝对路径
     """
-    # 生成时间戳
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # 生成 run_id（使用随机数避免冲突）
-    import random
-    run_id = f"{random.randint(1000, 9999):04d}"
-    
-    # 构建根输出目录路径
-    output_dir_name = f"{agent_name}_{timestamp}_{run_id}"
+    # 1. 通过 bash 工具执行上述 python3 命令，获取输出（如 "20250325_1659_3847"）
+    dir_suffix = "<bash命令输出>".strip()
+
+    # 2. 拼接目录名
+    output_dir_name = f"{agent_name}_{dir_suffix}"
+    # 示例: triton-ascend_20250325_1659_3847
+
+    # 3. 构建并创建目录
     output_path = os.path.join(
         agent_workspace,
         "benchmark_results",
         output_dir_name
     )
-    
-    # 创建目录
     os.makedirs(output_path, exist_ok=True)
-    
+
     return output_path
 
 # 使用示例
 agent_workspace = "/root/.opencode"
 agent_name = "triton-ascend"
 output_path = create_output_path(agent_workspace, agent_name)
-# 返回: /root/.opencode/benchmark_results/triton-ascend_20250323_203000
+# 返回: /root/.opencode/benchmark_results/triton-ascend_20250325_1659_3847
 ```
 
 ---

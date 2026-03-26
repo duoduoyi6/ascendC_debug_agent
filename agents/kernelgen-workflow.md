@@ -85,7 +85,9 @@ argument-hint: >
 
 1. **解析输入**：从主 Agent 传入的信息中提取所有参数
 2. **读取任务文件**：读取 task-file 内容，提取 `op_name`（从 Model 类或文件名推断）
-3. **创建输出目录**：在 `{output-path}/` 目录中按需创建子目录。
+3. **创建输出目录**：
+   - 执行 `mkdir -p {output-path}/iter_0/`
+   - 即使只有一次迭代（首次就成功），`iter_0/` 目录也**必须**存在
 4. **初始化状态**：
    - `iteration = 0`
    - `max_iterations = 5`（或输入参数）
@@ -162,9 +164,9 @@ class ModelNew(nn.Module):
 - **如果上一轮退化成 PyTorch**：在 `conductor_suggestion` 中明确指出"代码退化成 PyTorch，必须重写为 Triton kernel"
 
 **保存产物**：
-- 创建 `{output-path}/iter_{iteration}/` 目录
+- 创建 `{output-path}/iter_{iteration}/` 目录（如不存在）
 - 将生成的代码保存到 `{output-path}/iter_{iteration}/generated_code.py`
-- 同时复制到 `{output-path}/generated_code.py`（始终为最新一轮）
+- **不在此步复制到根目录**（由 Step 3 验证通过后决定）
 
 ---
 
@@ -211,8 +213,12 @@ class ModelNew(nn.Module):
 - `verifier_error`：str（完整错误信息，包含错误类型、位置、详情）
 
 **路由决策**：
-- **验证通过** → 进入 **Step 5（性能测试）**
-- **验证失败** → 进入 **Step 4（Conductor 分析）**
+- **验证通过**：
+  1. 将 `{output-path}/iter_{iteration}/generated_code.py` 复制到 `{output-path}/generated_code.py`
+  2. 进入 **Step 5（性能测试）**
+- **验证失败**：
+  1. 若 `{output-path}/generated_code.py` 已存在，则**删除它**（确保根目录不残留未通过验证的代码）
+  2. 进入 **Step 4（Conductor 分析）**
 
 **⛔ 禁止事项**：
 - 禁止自己编写测试代码替代 `scripts/verify.py`
@@ -276,7 +282,7 @@ class ModelNew(nn.Module):
 
 | 特征 | 判断方式 |
 |------|---------|
-| 连续相同错误 | 查看 `history_attempts`，相同错误类型连续出现 ≥ 2 次 |
+| 连续相同错误 | 查看 `history_attempts`，相同错误类型连续出现 ≥ 3 次 |
 | 修复无效 | 每次建议类似但问题依然存在 |
 
 → **应终止**，避免无限循环
@@ -383,8 +389,9 @@ iteration += 1
    - 从 `{output-path}/iter_{iteration}/perf_result.json` 读取性能数据
    - 保存到 `perf_data` 变量
 
-3. **复制性能报告**：
-   - 将 `perf_result.json` 复制到 `{output-path}/perf_result.json`（最新一轮）
+3. **复制性能报告到根目录**：
+   - `cp {output-path}/iter_{iteration}/perf_result.json {output-path}/perf_result.json`
+   - 根目录的 `perf_result.json` 始终对应最后一次验证通过的迭代
 
 **性能指标**：
 
@@ -406,9 +413,15 @@ iteration += 1
 
 无论成功还是失败，都**必须**执行以下操作：
 
-#### 6.1 确保最终代码
+#### 6.1 确认最终产物
 
-- `{output-path}/generated_code.py` 必须存在，内容为最后一轮生成的代码
+**成功时**（至少有一轮验证通过）：
+- `{output-path}/generated_code.py` 必须存在（已在 Step 3 验证通过时复制）
+- `{output-path}/perf_result.json` 必须存在（已在 Step 5 复制）
+
+**失败时**（所有迭代均验证失败）：
+- `{output-path}/generated_code.py` **不应存在**（已在 Step 3 验证失败时删除）
+- `{output-path}/perf_result.json` **不应存在**
 
 #### 6.2 生成 summary.json
 
@@ -466,29 +479,31 @@ iteration += 1
 
 ```
 {output-path}/
-├── generated_code.py          # 最终代码（始终为最新一轮的副本）
+├── generated_code.py          # 最终验证通过的代码（仅验证通过时存在）
 ├── summary.json               # 执行摘要（⚠️ 必须生成）
-├── perf_result.json           # 最新一轮性能报告（验证通过时）
-├── iter_0/                    # 第 0 轮迭代
+├── perf_result.json           # 最终验证通过的性能报告（仅验证通过时存在）
+├── iter_0/                    # 第 0 轮迭代（即使只有一次迭代也必须存在）
 │   ├── generated_code.py      # 本轮生成的代码
 │   ├── verify/                # 本轮验证项目（独立目录，不复用）
 │   │   ├── {op_name}_torch.py
 │   │   └── {op_name}_triton_ascend_impl.py
 │   ├── log.md                 # 本轮日志（错误分类、建议、决策）
-│   └── perf_result.json       # 本轮性能报告（验证通过时）
-├── iter_1/                    # 第 1 轮迭代
+│   └── perf_result.json       # 本轮性能报告（仅本轮验证通过时存在）
+├── iter_1/                    # 第 1 轮迭代（如有）
 │   ├── generated_code.py
 │   ├── verify/
 │   │   └── ...
 │   ├── log.md
-│   └── perf_result.json
+│   └── perf_result.json       # 仅本轮验证通过时存在
 └── ...
 ```
 
 **关键设计**：
+- 即使只有一次迭代（首次就成功），`iter_0/` 也**必须**存在
 - 每轮迭代有独立的 `iter_{n}/` 目录，包含代码、验证项目、日志、性能报告
 - 验证目录 `verify/` 在每轮迭代内，不会互相覆盖
-- 顶层 `generated_code.py` 和 `perf_result.json` 始终是最新一轮的副本
+- 顶层 `generated_code.py` 和 `perf_result.json` 仅在验证通过时存在，为最后一次验证通过的迭代的副本
+- 若所有迭代均失败，根目录**不包含** `generated_code.py` 和 `perf_result.json`
 - `summary.json` 在所有迭代完成后写入，包含聚合的性能数据
 
 ---
