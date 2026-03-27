@@ -151,15 +151,68 @@ def resolve_benchmark_path(agent_workspace, benchmark_path=None):
 **报告生成**：
 - 文件路径：`{output_path}/agent_report.md`
 - 生成时机：每次收到 Skill 返回的任务结果后**增量更新**
-- 报告内容：
-  - 执行摘要（时间、硬件、评测范围）
-  - 总体统计（编译成功率、正确率、加速比）
-  - 按算子类型统计
-  - 编译失败列表
-  - 数值验证失败列表
-  - 性能劣化列表
-  - 详细结果表
-  - 异常任务重试记录
+- 报告格式：
+
+```markdown
+# Benchmark 评测报告
+
+- Agent: {agent_name}
+- 时间: {timestamp}
+- 硬件: {arch}, NPU {npu_id}
+- 评测范围: {level_problems}
+
+## 总体统计
+
+- 总任务数: {total}
+- 成功任务数: {success_count}/{total}
+- 精度正确: {accuracy_pass_count}/{total}
+- 平均加速比: {avg_speedup}x
+- 性能达标率(≥0.6x): {perf_06_count}/{total_with_perf} ({perf_06_rate}%)
+- 性能达标率(≥0.8x): {perf_08_count}/{total_with_perf} ({perf_08_rate}%)
+
+## 详细结果
+
+| Level | Problem ID | 算子名称 | 算子类型 | 参考性能(us) | 实际triton代码性能(us) | 加速比 | 最终状态 | 精度正确 | 性能0.6x | 性能0.8x |
+|-------|-----------|---------|---------|------------|---------------------|-------|---------|---------|---------|---------|
+| 1 | 11 | 11_4D_xxxxxx | vector | 4.00 | 3.00 | 1.33x | 成功 | 是 | 是 | 是 |
+| 1 | 22 | 22_softmax | vector | 2.00 | 3.00 | 0.67x | 成功 | 是 | 是 | 否 |
+| 1 | 3 | 3_conv2d | cube | - | - | - | 失败 | - | - | - |
+| 2 | 5 | 5_fused_op | cv融合 | 5.00 | 4.00 | 1.25x | 成功 | 是 | 是 | 是 |
+
+## 失败任务分析
+
+### Problem {problem_id}: {算子名称}
+- **迭代次数**: {iterations}
+- **迭代详情**:
+  - 迭代 0: [{error_type}] {error_message}
+  - 迭代 1: [{error_type}] {error_message}
+
+（对每个失败任务列出上述信息，数据来自 `eval_result.json` → `error_history`）
+
+## 建议
+
+Agent 根据统计结果自动生成，包括但不限于：
+- 各算子类型（vector/cube/cv融合）成功率对比
+- 常见失败模式（error_type 分布）
+- 性能达标情况分析（≥0.6x 和 ≥0.8x 达标率）
+- 针对性的改进建议
+```
+
+**字段取值规则**：
+
+| 字段 | 数据来源 | 说明 |
+|------|---------|------|
+| Level | `eval_result.json` → `level` | Level 编号 |
+| Problem ID | `eval_result.json` → `problem_id` | 题目编号 |
+| 算子名称 | 原始任务文件名（如 `1_matrix_multiplication.py`） | 保留 `{id}_{name}.py` 完整格式 |
+| 算子类型 | `eval_result.json` → `op_type` | 由 `classify_op_type(level, problem_id)` 分类：Level 1 中 Problem ID 19-53、88-100 为 `vector`，1-18、54-87 为 `cube`，其余所有为 `cv融合` |
+| 参考性能(us) | `eval_result.json` → `perf_data.framework_avg_latency_ms` × 1000 | 转为微秒；无数据填 `-` |
+| 实际triton代码性能(us) | `eval_result.json` → `perf_data.implementation_avg_latency_ms` × 1000 | 转为微秒；无数据填 `-` |
+| 加速比 | `eval_result.json` → `perf_data.speedup_vs_torch` | 格式 `{value}x`；无性能数据则 `-` |
+| 最终状态 | `eval_result.json` → `status` | 成功 → `成功`；失败 → `失败` |
+| 精度正确 | `eval_result.json` → `verify_passed` | `是` 或 `否`；无数据填 `-` |
+| 性能0.6x | `speedup_vs_torch >= 0.6` | `是` 或 `否`；无性能数据填 `-` |
+| 性能0.8x | `speedup_vs_torch >= 0.8` | `是` 或 `否`；无性能数据填 `-` |
 
 ### 6. 异常重试策略
 

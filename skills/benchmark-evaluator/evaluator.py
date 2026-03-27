@@ -150,22 +150,20 @@ class TaskScanner:
         }
 
     @staticmethod
-    def classify_op_type(op_name: str) -> str:
-        """分类算子类型"""
-        op_name_lower = op_name.lower()
+    def classify_op_type(op_name: str, level: int = 0, problem_id: int = 0) -> str:
+        """分类算子类型：vector / cube / cv融合
 
-        if any(kw in op_name_lower for kw in ['matmul', 'bmm', 'linear', 'gemm']):
-            return 'matmul'
-        elif any(kw in op_name_lower for kw in ['conv']):
-            return 'conv'
-        elif any(kw in op_name_lower for kw in ['softmax', 'layernorm', 'batchnorm', 'sum', 'mean', 'max', 'min']):
-            return 'reduce'
-        elif any(kw in op_name_lower for kw in ['attention', 'mha', 'sdpa']):
-            return 'attention'
-        elif any(kw in op_name_lower for kw in ['add', 'mul', 'sub', 'div', 'relu', 'sigmoid', 'tanh', 'gelu', 'silu']):
-            return 'elementwise'
-        else:
-            return 'other'
+        分类规则：
+        - Level 1, Problem ID 19-53 或 88-100: vector
+        - Level 1, Problem ID 1-18 或 54-87: cube
+        - 其他所有情况: cv融合
+        """
+        if level == 1:
+            if (19 <= problem_id <= 53) or (88 <= problem_id <= 100):
+                return 'vector'
+            elif (1 <= problem_id <= 18) or (54 <= problem_id <= 87):
+                return 'cube'
+        return 'cv融合'
 
 
 # ============================================================
@@ -261,9 +259,10 @@ def save_task_result(
     level: int,
     problem_id: int,
     op_name: str,
-    summary_json_path: str
+    summary_json_path: str,
+    task_file: str = ""
 ) -> Dict[str, Any]:
-    """从 kernelgen-workflow 的 summary.json 提取结果并保存结构化数据
+    """从 kernelgen-workflow 的 summary.json 和 perf_result.json 提取结果并保存结构化数据
 
     Args:
         output_path: 根输出目录
@@ -271,23 +270,31 @@ def save_task_result(
         problem_id: Problem ID
         op_name: 算子名称
         summary_json_path: kernelgen-workflow 输出的 summary.json 路径
+        task_file: 原始任务文件名（如 1_matrix_multiplication.py）
 
     Returns:
         结构化的任务结果
     """
     task_dir = os.path.join(output_path, f"level_{level}", f"{problem_id}_{op_name}")
-    op_type = TaskScanner.classify_op_type(op_name)
+    op_type = TaskScanner.classify_op_type(op_name, level, problem_id)
+
+    # 如果未传入 task_file，使用默认格式
+    if not task_file:
+        task_file = f"{problem_id}_{op_name}.py"
 
     result = {
         "level": level,
         "problem_id": problem_id,
         "op_name": op_name,
+        "task_file": os.path.basename(task_file),
         "op_type": op_type,
         "status": "failed",
         "iterations": 0,
+        "compile_passed": False,
         "verify_passed": False,
         "perf_data": None,
         "failure_reason": None,
+        "error_history": [],
         "output_path": task_dir,
         "timestamp": datetime.now().isoformat()
     }
@@ -300,13 +307,50 @@ def save_task_result(
 
             result["iterations"] = summary.get("iterations", 0)
 
+            # 保存每次迭代的错误记录，用于失败任务分析
+            error_history = summary.get("error_history", [])
+            result["error_history"] = error_history
+
+            # 判断编译是否通过：如果 success=True，编译必然通过；
+            # 如果失败，检查 error_history 中是否有非编译错误（说明编译曾通过）
+            error_history = summary.get("error_history", [])
             if summary.get("success", False):
                 result["status"] = "success"
+                result["compile_passed"] = True
                 result["verify_passed"] = True
                 result["perf_data"] = summary.get("perf_data")
             else:
                 result["status"] = "failed"
                 result["failure_reason"] = summary.get("failure_reason", summary.get("last_error", "未知错误"))
+                # 如果有非编译类型错误，说明编译曾经通过
+                compile_error_types = {"A", "compile", "compilation"}
+                non_compile_errors = [e for e in error_history
+                                      if e.get("error_type", "").upper() not in {"A"}]
+                if non_compile_errors:
+                    result["compile_passed"] = True
+
+            # 读取 perf_result.json 获取详细延迟数据
+            perf_result_path = os.path.join(task_dir, "perf_result.json")
+            if os.path.exists(perf_result_path):
+                try:
+                    with open(perf_result_path, 'r', encoding='utf-8') as f:
+                        perf = json.load(f)
+
+                    framework_latency = None
+                    impl_latency = None
+
+                    if "framework" in perf and perf["framework"]:
+                        framework_latency = perf["framework"].get("avg_latency_ms")
+                    if "implementation" in perf and perf["implementation"]:
+                        impl_latency = perf["implementation"].get("avg_latency_ms")
+
+                    result["perf_data"] = {
+                        "framework_avg_latency_ms": framework_latency,
+                        "implementation_avg_latency_ms": impl_latency,
+                        "speedup_vs_torch": perf.get("speedup_vs_torch")
+                    }
+                except Exception as e:
+                    logger.warning(f"读取 perf_result.json 失败: {perf_result_path}: {e}")
 
         except Exception as e:
             result["failure_reason"] = f"读取 summary.json 失败: {e}"
@@ -368,6 +412,11 @@ def generate_summary(output_path: str, agent_name: str) -> Dict[str, Any]:
         if r.get("perf_data") and r["perf_data"].get("speedup_vs_torch"):
             speedups.append(r["perf_data"]["speedup_vs_torch"])
 
+    # 性能达标率统计
+    perf_06_count = sum(1 for s in speedups if s >= 0.6)
+    perf_08_count = sum(1 for s in speedups if s >= 0.8)
+    accuracy_pass_count = sum(1 for r in results if r.get("verify_passed"))
+
     summary = {
         "agent_name": agent_name,
         "timestamp": datetime.now().isoformat(),
@@ -375,7 +424,11 @@ def generate_summary(output_path: str, agent_name: str) -> Dict[str, Any]:
         "completed_tasks": success,
         "failed_tasks": failed,
         "timeout_tasks": timeout,
+        "accuracy_pass_count": accuracy_pass_count,
         "avg_speedup": round(sum(speedups) / len(speedups), 2) if speedups else 0,
+        "total_with_perf": len(speedups),
+        "perf_06_count": perf_06_count,
+        "perf_08_count": perf_08_count,
         "results": results
     }
 
@@ -419,7 +472,8 @@ def cmd_save_result(args):
         level=args.level,
         problem_id=args.problem_id,
         op_name=args.op_name,
-        summary_json_path=args.summary_json
+        summary_json_path=args.summary_json,
+        task_file=args.task_file or ""
     )
 
     print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -464,6 +518,7 @@ def main():
     p_save.add_argument('--problem_id', type=int, required=True, help='Problem ID')
     p_save.add_argument('--op_name', required=True, help='算子名称')
     p_save.add_argument('--summary_json', required=True, help='kernelgen-workflow 输出的 summary.json 路径')
+    p_save.add_argument('--task_file', default=None, help='原始任务文件名（如 1_matrix_multiplication.py）')
     p_save.set_defaults(func=cmd_save_result)
 
     # --- summary ---
