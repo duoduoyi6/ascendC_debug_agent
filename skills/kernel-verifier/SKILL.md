@@ -60,6 +60,7 @@ argument-hint: >
 python3 <本skill所在目录的绝对路径>/scripts/verify.py \
     --op_name <算子名> \
     --verify_dir <验证目录> \
+    --triton_impl_name <triton实现模块名> \
     --timeout 300
 ```
 
@@ -69,6 +70,7 @@ python3 <本skill所在目录的绝对路径>/scripts/verify.py \
 python3 /path/to/kernel-verifier/scripts/verify.py \
     --op_name softmax \
     --verify_dir /tmp/workspace/softmax/verify \
+    --triton_impl_name triton_ascend_impl \
     --timeout 300
 ```
 
@@ -78,6 +80,7 @@ python3 /path/to/kernel-verifier/scripts/verify.py \
 |------|------|------|
 | `--op_name` | 是 | 算子名称，与文件名前缀对应 |
 | `--verify_dir` | 否 | 验证目录路径，默认当前目录 |
+| `--triton_impl_name` | 否 | Triton 实现模块名（不含 `{op_name}_` 前缀），默认 `triton_ascend_impl` |
 | `--timeout` | 否 | 超时秒数，默认 300 |
 
 **超时设置**：默认 300 秒，复杂算子可适当增加。
@@ -129,6 +132,7 @@ python3 /path/to/kernel-verifier/scripts/verify.py \
 python3 <本skill所在目录的绝对路径>/scripts/benchmark.py \
     --op_name <算子名> \
     --verify_dir <验证目录> \
+    --triton_impl_name <triton实现模块名> \
     --warmup <warmup次数> \
     --repeats <测试次数> \
     --output <输出文件路径>
@@ -139,7 +143,8 @@ python3 <本skill所在目录的绝对路径>/scripts/benchmark.py \
 ```bash
 python3 /path/to/kernel-verifier/scripts/benchmark.py \
     --op_name softmax \
-    --verify_dir /tmp/workspace/softmax/iter_0/verify \
+    --verify_dir /tmp/workspace/softmax/verify \
+    --triton_impl_name triton_ascend_impl \
     --warmup 5 \
     --repeats 50 \
     --output /tmp/workspace/softmax/iter_0/perf_result.json
@@ -153,6 +158,7 @@ python3 /path/to/kernel-verifier/scripts/benchmark.py \
 |------|------|------|
 | `--op_name` | 是 | 算子名称 |
 | `--verify_dir` | 否 | 验证目录路径，默认当前目录 |
+| `--triton_impl_name` | 否 | Triton 实现模块名（不含 `{op_name}_` 前缀），默认 `triton_ascend_impl` |
 | `--warmup` | 否 | warmup 次数，默认 5 |
 | `--repeats` | 否 | 正式测试次数，默认 50 |
 | `--output` | 否 | 性能报告输出路径（JSON 格式）|
@@ -231,5 +237,5 @@ python3 /path/to/kernel-verifier/scripts/benchmark.py \
 | `scripts/benchmark.py` | 测试性能 |
 
 **CLI 参数**：
-- `verify.py`: `--op_name`, `--verify_dir`, `--timeout`
-- `benchmark.py`: `--op_name`, `--verify_dir`, `--warmup`, `--repeats`, `--output`
+- `verify.py`: `--op_name`, `--verify_dir`, `--triton_impl_name`, `--timeout`
+- `benchmark.py`: `--op_name`, `--verify_dir`, `--triton_impl_name`, `--warmup`, `--repeats`, `--output`
