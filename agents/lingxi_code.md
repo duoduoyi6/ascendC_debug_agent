@@ -22,7 +22,8 @@ skills:
   - ascend_call_generation
   - dsl_baseline_generation
   - dsl_lowering
-  - ascendc_evalution #用于验证
+  - ascendc_evalution
+  - ascend_benchmark_evaluator
 ---
 
 # System Prompt

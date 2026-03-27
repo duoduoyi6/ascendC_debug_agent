@@ -4,29 +4,37 @@
 
 [中文](README.md) | English
 
-**AscendOpGenAgent** is an automated operator generation and evaluation framework for Ascend NPUs. Based on Triton, this project automatically generates and verifies high-performance operator code, aiming to significantly improve the efficiency and quality of operator development on the Ascend architecture.
+**AscendOpGenAgent** is an automated operator generation and evaluation framework for Ascend NPUs. Based on Triton/AscendC, this project automatically generates and verifies high-performance operator code, aiming to significantly improve the efficiency and quality of operator development on the Ascend architecture.
 
 ## Table of Contents
 
-- [Core Features](#core-features)
-- [Quick Start](#quick-start)
-  - [1. Prerequisites](#1-prerequisites)
-  - [2. Installation & Configuration](#2-installation--configuration)
-  - [3. Usage Scenarios](#3-usage-scenarios)
-    - [Scenario 1: Single Operator Generation](#scenario-1-single-operator-generation-akg-triton-agent)
-    - [Scenario 2: Batch Benchmark Evaluation](#scenario-2-batch-benchmark-evaluation-benchmark-evaluator)
-  - [Evaluation Baseline (Updated 2026-03-20)](#evaluation-baseline-updated-2026-03-20)
-- [Project Structure](#project-structure)
-- [License](#license)
+- [AscendOpGenAgent](#ascendopgenagent)
+  - [Table of Contents](#table-of-contents)
+  - [Core Features](#core-features)
+  - [Quick Start](#quick-start)
+    - [1. Prerequisites](#1-prerequisites)
+    - [2. Installation \& Configuration](#2-installation--configuration)
+    - [3. Usage Scenarios](#3-usage-scenarios)
+      - [**3.1 Triton**](#31-triton)
+      - [Scenario 1: Single Operator Generation (AKG-Triton Agent)](#scenario-1-single-operator-generation-akg-triton-agent)
+      - [Scenario 2: Batch Benchmark Evaluation (Benchmark-Evaluator)](#scenario-2-batch-benchmark-evaluation-benchmark-evaluator)
+      - [**3.2 AscendC**](#32-ascendc)
+      - [Scenario 1: Single Operator Generation (Lingxi-code Agent)](#scenario-1-single-operator-generation-lingxi-code-agent)
+      - [Scenario 2: Batch Benchmark Evaluation (Ascend-Benchmark-Evaluator)](#scenario-2-batch-benchmark-evaluation-ascend-benchmark-evaluator)
+    - [Evaluation Baseline (Updated 2026-03-27)](#evaluation-baseline-updated-2026-03-27)
+  - [Project Structure](#project-structure)
+  - [License](#license)
 
 ## Core Features
 
-| Module | Positioning | Core Capabilities |
-|------|------|----------|
-| **AKG-Triton Agent** | Single operator interactive generation | Task extraction → Code generation → Evaluation & Verification (Accuracy alignment & Performance testing) |
-| **Benchmark-Evaluator** | One-click batch evaluation | Execute specified Benchmark evaluation, automatically summarize and generate detailed reports |
+| Operator Type | Module | Positioning | Core Capabilities |
+|------|------|------|----------|
+| **Triton** | **AKG-Triton Agent** | Single operator interactive generation | Task extraction → Code generation → Evaluation & Verification (Accuracy alignment & Performance testing) |
+| **Triton** | **Benchmark-Evaluator** | One-click batch evaluation | Execute specified Benchmark evaluation, automatically summarize and generate detailed reports |
+| **AscendC** | **Lingxi_code Agent** | AscendC single operator interactive generation | Code generation → Evaluation & Verification (Accuracy alignment & Performance testing) |
+| **AscendC** | **Ascend-Benchmark-Evaluator** | AscendC operator one-click batch evaluation | Execute specified Benchmark evaluation, automatically summarize and generate detailed reports |
 
-> **Shared Kernel**: Both share the underlying code generation Agent, uniformly handling the core workflow of "Code Generation → Verification → Performance Testing" to ensure consistency and high reusability of the generation logic.
+> **Shared Kernel**: AKG-Triton Agent and Benchmark-Evaluator share the underlying code generation Agent, uniformly handling the core workflow of "Code Generation → Verification → Performance Testing" to ensure consistency and high reusability of the generation logic.
 
 ## Quick Start
 
@@ -59,6 +67,8 @@ After completion, start OpenCode, and you can select the corresponding Agents an
 ### 3. Usage Scenarios
 
 This project mainly provides two core usage scenarios. Please select the corresponding Agent or Skill according to your needs.
+
+#### **3.1 Triton**
 
 #### Scenario 1: Single Operator Generation (AKG-Triton Agent)
 Suitable for developers who need to quickly generate and verify the Triton implementation of a specific operator.
@@ -93,13 +103,43 @@ Evaluate tasks [20,30] of level 1 in KernelBench, with agent_workspace set to <p
 Run KernelBench evaluation with the <AKG-triton> agent (workspace: <path/to/your/AscendOpGenAgent>). Target Level 1 problem_id=[6] and Level 2 problem_id=[2]. Save the generated code and results to /path/to/output. Automatically approve all permissions during execution, and specify the device ASCEND_RT_VISIBLE_DEVICES=10.
 ```
 
+#### **3.2 AscendC**
+
+#### Scenario 1: Single Operator Generation (Lingxi-code Agent)
+Suitable for developers who need to quickly generate and verify the AscendC implementation of a specific operator.
+
+**Steps**:
+1. In OpenCode, switch to `Lingxi-code` via the `/agents` command.
+2. Enter the operator generation Prompt.
+
+**Prompt Example**:
+```text
+/Lingxi-code
+Generate a softmax_mat operator implementation based on the AscendC framework. The target device architecture is ascend910b2. Please output the generated code files to the /path/to/output/ directory.
+```
+
+**Execution Flow**:
+After receiving the instruction, the Agent will automatically execute the following workflow: Confirm parameters → Extract task description → Generate code → Verify accuracy and performance → Output final report.
+
+#### Scenario 2: Batch Benchmark Evaluation (Ascend-Benchmark-Evaluator)
+Suitable for evaluating the overall code generation capability of the Agent on standard datasets (e.g., NPUKernelBench).
+
+**Steps**:
+1. In OpenCode, switch to `ascend-benchmark-evaluator` via the `/skills` command.
+2. Enter the evaluation Prompt.
+
+**Prompt Example 1: Basic Evaluation** (Only specify target and test scope)
+```text
+Serially generate tasks of level 1 in NPUKernelBench, with agent_workspace set to <path/to/your/AscendOpGenAgent>, using the <Lingxi-code> agent.
+```
+
 **Parameter Description**:
 - `<agent_path>`: The working directory path of this project (must contain `agents/` and `skills/`).
 - `<benchmark_path>`: The local path of the evaluation dataset (e.g., KernelBench).
 - `<output_path>`: **[Optional]** Output directory for evaluation results and generated code.
 - `ASCEND_RT_VISIBLE_DEVICES`: **[Optional]** Specify the NPU device ID to use.
 
-### Evaluation Baseline (Updated 2026-03-20)
+### Evaluation Baseline (Updated 2026-03-27)
 
 - **Test Device**: Ascend 910B2
 - **Total Tasks**: 12
