@@ -142,21 +142,21 @@ Agent 接收到指令后，将自动执行以下流程：确认参数 → 提取
 ### 评测基线（更新于 2026-03-27）
 
 - **测试设备**：Ascend 910B2
-- **总任务数**：12
+- **总任务数**：11
 
 | Level | Problem ID | 算子名称 | 编译通过 | 精度正确 | PyTorch 延迟 | 生成代码延迟 | 加速比 | 最终状态 |
 |:---:|:---:|---|:---:|:---:|---:|---:|---:|:---:|
-| 1 | 1 | `Square_matrix_multiplication_` | ✅ | ✅ | 1.65 ms | 2.95 ms | 0.56x | 成功 |
-| 1 | 2 | `Standard_matrix_multiplication_` | ✅ | ✅ | 1.65 ms | 7.82 ms | 0.21x | 成功 |
-| 1 | 3 | `Batched_matrix_multiplication` | ✅ | ✅ | 3.64 ms | 9.70 ms | 0.38x | 成功 |
-| 1 | 4 | `Matrix_vector_multiplication_` | ✅ | ✅ | 36.26 ms | 162.41 ms | 0.22x | 成功 |
-| 1 | 5 | `Matrix_scalar_multiplication` | ✅ | ✅ | 6.80 ms | 7.70 ms | 0.88x | 成功 |
-| 1 | 6 | `Matmul_with_large_K_dimension_` | ✅ | ✅ | 2.35 ms | 2.35 ms | 1.00x | 成功 |
-| 1 | 7 | `Matmul_with_small_K_dimension_` | ✅ | ✅ | 3.34 ms | 4.07 ms | 0.82x | 成功 |
-| 1 | 8 | `Matmul_with_irregular_shapes_` | ✅ | ✅ | 4.24 ms | 4.28 ms | 0.99x | 成功 |
-| 1 | 9 | `Tall_skinny_matrix_multiplication_` | ✅ | ✅ | 3.20 ms | 4.02 ms | 0.79x | 成功 |
-| 2 | 3 | `ConvTranspose3d_Sum_LayerNorm_AvgPool_GELU` | ✅ | ✅ | 16.11 ms | 16.99 ms | 0.95x | 成功 |
-| 3 | 4 | `LeNet5` | ✅ | ✅ | 1.72 ms | 113.54 ms | 0.02x | 成功 |
+| 1 | 1 | `CrossV2` | ✅ | ✅ | 0.022 ms | 0.024 ms | 0.91x | 成功 |
+| 1 | 2 | `FatreluMul` | ✅ | ✅ | 0.042 ms | 0.027 ms | 1.55x | 成功 |
+| 1 | 3 | `ForeachLerpList` | ✅ | ✅ | 0.063 ms | 0.058 ms | 1.63x | 成功 |
+| 1 | 4 | `ForeachPowList` | ✅ | ✅ | 0.029 ms | 0.014 ms | 2.1x | 成功 |
+| 1 | 5 | `ForeachPowScalarList` | ✅ | ✅ | 0.0117 ms | 0.0195 ms | 0.6x | 成功 |
+| 1 | 6 | `MulAddn` | ✅ | ✅ | 0.049 ms | 0.044 ms | 1.11x | 成功 |
+| 1 | 7 | `LayerNormV4` | ✅ | ✅ | 0.71 ms | 0.539 ms | 1.32x | 成功 |
+| 1 | 8 | `Logit` | ✅ | ✅ | 0.022 ms | 0.031 ms | 1.38x | 成功 |
+| 1 | 9 | `LogitGrad` | ✅ | ✅ | 0.108 ms | 0.028 ms | 3.89x | 成功 |
+| 1 | 10 | `MaxPool3DWithArgmaxV2` | ✅ | ✅ | 0.0154 ms | 0.0171 ms | 0.9x | 成功 |
+| 1 | 11 | `QuantizedBatchNorm` | ✅ | ✅ | 0.571 ms | 0.235 ms | 2.43x | 成功 |
 
 
 
@@ -164,17 +164,40 @@ Agent 接收到指令后，将自动执行以下流程：确认参数 → 提取
 
 ```text
 AscendOpGenAgent/
+├── .gitignore
+├── LICENSE
+├── README.en.md
+├── README.md
 ├── agents/                     # Agent 定义目录
 │   ├── AKG-triton.md           # 主编排 Agent
-│   └── kernelgen-workflow.md   # 子 Agent（代码生成工作流）
-├── skills/                     # Skill 实现目录
-│   ├── op-task-extractor/      # 任务提取 Skill
-│   ├── kernel-generator/       # 代码生成 Skill
-│   ├── kernel-verifier/        # 验证与性能测试 Skill
-│   └── benchmark-evaluator/    # 批量评测 Skill
+│   ├── benchmark-scheduler.md
+│   ├── kernelgen-workflow.md   # 子 Agent（代码生成工作流）
+│   ├── lingxi_code.md
+│   └── performance-optimizer.md
 ├── benchmarks/                 # 评测数据集存放目录
-│   └── KernelBench/
-└── README.md
+│   ├── KernelBench/
+│   │   ├── level1/             # Level 1 测试用例 (100个)
+│   │   ├── level2/             # Level 2 测试用例 (99个)
+│   │   ├── level3/             # Level 3 测试用例 (52个)
+│   │   └── level4/             # Level 4 测试用例 (20个)
+│   └── NPUKernelBench/
+│       └── level1/             # NPU KernelBench Level 1 测试用例 (31个)
+└── skills/                     # Skill 实现目录
+    ├── ascendc_evalution/
+    ├── ascend_benchmark_evaluator/
+    ├── ascend_call_generation/
+    ├── benchmark-evaluator/    # 批量评测 Skill
+    ├── dsl_baseline_generation/
+    ├── dsl_lowering/
+    ├── functional_conversion/
+    ├── kernel-designer/
+    ├── kernel-generator/       # 代码生成 Skill
+    ├── kernel-verifier/        # 验证与性能测试 Skill
+    ├── latency-optimizer/
+    ├── op-task-extractor/      # 任务提取 Skill
+    ├── op_desc_generation/
+    └── reference_generation/
+
 ```
 
 
