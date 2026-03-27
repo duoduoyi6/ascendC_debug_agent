@@ -164,17 +164,38 @@ def resolve_benchmark_path(agent_workspace, benchmark_path=None):
 ## 总体统计
 
 - 总任务数: {total}
-- 编译通过: {compile_pass_count}/{total}
+- 成功任务数: {success_count}/{total}
 - 精度正确: {accuracy_pass_count}/{total}
 - 平均加速比: {avg_speedup}x
+- 性能达标率(≥0.6x): {perf_06_count}/{total_with_perf} ({perf_06_rate}%)
+- 性能达标率(≥0.8x): {perf_08_count}/{total_with_perf} ({perf_08_rate}%)
 
 ## 详细结果
 
-| Level | Problem ID | 算子名称 | 算子类型 | 编译通过 | 精度正确 | PyTorch参考延迟(ms) | Triton代码延迟(ms) | 加速比 | 最终状态 |
-|-------|-----------|---------|---------|---------|---------|-------------------|------------------|-------|---------|
-| 1 | 1 | 1_matrix_multiplication.py | MatMul | ✓ | ✓ | 1.23 | 0.57 | 2.16x | 成功 |
-| 1 | 2 | 2_softmax.py | Reduce | ✓ | ✗ | 0.89 | - | - | 失败，原因是：精度验证未通过 |
-| 1 | 3 | 3_conv2d.py | Conv | ✗ | - | - | - | - | 失败，原因是：编译错误 |
+| Level | Problem ID | 算子名称 | 算子类型 | 参考性能(us) | 实际triton代码性能(us) | 加速比 | 最终状态 | 精度正确 | 性能0.6x | 性能0.8x |
+|-------|-----------|---------|---------|------------|---------------------|-------|---------|---------|---------|---------|
+| 1 | 11 | 11_4D_xxxxxx | vector | 4.00 | 3.00 | 1.33x | 成功 | 是 | 是 | 是 |
+| 1 | 22 | 22_softmax | vector | 2.00 | 3.00 | 0.67x | 成功 | 是 | 是 | 否 |
+| 1 | 3 | 3_conv2d | cube | - | - | - | 失败 | - | - | - |
+| 2 | 5 | 5_fused_op | cv融合 | 5.00 | 4.00 | 1.25x | 成功 | 是 | 是 | 是 |
+
+## 失败任务分析
+
+### Problem {problem_id}: {算子名称}
+- **迭代次数**: {iterations}
+- **迭代详情**:
+  - 迭代 0: [{error_type}] {error_message}
+  - 迭代 1: [{error_type}] {error_message}
+
+（对每个失败任务列出上述信息，数据来自 `eval_result.json` → `error_history`）
+
+## 建议
+
+Agent 根据统计结果自动生成，包括但不限于：
+- 各算子类型（vector/cube/cv融合）成功率对比
+- 常见失败模式（error_type 分布）
+- 性能达标情况分析（≥0.6x 和 ≥0.8x 达标率）
+- 针对性的改进建议
 ```
 
 **字段取值规则**：
@@ -184,13 +205,14 @@ def resolve_benchmark_path(agent_workspace, benchmark_path=None):
 | Level | `eval_result.json` → `level` | Level 编号 |
 | Problem ID | `eval_result.json` → `problem_id` | 题目编号 |
 | 算子名称 | 原始任务文件名（如 `1_matrix_multiplication.py`） | 保留 `{id}_{name}.py` 完整格式 |
-| 算子类型 | `eval_result.json` → `op_type` | 由 `classify_op_type` 分类 |
-| 编译通过 | `summary.json` → `success` 或 `error_history` | 若首轮能编译即 ✓；否则 ✗ |
-| 精度正确 | `eval_result.json` → `verify_passed` | ✓ 或 ✗；编译未通过则填 `-` |
-| PyTorch参考延迟 | `perf_result.json` → `framework.avg_latency_ms` | 仅验证通过时有值，否则 `-` |
-| Triton代码延迟 | `perf_result.json` → `implementation.avg_latency_ms` | 仅验证通过时有值，否则 `-` |
-| 加速比 | `perf_result.json` → `speedup_vs_torch`（= PyTorch延迟 / Triton延迟）| 格式 `{value}x`；无性能数据则 `-` |
-| 最终状态 | `eval_result.json` → `status` + `failure_reason` | 成功 → `成功`；失败 → `失败，原因是：{failure_reason}` |
+| 算子类型 | `eval_result.json` → `op_type` | 由 `classify_op_type(level, problem_id)` 分类：Level 1 中 Problem ID 19-53、88-100 为 `vector`，1-18、54-87 为 `cube`，其余所有为 `cv融合` |
+| 参考性能(us) | `eval_result.json` → `perf_data.framework_avg_latency_ms` × 1000 | 转为微秒；无数据填 `-` |
+| 实际triton代码性能(us) | `eval_result.json` → `perf_data.implementation_avg_latency_ms` × 1000 | 转为微秒；无数据填 `-` |
+| 加速比 | `eval_result.json` → `perf_data.speedup_vs_torch` | 格式 `{value}x`；无性能数据则 `-` |
+| 最终状态 | `eval_result.json` → `status` | 成功 → `成功`；失败 → `失败` |
+| 精度正确 | `eval_result.json` → `verify_passed` | `是` 或 `否`；无数据填 `-` |
+| 性能0.6x | `speedup_vs_torch >= 0.6` | `是` 或 `否`；无性能数据填 `-` |
+| 性能0.8x | `speedup_vs_torch >= 0.8` | `是` 或 `否`；无性能数据填 `-` |
 
 ### 6. 异常重试策略
 
