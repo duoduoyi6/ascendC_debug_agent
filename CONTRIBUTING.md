@@ -355,15 +355,26 @@ def get_init_inputs():
   "operator": "<算子名称>",
   "category": "<分类>",
   "description": "<数学公式描述>",
-  "inputs": [
-    {
-      "name": "<参数名>",
-      "type": "tensor",
-      "required": true,
-      "dtype": ["float16", "float32"],
-      "shape": [[128], [256, 512], [1024, 1024]]
-    }
-  ],
+  "inputs":{
+    "input_shape1": [
+      {
+        "name": "<参数名>",
+        "type": "tensor",
+        "required": true,
+        "dtype": ["float16", "float32"],
+        "shape": [[128], [256, 512], [1024, 1024]]
+      }
+    ],
+    "input_shape2": [
+      {
+        "name": "<参数名>",
+        "type": "tensor",
+        "required": true,
+        "dtype": ["float16", "float32"],
+        "shape": [[128], [256, 512], [1024, 1024]]
+      }
+    ]
+  } ,
   "attributes": {
     "<attr_name>": { "type": "bool", "default": false }
   },
