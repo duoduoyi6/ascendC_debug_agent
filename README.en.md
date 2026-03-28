@@ -21,7 +21,9 @@
       - [**3.2 AscendC**](#32-ascendc)
       - [Scenario 1: Single Operator Generation (Lingxi-code Agent)](#scenario-1-single-operator-generation-lingxi-code-agent)
       - [Scenario 2: Batch Benchmark Evaluation (Ascend-Benchmark-Evaluator)](#scenario-2-batch-benchmark-evaluation-ascend-benchmark-evaluator)
-    - [Evaluation Baseline (Updated 2026-03-27)](#evaluation-baseline-updated-2026-03-27)
+    - [Evaluation Baseline](#evaluation-baseline)
+      - [Triton(Updated 2026-03-20)](#tritonupdated-2026-03-20)
+      - [AscendC(Updated 2026-03-27)](#ascendcupdated-2026-03-27)
   - [Project Structure](#project-structure)
   - [License](#license)
 
@@ -139,25 +141,54 @@ Serially generate tasks of level 1 in NPUKernelBench, with agent_workspace set t
 - `<output_path>`: **[Optional]** Output directory for evaluation results and generated code.
 - `ASCEND_RT_VISIBLE_DEVICES`: **[Optional]** Specify the NPU device ID to use.
 
-### Evaluation Baseline (Updated 2026-03-27)
+### Evaluation Baseline 
+#### Triton(Updated 2026-03-20)
 
+- **Test Device**: Ascend 910B2
+- **Total Tasks**: 12
+
+| Level | Problem ID | Operator Name | Compilation | Accuracy | PyTorch Latency | Generated Code Latency | Speedup | Final Status |
+|:---:|:---:|---|:---:|:---:|---:|---:|---:|:---:|
+| 1 | 1 | `Square_matrix_multiplication_` | ✅ | ✅ | 1.65 ms | 2.95 ms | 0.56x | success |
+| 1 | 2 | `Standard_matrix_multiplication_` | ✅ | ✅ | 1.65 ms | 7.82 ms | 0.21x | success |
+| 1 | 3 | `Batched_matrix_multiplication` | ✅ | ✅ | 3.64 ms | 9.70 ms | 0.38x | success |
+| 1 | 4 | `Matrix_vector_multiplication_` | ✅ | ✅ | 36.26 ms | 162.41 ms | 0.22x | success |
+| 1 | 5 | `Matrix_scalar_multiplication` | ✅ | ✅ | 6.80 ms | 7.70 ms | 0.88x | success |
+| 1 | 6 | `Matmul_with_large_K_dimension_` | ✅ | ✅ | 2.35 ms | 2.35 ms | 1.00x | success |
+| 1 | 7 | `Matmul_with_small_K_dimension_` | ✅ | ✅ | 3.34 ms | 4.07 ms | 0.82x | success |
+| 1 | 8 | `Matmul_with_irregular_shapes_` | ✅ | ✅ | 4.24 ms | 4.28 ms | 0.99x | success |
+| 1 | 9 | `Tall_skinny_matrix_multiplication_` | ✅ | ✅ | 3.20 ms | 4.02 ms | 0.79x | success |
+| 2 | 3 | `ConvTranspose3d_Sum_LayerNorm_AvgPool_GELU` | ✅ | ✅ | 16.11 ms | 16.99 ms | 0.95x | success |
+| 3 | 4 | `LeNet5` | ✅ | ✅ | 1.72 ms | 113.54 ms | 0.02x | success |
+#### AscendC(Updated 2026-03-27)
 - **Test Device**: Ascend 910B2
 - **Total Tasks**: 11
 
 | Level | Problem ID | Operator Name | Compilation | Accuracy | PyTorch Latency | Generated Code Latency | Speedup | Final Status |
 |:---:|:---:|---|:---:|:---:|---:|---:|---:|:---:|
-| 1 | 1 | `CrossV2` | ✅ | ✅ | 0.022 ms | 0.024 ms | 0.91x | 成功 |
-| 1 | 2 | `FatreluMul` | ✅ | ✅ | 0.042 ms | 0.027 ms | 1.55x | 成功 |
-| 1 | 3 | `ForeachLerpList` | ✅ | ✅ | 0.063 ms | 0.058 ms | 1.63x | 成功 |
-| 1 | 4 | `ForeachPowList` | ✅ | ✅ | 0.029 ms | 0.014 ms | 2.1x | 成功 |
-| 1 | 5 | `ForeachPowScalarList` | ✅ | ✅ | 0.0117 ms | 0.0195 ms | 0.6x | 成功 |
-| 1 | 6 | `MulAddn` | ✅ | ✅ | 0.049 ms | 0.044 ms | 1.11x | 成功 |
-| 1 | 7 | `LayerNormV4` | ✅ | ✅ | 0.71 ms | 0.539 ms | 1.32x | 成功 |
-| 1 | 8 | `Logit` | ✅ | ✅ | 0.022 ms | 0.031 ms | 1.38x | 成功 |
-| 1 | 9 | `LogitGrad` | ✅ | ✅ | 0.108 ms | 0.028 ms | 3.89x | 成功 |
-| 1 | 10 | `MaxPool3DWithArgmaxV2` | ✅ | ✅ | 0.0154 ms | 0.0171 ms | 0.9x | 成功 |
-| 1 | 11 | `QuantizedBatchNorm` | ✅ | ✅ | 0.571 ms | 0.235 ms | 2.43x | 成功 |
-
+| 1 | 1 | `CrossV2` | ✅ | ✅ | 0.022 ms | 0.024 ms | 0.91x | success |
+| 1 | 2 | `FatreluMul` | ✅ | ✅ | 0.042 ms | 0.027 ms | 1.55x | success |
+| 1 | 3 | `ForeachLerpList` | ✅ | ✅ | 0.063 ms | 0.058 ms | 1.63x | success |
+| 1 | 4 | `ForeachPowList` | ✅ | ✅ | 0.029 ms | 0.014 ms | 2.1x | success |
+| 1 | 5 | `ForeachPowScalarList` | ✅ | ✅ | 0.0117 ms | 0.0195 ms | 0.6x | success |
+| 1 | 6 | `MulAddn` | ✅ | ✅ | 0.049 ms | 0.044 ms | 1.11x | success |
+| 1 | 7 | `LayerNormV4` | ✅ | ✅ | 0.71 ms | 0.539 ms | 1.32x | success |
+| 1 | 8 | `Logit` | ✅ | ✅ | 0.022 ms | 0.031 ms | 1.38x | success |
+| 1 | 9 | `LogitGrad` | ✅ | ✅ | 0.108 ms | 0.028 ms | 3.89x | success |
+| 1 | 10 | `MaxPool3DWithArgmaxV2` | ✅ | ✅ | 0.0154 ms | 0.0171 ms | 0.9x | success |
+| 1 | 11 | `QuantizedBatchNorm` | ✅ | ✅ | 0.571 ms | 0.235 ms | 2.43x | success |
+| 1 | 12 | `AdaptiveAvgPool3d` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
+| 1 | 13 | `AdaptiveAvgPool3dGrad` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
+| 1 | 14 | `AdaptiveMaxPool3DGrad` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
+| 1 | 15 | `TransformBiasRescaleQkv` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
+| 1 | 16 | `AddRmsNormDynamicQuantV2` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
+| 1 | 17 | `STFT` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
+| 1 | 18 | `ApplyTopKTopPWithSorted` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
+| 1 | 19 | `AvgPool3D` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
+| 1 | 20 | `AvgPool3DGrad` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
+| 1 | 21 | `BatchNormV3` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
+| 1 | 22 | `ChamferDistanceGrad` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
+| 1 | 23 | `CTCLossV3` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
 
 ## Project Structure
 

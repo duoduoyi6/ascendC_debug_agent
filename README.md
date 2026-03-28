@@ -19,9 +19,11 @@
       - [场景一：单算子生成 (AKG-Triton Agent)](#场景一单算子生成-akg-triton-agent)
       - [场景二：Benchmark 批量评测 (Benchmark-Evaluator)](#场景二benchmark-批量评测-benchmark-evaluator)
       - [**3.2 AscendC**](#32-ascendc)
-      - [场景一：单算子生成 (AKG-Triton Agent)](#场景一单算子生成-akg-triton-agent-1)
+      - [场景一：单算子生成 (Lingxi-code Agent)](#场景一单算子生成-lingxi-code-agent)
       - [场景二：Benchmark 批量评测 (Ascend-Benchmark-Evaluator)](#场景二benchmark-批量评测-ascend-benchmark-evaluator)
-    - [评测基线（更新于 2026-03-27）](#评测基线更新于-2026-03-27)
+    - [评测基线](#评测基线)
+      - [Triton（更新于 2026-03-20）](#triton更新于-2026-03-20)
+      - [AscendC（更新于 2026-03-27）](#ascendc更新于-2026-03-27)
   - [项目结构](#项目结构)
   - [许可证](#许可证)
 
@@ -105,8 +107,8 @@ Agent 接收到指令后，将自动执行以下流程：确认参数 → 提取
 执行期间默认同意所有权限，并指定设备 ASCEND_RT_VISIBLE_DEVICES=10。
 ```
 #### **3.2 AscendC**
-#### 场景一：单算子生成 (AKG-Triton Agent)
-适用于开发者需要快速生成、验证某个特定算子的 Triton 实现。
+#### 场景一：单算子生成 (Lingxi-code Agent)
+适用于开发者需要快速生成、验证某个特定算子的 AscendC 实现。
 
 **操作步骤**：
 1. 在 OpenCode 中，通过 `/agents` 命令切换至 `Lingxi-code`。
@@ -139,10 +141,29 @@ Agent 接收到指令后，将自动执行以下流程：确认参数 → 提取
 - `<output_path>`: **[可选]** 评测结果与生成代码的输出目录。
 - `ASCEND_RT_VISIBLE_DEVICES`: **[可选]** 指定使用的 NPU 设备 ID。
 
-### 评测基线（更新于 2026-03-27）
+### 评测基线
+#### Triton（更新于 2026-03-20）
 
 - **测试设备**：Ascend 910B2
-- **总任务数**：11
+- **总任务数**：12
+
+| Level | Problem ID | 算子名称 | 编译通过 | 精度正确 | PyTorch 延迟 | 生成代码延迟 | 加速比 | 最终状态 |
+|:---:|:---:|---|:---:|:---:|---:|---:|---:|:---:|
+| 1 | 1 | `Square_matrix_multiplication_` | ✅ | ✅ | 1.65 ms | 2.95 ms | 0.56x | 成功 |
+| 1 | 2 | `Standard_matrix_multiplication_` | ✅ | ✅ | 1.65 ms | 7.82 ms | 0.21x | 成功 |
+| 1 | 3 | `Batched_matrix_multiplication` | ✅ | ✅ | 3.64 ms | 9.70 ms | 0.38x | 成功 |
+| 1 | 4 | `Matrix_vector_multiplication_` | ✅ | ✅ | 36.26 ms | 162.41 ms | 0.22x | 成功 |
+| 1 | 5 | `Matrix_scalar_multiplication` | ✅ | ✅ | 6.80 ms | 7.70 ms | 0.88x | 成功 |
+| 1 | 6 | `Matmul_with_large_K_dimension_` | ✅ | ✅ | 2.35 ms | 2.35 ms | 1.00x | 成功 |
+| 1 | 7 | `Matmul_with_small_K_dimension_` | ✅ | ✅ | 3.34 ms | 4.07 ms | 0.82x | 成功 |
+| 1 | 8 | `Matmul_with_irregular_shapes_` | ✅ | ✅ | 4.24 ms | 4.28 ms | 0.99x | 成功 |
+| 1 | 9 | `Tall_skinny_matrix_multiplication_` | ✅ | ✅ | 3.20 ms | 4.02 ms | 0.79x | 成功 |
+| 2 | 3 | `ConvTranspose3d_Sum_LayerNorm_AvgPool_GELU` | ✅ | ✅ | 16.11 ms | 16.99 ms | 0.95x | 成功 |
+| 3 | 4 | `LeNet5` | ✅ | ✅ | 1.72 ms | 113.54 ms | 0.02x | 成功 |
+
+#### AscendC（更新于 2026-03-27）
+- **测试设备**：Ascend 910B2
+- **总任务数**：23
 
 | Level | Problem ID | 算子名称 | 编译通过 | 精度正确 | PyTorch 延迟 | 生成代码延迟 | 加速比 | 最终状态 |
 |:---:|:---:|---|:---:|:---:|---:|---:|---:|:---:|
@@ -157,6 +178,18 @@ Agent 接收到指令后，将自动执行以下流程：确认参数 → 提取
 | 1 | 9 | `LogitGrad` | ✅ | ✅ | 0.108 ms | 0.028 ms | 3.89x | 成功 |
 | 1 | 10 | `MaxPool3DWithArgmaxV2` | ✅ | ✅ | 0.0154 ms | 0.0171 ms | 0.9x | 成功 |
 | 1 | 11 | `QuantizedBatchNorm` | ✅ | ✅ | 0.571 ms | 0.235 ms | 2.43x | 成功 |
+| 1 | 12 | `AdaptiveAvgPool3d` | ✅ | ❌ | ❌ | ❌ | ❌ | 失败 |
+| 1 | 13 | `AdaptiveAvgPool3dGrad` | ✅ | ❌ | ❌ | ❌ | ❌ | 失败 |
+| 1 | 14 | `AdaptiveMaxPool3DGrad` | ✅ | ❌ | ❌ | ❌ | ❌ | 失败 |
+| 1 | 15 | `TransformBiasRescaleQkv` | ✅ | ❌ | ❌ | ❌ | ❌ | 失败 |
+| 1 | 16 | `AddRmsNormDynamicQuantV2` | ✅ | ❌ | ❌ | ❌ | ❌ | 失败 |
+| 1 | 17 | `STFT` | ✅ | ❌ | ❌ | ❌ | ❌ | 失败 |
+| 1 | 18 | `ApplyTopKTopPWithSorted` | ✅ | ❌ | ❌ | ❌ | ❌ | 失败 |
+| 1 | 19 | `AvgPool3D` | ✅ | ❌ | ❌ | ❌ | ❌ | 失败 |
+| 1 | 20 | `AvgPool3DGrad` | ✅ | ❌ | ❌ | ❌ | ❌ | 失败 |
+| 1 | 21 | `BatchNormV3` | ✅ | ❌ | ❌ | ❌ | ❌ | 失败 |
+| 1 | 22 | `ChamferDistanceGrad` | ✅ | ❌ | ❌ | ❌ | ❌ | 失败 |
+| 1 | 23 | `CTCLossV3` | ✅ | ❌ | ❌ | ❌ | ❌ | 失败 |
 
 
 
