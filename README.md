@@ -91,18 +91,18 @@ Agent 接收到指令后，将自动执行以下流程：确认参数 → 提取
 适用于评估 Agent 在标准数据集（如 KernelBench）上的整体代码生成能力。
 
 **操作步骤**：
-1. 在 OpenCode 中，通过 `/skills` 命令切换至 `benchmark-evaluator`。
+1. 在 OpenCode 中，通过 `/agents` 命令切换至 `benchmark-scheduler`。
 2. 输入评测 Prompt。
 
 **Prompt 示例 1：基础评测**（仅指定目标与测试范围）
 ```text
-评测KernelBench中level1的[20,30]任务,agent_workspace是<path/to/your/AscendOpGenAgent>,使用<AKG-triton> agent
+评测KernelBench中level1的[20,30]任务,agent_workspace是<path/to/your/AscendOpGenAgent>
 ```
 
-**Prompt 示例 2：进阶评测**（指定输出路径、运行设备及权限）
+**Prompt 示例 2：全量评测**（覆盖基线任务集，指定输出路径与设备）
 ```text
-执行KernelBench评测,agent_workspace是<path/to/your/AscendOpGenAgent>,使用<AKG-triton> agent。
-评测 Level 1 的 problem_id=[6] 和 Level 2 的 problem_id=[2]。
+评测KernelBench中Level 1的2, 4, 10, 11, 12, 13, 14, 15, 16, 17, 33, 34, 35, 36, 41, 42, 43, 44, 45, 46, 48, 50, 51, 53, 54, 57, 61, 63, 64, 67, 82, 87, 99, 100和Level 2的6, 12, 17, 23, 30, 94的任务,
+agent_workspace是<path/to/your/AscendOpGenAgent>。
 请将生成的代码和评测结果输出到 /path/to/output 目录下。
 执行期间默认同意所有权限，并指定设备 ASCEND_RT_VISIBLE_DEVICES=10。
 ```
