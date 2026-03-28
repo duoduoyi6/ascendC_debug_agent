@@ -4,29 +4,39 @@
 
 [中文](README.md) | English
 
-**AscendOpGenAgent** is an automated operator generation and evaluation framework for Ascend NPUs. Based on Triton, this project automatically generates and verifies high-performance operator code, aiming to significantly improve the efficiency and quality of operator development on the Ascend architecture.
+**AscendOpGenAgent** is an automated operator generation and evaluation framework for Ascend NPUs. Based on Triton/AscendC, this project automatically generates and verifies high-performance operator code, aiming to significantly improve the efficiency and quality of operator development on the Ascend architecture.
 
 ## Table of Contents
 
-- [Core Features](#core-features)
-- [Quick Start](#quick-start)
-  - [1. Prerequisites](#1-prerequisites)
-  - [2. Installation & Configuration](#2-installation--configuration)
-  - [3. Usage Scenarios](#3-usage-scenarios)
-    - [Scenario 1: Single Operator Generation](#scenario-1-single-operator-generation-akg-triton-agent)
-    - [Scenario 2: Batch Benchmark Evaluation](#scenario-2-batch-benchmark-evaluation-benchmark-evaluator)
-  - [Evaluation Baseline (Updated 2026-03-20)](#evaluation-baseline-updated-2026-03-20)
-- [Project Structure](#project-structure)
-- [License](#license)
+- [AscendOpGenAgent](#ascendopgenagent)
+  - [Table of Contents](#table-of-contents)
+  - [Core Features](#core-features)
+  - [Quick Start](#quick-start)
+    - [1. Prerequisites](#1-prerequisites)
+    - [2. Installation \& Configuration](#2-installation--configuration)
+    - [3. Usage Scenarios](#3-usage-scenarios)
+      - [**3.1 Triton**](#31-triton)
+      - [Scenario 1: Single Operator Generation (AKG-Triton Agent)](#scenario-1-single-operator-generation-akg-triton-agent)
+      - [Scenario 2: Batch Benchmark Evaluation (Benchmark-Evaluator)](#scenario-2-batch-benchmark-evaluation-benchmark-evaluator)
+      - [**3.2 AscendC**](#32-ascendc)
+      - [Scenario 1: Single Operator Generation (Lingxi-code Agent)](#scenario-1-single-operator-generation-lingxi-code-agent)
+      - [Scenario 2: Batch Benchmark Evaluation (Ascend-Benchmark-Evaluator)](#scenario-2-batch-benchmark-evaluation-ascend-benchmark-evaluator)
+    - [Evaluation Baseline](#evaluation-baseline)
+      - [Triton(Updated 2026-03-20)](#tritonupdated-2026-03-20)
+      - [AscendC(Updated 2026-03-27)](#ascendcupdated-2026-03-27)
+  - [Project Structure](#project-structure)
+  - [License](#license)
 
 ## Core Features
 
-| Module | Positioning | Core Capabilities |
-|------|------|----------|
-| **AKG-Triton Agent** | Single operator interactive generation | Task extraction → Code generation → Evaluation & Verification (Accuracy alignment & Performance testing) |
-| **Benchmark-Evaluator** | One-click batch evaluation | Execute specified Benchmark evaluation, automatically summarize and generate detailed reports |
+| Operator Type | Module | Positioning | Core Capabilities |
+|------|------|------|----------|
+| **Triton** | **AKG-Triton Agent** | Single operator interactive generation | Task extraction → Code generation → Evaluation & Verification (Accuracy alignment & Performance testing) |
+| **Triton** | **Benchmark-Evaluator** | One-click batch evaluation | Execute specified Benchmark evaluation, automatically summarize and generate detailed reports |
+| **AscendC** | **Lingxi_code Agent** | AscendC single operator interactive generation | Code generation → Evaluation & Verification (Accuracy alignment & Performance testing) |
+| **AscendC** | **Ascend-Benchmark-Evaluator** | AscendC operator one-click batch evaluation | Execute specified Benchmark evaluation, automatically summarize and generate detailed reports |
 
-> **Shared Kernel**: Both share the underlying code generation Agent, uniformly handling the core workflow of "Code Generation → Verification → Performance Testing" to ensure consistency and high reusability of the generation logic.
+> **Shared Kernel**: AKG-Triton Agent and Benchmark-Evaluator share the underlying code generation Agent, uniformly handling the core workflow of "Code Generation → Verification → Performance Testing" to ensure consistency and high reusability of the generation logic.
 
 ## Quick Start
 
@@ -59,6 +69,8 @@ After completion, start OpenCode, and you can select the corresponding Agents an
 ### 3. Usage Scenarios
 
 This project mainly provides two core usage scenarios. Please select the corresponding Agent or Skill according to your needs.
+
+#### **3.1 Triton**
 
 #### Scenario 1: Single Operator Generation (AKG-Triton Agent)
 Suitable for developers who need to quickly generate and verify the Triton implementation of a specific operator.
@@ -93,47 +105,128 @@ Evaluate tasks [20,30] of level 1 in KernelBench, with agent_workspace set to <p
 Run KernelBench evaluation with the <AKG-triton> agent (workspace: <path/to/your/AscendOpGenAgent>). Target Level 1 problem_id=[6] and Level 2 problem_id=[2]. Save the generated code and results to /path/to/output. Automatically approve all permissions during execution, and specify the device ASCEND_RT_VISIBLE_DEVICES=10.
 ```
 
+#### **3.2 AscendC**
+
+#### Scenario 1: Single Operator Generation (Lingxi-code Agent)
+Suitable for developers who need to quickly generate and verify the AscendC implementation of a specific operator.
+
+**Steps**:
+1. In OpenCode, switch to `Lingxi-code` via the `/agents` command.
+2. Enter the operator generation Prompt.
+
+**Prompt Example**:
+```text
+/Lingxi-code
+Generate a softmax_mat operator implementation based on the AscendC framework. The target device architecture is ascend910b2. Please output the generated code files to the /path/to/output/ directory.
+```
+
+**Execution Flow**:
+After receiving the instruction, the Agent will automatically execute the following workflow: Confirm parameters → Extract task description → Generate code → Verify accuracy and performance → Output final report.
+
+#### Scenario 2: Batch Benchmark Evaluation (Ascend-Benchmark-Evaluator)
+Suitable for evaluating the overall code generation capability of the Agent on standard datasets (e.g., NPUKernelBench).
+
+**Steps**:
+1. In OpenCode, switch to `ascend-benchmark-evaluator` via the `/skills` command.
+2. Enter the evaluation Prompt.
+
+**Prompt Example 1: Basic Evaluation** (Only specify target and test scope)
+```text
+Serially generate tasks of level 1 in NPUKernelBench, with agent_workspace set to <path/to/your/AscendOpGenAgent>, using the <Lingxi-code> agent.
+```
+
 **Parameter Description**:
 - `<agent_path>`: The working directory path of this project (must contain `agents/` and `skills/`).
 - `<benchmark_path>`: The local path of the evaluation dataset (e.g., KernelBench).
 - `<output_path>`: **[Optional]** Output directory for evaluation results and generated code.
 - `ASCEND_RT_VISIBLE_DEVICES`: **[Optional]** Specify the NPU device ID to use.
 
-### Evaluation Baseline (Updated 2026-03-20)
+### Evaluation Baseline 
+#### Triton(Updated 2026-03-20)
 
 - **Test Device**: Ascend 910B2
 - **Total Tasks**: 12
 
 | Level | Problem ID | Operator Name | Compilation | Accuracy | PyTorch Latency | Generated Code Latency | Speedup | Final Status |
 |:---:|:---:|---|:---:|:---:|---:|---:|---:|:---:|
-| 1 | 1 | `Square_matrix_multiplication_` | ✅ | ✅ | 1.65 ms | 2.95 ms | 0.56x | Success |
-| 1 | 2 | `Standard_matrix_multiplication_` | ✅ | ✅ | 1.65 ms | 7.82 ms | 0.21x | Success |
-| 1 | 3 | `Batched_matrix_multiplication` | ✅ | ✅ | 3.64 ms | 9.70 ms | 0.38x | Success |
-| 1 | 4 | `Matrix_vector_multiplication_` | ✅ | ✅ | 36.26 ms | 162.41 ms | 0.22x | Success |
-| 1 | 5 | `Matrix_scalar_multiplication` | ✅ | ✅ | 6.80 ms | 7.70 ms | 0.88x | Success |
-| 1 | 6 | `Matmul_with_large_K_dimension_` | ✅ | ✅ | 2.35 ms | 2.35 ms | 1.00x | Success |
-| 1 | 7 | `Matmul_with_small_K_dimension_` | ✅ | ✅ | 3.34 ms | 4.07 ms | 0.82x | Success |
-| 1 | 8 | `Matmul_with_irregular_shapes_` | ✅ | ✅ | 4.24 ms | 4.28 ms | 0.99x | Success |
-| 1 | 9 | `Tall_skinny_matrix_multiplication_` | ✅ | ✅ | 3.20 ms | 4.02 ms | 0.79x | Success |
-| 2 | 3 | `ConvTranspose3d_Sum_LayerNorm_AvgPool_GELU` | ✅ | ✅ | 16.11 ms | 16.99 ms | 0.95x | Success |
-| 3 | 4 | `LeNet5` | ✅ | ✅ | 1.72 ms | 113.54 ms | 0.02x | Success |
+| 1 | 1 | `Square_matrix_multiplication_` | ✅ | ✅ | 1.65 ms | 2.95 ms | 0.56x | success |
+| 1 | 2 | `Standard_matrix_multiplication_` | ✅ | ✅ | 1.65 ms | 7.82 ms | 0.21x | success |
+| 1 | 3 | `Batched_matrix_multiplication` | ✅ | ✅ | 3.64 ms | 9.70 ms | 0.38x | success |
+| 1 | 4 | `Matrix_vector_multiplication_` | ✅ | ✅ | 36.26 ms | 162.41 ms | 0.22x | success |
+| 1 | 5 | `Matrix_scalar_multiplication` | ✅ | ✅ | 6.80 ms | 7.70 ms | 0.88x | success |
+| 1 | 6 | `Matmul_with_large_K_dimension_` | ✅ | ✅ | 2.35 ms | 2.35 ms | 1.00x | success |
+| 1 | 7 | `Matmul_with_small_K_dimension_` | ✅ | ✅ | 3.34 ms | 4.07 ms | 0.82x | success |
+| 1 | 8 | `Matmul_with_irregular_shapes_` | ✅ | ✅ | 4.24 ms | 4.28 ms | 0.99x | success |
+| 1 | 9 | `Tall_skinny_matrix_multiplication_` | ✅ | ✅ | 3.20 ms | 4.02 ms | 0.79x | success |
+| 2 | 3 | `ConvTranspose3d_Sum_LayerNorm_AvgPool_GELU` | ✅ | ✅ | 16.11 ms | 16.99 ms | 0.95x | success |
+| 3 | 4 | `LeNet5` | ✅ | ✅ | 1.72 ms | 113.54 ms | 0.02x | success |
+#### AscendC(Updated 2026-03-27)
+- **Test Device**: Ascend 910B2
+- **Total Tasks**: 11
 
+| Level | Problem ID | Operator Name | Compilation | Accuracy | PyTorch Latency | Generated Code Latency | Speedup | Final Status |
+|:---:|:---:|---|:---:|:---:|---:|---:|---:|:---:|
+| 1 | 1 | `CrossV2` | ✅ | ✅ | 0.022 ms | 0.024 ms | 0.91x | success |
+| 1 | 2 | `FatreluMul` | ✅ | ✅ | 0.042 ms | 0.027 ms | 1.55x | success |
+| 1 | 3 | `ForeachLerpList` | ✅ | ✅ | 0.063 ms | 0.058 ms | 1.63x | success |
+| 1 | 4 | `ForeachPowList` | ✅ | ✅ | 0.029 ms | 0.014 ms | 2.1x | success |
+| 1 | 5 | `ForeachPowScalarList` | ✅ | ✅ | 0.0117 ms | 0.0195 ms | 0.6x | success |
+| 1 | 6 | `MulAddn` | ✅ | ✅ | 0.049 ms | 0.044 ms | 1.11x | success |
+| 1 | 7 | `LayerNormV4` | ✅ | ✅ | 0.71 ms | 0.539 ms | 1.32x | success |
+| 1 | 8 | `Logit` | ✅ | ✅ | 0.022 ms | 0.031 ms | 1.38x | success |
+| 1 | 9 | `LogitGrad` | ✅ | ✅ | 0.108 ms | 0.028 ms | 3.89x | success |
+| 1 | 10 | `MaxPool3DWithArgmaxV2` | ✅ | ✅ | 0.0154 ms | 0.0171 ms | 0.9x | success |
+| 1 | 11 | `QuantizedBatchNorm` | ✅ | ✅ | 0.571 ms | 0.235 ms | 2.43x | success |
+| 1 | 12 | `AdaptiveAvgPool3d` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
+| 1 | 13 | `AdaptiveAvgPool3dGrad` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
+| 1 | 14 | `AdaptiveMaxPool3DGrad` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
+| 1 | 15 | `TransformBiasRescaleQkv` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
+| 1 | 16 | `AddRmsNormDynamicQuantV2` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
+| 1 | 17 | `STFT` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
+| 1 | 18 | `ApplyTopKTopPWithSorted` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
+| 1 | 19 | `AvgPool3D` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
+| 1 | 20 | `AvgPool3DGrad` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
+| 1 | 21 | `BatchNormV3` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
+| 1 | 22 | `ChamferDistanceGrad` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
+| 1 | 23 | `CTCLossV3` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
 
 ## Project Structure
 
 ```text
 AscendOpGenAgent/
+├── .gitignore
+├── LICENSE
+├── README.en.md
+├── README.md
 ├── agents/                     # Agent definition directory
 │   ├── AKG-triton.md           # Main orchestration Agent
-│   └── kernelgen-workflow.md   # Sub-Agent (Code generation workflow)
-├── skills/                     # Skill implementation directory
-│   ├── op-task-extractor/      # Task extraction Skill
-│   ├── kernel-generator/       # Code generation Skill
-│   ├── kernel-verifier/        # Verification and performance testing Skill
-│   └── benchmark-evaluator/    # Batch evaluation Skill
+│   ├── benchmark-scheduler.md
+│   ├── kernelgen-workflow.md   # Sub-Agent (Code generation workflow)
+│   ├── lingxi_code.md
+│   └── performance-optimizer.md
 ├── benchmarks/                 # Evaluation dataset storage directory
-│   └── KernelBench/
-└── README.md
+│   ├── KernelBench/
+│   │   ├── level1/             # Level 1 test cases (100 tasks)
+│   │   ├── level2/             # Level 2 test cases (99 tasks)
+│   │   ├── level3/             # Level 3 test cases (52 tasks)
+│   │   └── level4/             # Level 4 test cases (20 tasks)
+│   └── NPUKernelBench/
+│       └── level1/             # NPU KernelBench Level 1 test cases (31 tasks)
+└── skills/                     # Skill implementation directory
+    ├── ascendc_evalution/
+    ├── ascend_benchmark_evaluator/
+    ├── ascend_call_generation/
+    ├── benchmark-evaluator/    # Batch evaluation Skill
+    ├── dsl_baseline_generation/
+    ├── dsl_lowering/
+    ├── functional_conversion/
+    ├── kernel-designer/
+    ├── kernel-generator/       # Code generation Skill
+    ├── kernel-verifier/        # Verification and performance testing Skill
+    ├── latency-optimizer/
+    ├── op-task-extractor/      # Task extraction Skill
+    ├── op_desc_generation/
+    └── reference_generation/
 ```
 
 
