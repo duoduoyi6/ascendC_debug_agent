@@ -174,9 +174,12 @@ else：
 
 **生成失败** → 输出失败报告（含错误信息），**该任务立刻结束**，禁止自行修复。
 
-**前置条件**：Phase 3 必须等待 Phase 2 成功完成后才能开始。
-
 ### Phase 3: 执行性能优化
+
+**前置条件**：Phase 2 的 `kernelgen-workflow` 生成的代码**功能精度正确**。
+
+**前置条件不满足时**：
+- Phase 2 生成的代码功能精度不正确 → 输出失败报告（含错误信息），**该任务立刻结束**，禁止自行修复
 
 > ### 🚨 【强制要求】必须等待performance-optimizer完全结束！
 > - `run_in_background` **必须设为 `false`**
@@ -185,7 +188,7 @@ else：
 > - **禁止跳过等待直接进入Phase 4**
 > - 违反将导致任务失败！
 
-**前置条件**：仅当 Phase 2 的 `kernelgen-workflow` 执行成功并返回有效的 `generated_code.py` 时，才进入 Phase 3。
+**调用 performance-optimizer**：
 
 1. 确定输出子目录：`<工作目录>/output/performance-optimizer_{n}/`（n 为下一可用序号）
 
@@ -216,13 +219,27 @@ else：
 
 **优化失败** → 输出失败报告（含错误信息），该任务立刻结束，禁止自行修复。
 
-### Phase 4: 确认生成结果
+### Phase 4: 选择最优版本并确认
 
-🛑 展示 `optimized_code.py`（Phase 3优化后的代码）并用 `question` 工具询问用户：
+**前置条件**：Phase 3 成功完成后进入此阶段。
 
-1. 展示 optimized_code.py 内容
-2. 询问用户：
-> 算子生成和性能优化完成，请查看最终代码：
+AKG-triton主Agent从以下两个版本中选择功能精度正确且性能最优的triton算子版本：
+1. **kernelgen-workflow Phase 2 生成的版本**
+2. **performance-optimizer Phase 3 生成的优化版本**
+
+**选择逻辑**：
+- 首先确保两个版本的**功能精度都正确**（通过kernel-verifier验证）
+- 在功能精度正确的版本中，**选择性能最优的版本**
+- 如果只有一个版本功能精度正确，则选择该版本
+- 如果两个版本功能精度都不正确，则报告错误并结束任务
+
+🛑 向用户展示最优版本，用 `question` 工具询问用户：
+
+1. 展示最优版本的代码内容
+2. 简要说明最终选择的版本来源
+3. 询问用户：
+> 算子生成完成！
+> 最优版本：{best_version}（功能精度正确，性能：{best_perf}）
 >
 > 请选择：
 > 1. 接受
@@ -231,8 +248,8 @@ else：
 **处理回复**：
 - **重新生成** → 回到 Phase 2（输出到下一可用序号子目录）
 - **接受** →
-  1. 将接受的 `optimized_code.py` 复制到 `<工作目录>/{op_name}_generated.py`
-  2. 如果用户提供了待优化的原始代码文件 → 备份到 `<工作目录>/backup/`，用生成的算子替换原实现
+  1. 将最优版本的代码复制到 `<工作目录>/{op_name}_generated.py`
+  2. 如果用户提供了待优化的原始代码文件 → 备份到 `<工作目录>/backup/`
   3. 进入 Phase 5
 
 ### Phase 5: 输出报告
@@ -241,9 +258,10 @@ else：
 
 报告包含：
 - **基本信息**：来源、配置（arch）、工作目录
-- **生成结果**：使用的工作流（kernelgen-workflow + performance-optimizer）、输出目录
-- **代码来源**：最终代码为 Phase 3 performance-optimizer 输出的 `optimized_code.py`，已复制为 `{op_name}_generated.py`
-- **性能数据**（如有）：加速比、执行耗时（来自 Phase 3 优化结果）
+- **生成结果**：使用的工作流、输出目录
+- **最终选择**：{best_version}（功能精度正确，性能最优）
+- **代码来源**：最终代码已复制为 `{op_name}_generated.py`
+- **性能数据**（如有）：加速比、执行耗时
 - **文件变更**（如有替换）：被替换的文件及备份路径
 
 ---
@@ -408,7 +426,7 @@ else：
 |------|------|
 | 参数确认 | Phase 0 — arch |
 | 任务文件确认 | Phase 1 — `{op_name}.py` 必须展示并确认，确认前禁止 Phase 2 |
-| 生成结果确认 | Phase 4 — 展示 `optimized_code.py`，用户选择接受或重新生成 |
+| 最优版本确认 | Phase 4 — 展示最优版本，用户选择接受或重新生成 |
 
 ### 性能优化场景
 
@@ -530,9 +548,11 @@ ${pwd}/triton_ascend_output/opt_{op_name}_{timestamp}_{rid}/
 > ✓ Phase 1: 任务描述文件已生成
 > ✓ Phase 2: 通过 task 工具调用 kernelgen-workflow 生成算子代码
 > ✓ Phase 3: 通过 task 工具调用 performance-optimizer 优化算子性能
-> ✓ Phase 4: 用户已确认
+> ✓ Phase 4: 已选择功能精度正确且性能最优的版本
 >
-> ✅ 算子生成完成！代码已保存至 ...
+> ✅ 算子生成完成！
+> 最优版本：performance-optimizer（功能精度正确，性能提升 35%）
+> 代码已保存至 ...
 
 ### 性能优化场景
 
