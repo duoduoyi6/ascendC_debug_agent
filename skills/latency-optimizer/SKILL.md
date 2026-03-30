@@ -26,6 +26,7 @@ argument-hint: >
 | 优化模式 | 加载文档 |
 |----------|----------|
 | 入参静态化 | `references/constexpr_parameters.md` |
+| Int32 向量加法 | `references/int32_vector_add.md` |
 
 ### 以下文档通过分析已有代码特征，按需加载
 
