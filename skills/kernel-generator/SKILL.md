@@ -23,6 +23,75 @@ argument-hint: >
 - **目标架构**: {{ arch }}
 </role>
 
+## 核心约束：禁止 PyTorch 退化
+
+⚠️ **生成的代码必须是纯 Triton Ascend 实现，禁止退化成 PyTorch。**
+
+### forward() 中禁止的操作
+
+| 禁止操作 | 示例 | 原因 |
+|---------|------|------|
+| torch 计算函数 | `torch.matmul(x, w)`, `torch.relu(x)`, `torch.sum(x)` | 必须在 @triton.jit kernel 中实现 |
+| torch.nn.functional | `F.softmax(x, dim=-1)`, `F.linear(x, w)`, `F.relu(x)` | 必须在 @triton.jit kernel 中实现 |
+| tensor 方法计算 | `x.sum()`, `x.mean()`, `x.softmax(dim=-1)`, `x.relu()` | 必须在 @triton.jit kernel 中实现 |
+| tensor 运算符 | `x @ w`, `x + y`, `x * y`, `x / y` | 必须在 @triton.jit kernel 中实现 |
+| nn.Module 调用 | `self.conv(x)`, `self.linear(x)`, `self.layer(x)` | 必须在 @triton.jit kernel 中实现 |
+
+### forward() 中允许的操作
+
+| 允许操作 | 示例 | 说明 |
+|---------|------|------|
+| buffer 分配 | `torch.empty(shape)`, `torch.zeros(shape)`, `torch.ones(shape)` | 用于存储 kernel 输出 |
+| 形状操作 | `x.view(...)`, `x.reshape(...)`, `x.permute(...)`, `x.transpose(...)` | 不涉及计算 |
+| 元信息查询 | `x.shape`, `x.dtype`, `x.device`, `x.numel()` | 用于 grid 计算 |
+| kernel 启动 | `kernel[grid](...args)` | 调用自定义 @triton.jit kernel |
+
+### ❌ 错误示例（退化成 PyTorch）
+
+```python
+# ❌ 错误 1：完全无 kernel，纯 PyTorch
+def forward(self, x, w):
+    return torch.matmul(x, w)
+
+# ❌ 错误 2：有 kernel 但 forward 未调用
+@triton.jit
+def matmul_kernel(...):
+    pass
+
+def forward(self, x, w):
+    return torch.matmul(x, w)  # kernel 定义了但没用
+
+# ❌ 错误 3：混合实现（部分 kernel + 部分 torch）
+def forward(self, x, w):
+    y = self.kernel[grid](x, w)
+    return y.sum(dim=-1)  # ← 违规：tensor 方法计算
+
+# ❌ 错误 4：tensor 运算符
+def forward(self, x, w):
+    y = self.kernel[grid](x, w)
+    return y + 1  # ← 违规：+ 是 PyTorch 运算符
+```
+
+### ✅ 正确示例（纯 Triton 实现）
+
+```python
+@triton.jit
+def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK_SIZE: tl.constexpr):
+    idx = tl.arange(0, BLOCK_SIZE)
+    x = tl.load(x_ptr + idx)
+    y = tl.load(y_ptr + idx)
+    output = x + y  # ← 计算在 kernel 中
+    tl.store(output_ptr + idx, output)
+
+class ModelNew(nn.Module):
+    def forward(self, x, y):
+        output = torch.empty_like(x)  # ✅ 允许：buffer 分配
+        add_kernel[(1,)](x, y, output, x.numel(), BLOCK_SIZE=128)  # ✅ 允许：kernel 启动
+        return output  # ✅ 允许：直接返回 kernel 输出
+```
+
+---
+
 ## 输入信息
 
 你将获得以下信息：
@@ -152,6 +221,7 @@ class ModelNew(nn.Module):
 | 可执行 | 代码必须可以直接导入运行 |
 | 无测试代码 | 不需要生成测试代码 |
 | 权重一致 | 含随机权重的算子（Conv2d/Linear 等）必须通过固定种子确保权重一致 |
+| **禁止 PyTorch 退化** | **forward() 中所有核心计算必须在 @triton.jit kernel 中实现，禁止使用 torch.*/F.*/tensor 方法/tensor 运算符** |
 
 ### 含随机权重算子的权重一致性（关键！）
 
@@ -209,3 +279,4 @@ class ModelNew(nn.Module):
 - 正确处理边界情况和异常条件
 - 包含必要的导入和包装函数
 - 数值正确性优先，性能次之
+- **严格遵守禁止 PyTorch 退化的约束** — 所有核心计算必须在 @triton.jit kernel 中实现
