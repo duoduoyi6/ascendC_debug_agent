@@ -203,18 +203,18 @@ else：
      subagent_type="performance-optimizer",
      load_skills=[],
      description="优化 {op_name} 算子性能",
-     prompt="任务文件路径: <工作目录>/{op_name}.py\ntorch实现路径: <工作目录>/output/kernelgen-workflow_{n}/generated_code.py（PyTorch版本）\ntriton实现路径: <工作目录>/output/kernelgen-workflow_{n}/generated_code.py（Triton-Ascend版本）\n输出路径: <工作目录>/output/performance-optimizer_{n}/\narch: {arch}\n框架: torch\n后端: ascend\nDSL: triton_ascend\nwarmup: 5\nrepeats: 50\n优化建议: {optimization_suggestions}",
-     run_in_background=false
-   )
-   ```
+     prompt="任务文件路径: <工作目录>/{op_name}.py\ntorch实现路径: <工作目录>/output/kernelgen-workflow_{n}/generated_code.py（PyTorch版本）\ntriton实现路径: <工作目录>/output/kernelgen-workflow_{n}/generated_code.py（Triton-Ascend版本）\n输出路径: <工作目录>/output/performance-optimizer_{n}/\narch: {arch}\n框架: torch\n后端: ascend\nDSL: triton_ascend\nwarmup: 5
+repeats: 50",
+    run_in_background=false
+  )
+  ```
 
-   **参数说明**：
-   - `subagent_type`: 固定为 `performance-optimizer`
-   - `load_skills`: 传 `[]`，SubAgent 会自行加载所需 skill
-   - `prompt`: 包含任务文件路径、**PyTorch版本路径**、**Triton版本路径**、输出路径、arch等全部所需信息
-   - `run_in_background`: 设为 `false`，同步等待完成
-   - **torch/triton实现路径**: 由kernelgen-workflow在Phase 2生成的两个版本代码路径，performance-optimizer会以triton版本为基准进行优化
-   - **优化建议**（可选）: 主Agent可以根据当前生成的代码特点，向performance-optimizer传递一些优化建议
+  **参数说明**：
+  - `subagent_type`: 固定为 `performance-optimizer`
+  - `load_skills`: 传 `[]`，SubAgent 会自行加载所需 skill
+  - `prompt`: 包含任务文件路径、**PyTorch版本路径**、**Triton版本路径**、输出路径、arch等全部所需信息
+  - `run_in_background`: 设为 `false`，同步等待完成
+  - **torch/triton实现路径**: 由kernelgen-workflow在Phase 2生成的两个版本代码路径，performance-optimizer会以triton版本为基准进行优化
 
 3. 完成后，检查 `summary.json` 和 `optimized_code.py`
 
