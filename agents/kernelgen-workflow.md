@@ -198,31 +198,29 @@ class ModelNew(nn.Module):
 
 加载 `kernel-verifier` skill，**严格按照其指引的流程**验证生成的代码：
 
-1. **预检查 - 防止退化成 PyTorch**：
-   在调用验证脚本之前，先检查生成的代码是否符合 Triton kernel 要求：
-   
-   ```python
-   # 读取生成的代码
-   with open(f"{output-path}/generated_code.py", 'r') as f:
-       code = f.read()
-   
-   # 检查是否退化成 PyTorch
-   has_triton_kernel = '@triton.jit' in code
-   uses_tl_api = any(api in code for api in ['tl.load', 'tl.store', 'tl.dot', 'tl.sum', 'tl.max', 'tl.where'])
-   
-   if not has_triton_kernel or not uses_tl_api:
-       # 标记为退化成 PyTorch，跳过正常验证，直接进入 Conductor 分析
-       verifier_result = False
-       verifier_error = "A-PyTorchFallback: 代码退化成 PyTorch 实现。"
-       if not has_triton_kernel:
-           verifier_error += " 缺少 @triton.jit 装饰的 kernel 函数。"
-       if not uses_tl_api:
-           verifier_error += " 没有在 kernel 中使用 triton.language API。"
-       verifier_error += " 必须重写为 Triton kernel，禁止直接使用 PyTorch 算子。"
-       # 直接进入 Step 4
-   else:
-       # 继续正常验证流程
+1. **预检查 - 防止退化成 PyTorch**（AST 静态分析）：
+   在调用验证脚本之前，使用 `validate_triton_impl.py` 对生成代码进行 AST 级别的退化检测：
+
+   ```bash
+   python3 <kernel-verifier-skill-dir>/scripts/validate_triton_impl.py \
+       {output-path}/iter_{iteration}/generated_code.py --json
    ```
+
+   该脚本通过 Python AST 解析检测三种退化类型：
+   - **Type 1**：完全无 `@triton.jit` kernel，全部使用 PyTorch
+   - **Type 2**：有 `@triton.jit` kernel 定义但 `forward()` 未调用（含 wrapper 函数追踪）
+   - **Type 3**：`forward()` 调用了 kernel 但仍有部分计算使用 `torch.*` / `F.*` 等 PyTorch 接口
+
+   **判断结果**：
+   - 若 exit code == 0（通过）→ 继续正常验证流程
+   - 若 exit code != 0（检测到退化）→ 解析 JSON 输出：
+     ```
+     verifier_result = False
+     verifier_error = "A-PyTorchFallback-Type{regression_type}: " + suggestion 字段内容
+     ```
+     跳过 `verify.py`，直接进入 **Step 6（Conductor 分析）**
+
+   > **优势**：纯静态分析，无需 NPU/torch 运行时，毫秒级完成。能检测 kernel 未调用（Type 2）和部分 PyTorch 计算（Type 3，精确到行号和调用名），比字符串检查更可靠。
 
 2. **创建验证项目**：在 `{output-path}/iter_{iteration}/verify/` 下创建 `{op_name}_torch.py` 和 `{op_name}_triton_ascend_impl.py`（每轮迭代的验证目录独立，不复用）
 3. **调用 `scripts/verify.py` 脚本**：使用 `bash` 工具执行 kernel-verifier skill 自带的验证脚本
@@ -314,22 +312,47 @@ class ModelNew(nn.Module):
 
 → **应重新生成**，并提供具体的修复建议
 
-**特别处理 - 退化成 PyTorch**：
-如果生成的代码退化成 PyTorch（即没有自定义 Triton kernel，直接调用 `torch.xx` 算子）：
-- 错误类型标记为 "A-PyTorchFallback"
-- 必须在 `conductor_suggestion` 中明确指出：
-  ```
-  错误分析：
-  - 类型：A-PyTorchFallback（退化成 PyTorch 实现）
-  - 问题：生成的代码没有 @triton.jit 装饰的 kernel 函数
-  - 问题：forward 方法直接调用 PyTorch 算子，没有使用 Triton 自定义实现
-  
-  修复建议：
-  1. 必须创建 @triton.jit 装饰的 kernel 函数
-  2. 在 kernel 中使用 triton.language (tl) API 实现核心计算
-  3. forward 方法只负责调用 kernel，不直接进行 PyTorch 计算
-  4. 参考正确的 Triton kernel 模板重写
-  ```
+**特别处理 - 退化成 PyTorch**（由 `validate_triton_impl.py` 检测，细分为三种子类型）：
+
+| 子类型 | 含义 | Conductor 修复建议 |
+|--------|------|-------------------|
+| **A-PyTorchFallback-Type1** | 完全无 `@triton.jit` kernel，全部 PyTorch | "必须创建 @triton.jit kernel 函数，在其中使用 tl.load/tl.store 实现核心计算。参考算法草图重写。" |
+| **A-PyTorchFallback-Type2** | 有 kernel 定义但 `forward()` 未调用 | "kernel 已定义但 forward() 未调用。必须在 forward() 中通过 `kernel_name[grid](...)` 形式启动 kernel。检查是否遗漏了 kernel launch 或 wrapper 函数调用。" |
+| **A-PyTorchFallback-Type3** | `forward()` 调用了 kernel 但部分计算仍使用 PyTorch | "forward() 中仍有禁止的 PyTorch 计算操作（具体见 verifier_error 中的行号和调用名）。必须将这些计算移入 @triton.jit kernel 中。forward() 只允许 buffer 分配（torch.empty 等）和形状操作（.view/.reshape 等）。" |
+
+**修复代码模板**（Type 3 示例）：
+
+```python
+# ❌ 当前代码（退化）
+def forward(self, x, w):
+    y = self.kernel[grid](x, w)
+    return y.sum(dim=-1)  # ← 第 N 行：sum 是计算操作
+
+# ✅ 修复后（纯 Triton）
+def forward(self, x, w):
+    output = torch.empty(...)
+    # 将 sum 操作移入 kernel
+    self.kernel[grid](x, w, output)
+    return output
+
+# kernel 中需要添加 sum 逻辑
+@triton.jit
+def kernel(...):
+    # ... 计算 y ...
+    result = tl.sum(y, axis=-1)  # ← 在 kernel 中实现
+    tl.store(output_ptr, result)
+```
+
+`conductor_suggestion` 模板：
+```
+错误分析：
+- 类型：A-PyTorchFallback-Type{N}（{子类型描述}）
+- 问题：{来自 validate_triton_impl.py 的 suggestion 字段}
+- 违规详情：{来自 JSON 中 violations 列表，含行号和调用名}
+
+修复建议：
+{根据子类型给出对应的修复建议，见上表}
+```
 
 ##### B 类：环境 / 基础设施错误（代码生成无法修复）
 

@@ -21,6 +21,8 @@ argument-hint: >
 ```
 输入：generated_code.py + task_file.py
     ↓
+[0. Triton 退化预检查] → scripts/validate_triton_impl.py (AST 静态分析)
+    ↓ (通过)
 [1. 创建验证项目] → 两个文件
     ↓
 [2. 执行验证脚本] → scripts/verify.py --op_name ...
@@ -32,6 +34,46 @@ argument-hint: >
 [5. 收集性能结果]
     ↓
 输出：验证结果 + 性能数据
+```
+
+---
+
+## Step 0: Triton 退化预检查（AST 静态分析）
+
+在创建验证项目之前，先使用 `validate_triton_impl.py` 对生成代码进行退化检测。此检查为纯 AST 静态分析，无需 NPU/torch 运行时，毫秒级完成。
+
+**命令模板**：
+
+```bash
+python3 <本skill所在目录的绝对路径>/scripts/validate_triton_impl.py \
+    <生成代码文件路径> --json
+```
+
+**检测三种退化类型**：
+
+| 类型 | 含义 | 检测方式 |
+|------|------|---------|
+| Type 1 | 完全无 `@triton.jit` kernel | AST 中无 `triton.jit` 装饰的函数定义 |
+| Type 2 | 有 kernel 但 `forward()` 未调用 | kernel 定义存在但 `ModelNew.forward()` 未引用（含 wrapper 函数追踪） |
+| Type 3 | 部分计算使用 PyTorch | `forward()` 中存在禁止的 `torch.*` / `F.*` 计算操作（精确到行号） |
+
+**结果判断**：
+- exit code == 0 → 通过，继续 Step 1
+- exit code != 0 → 退化检测到，解析 JSON 中的 `regression_type` 和 `suggestion`，直接返回失败
+
+**JSON 输出格式**：
+
+```json
+{
+  "valid": false,
+  "regression_type": 3,
+  "checks": {
+    "triton_kernel_exists": {"passed": true, "kernels": [...]},
+    "kernel_called_from_forward": {"passed": true, "called": [...]},
+    "no_forbidden_torch_ops": {"passed": false, "violations": [{"line": 45, "call": "F.softmax", "reason": "..."}]}
+  },
+  "suggestion": "..."
+}
 ```
 
 ---
@@ -233,9 +275,11 @@ python3 /path/to/kernel-verifier/scripts/benchmark.py \
 
 | 脚本 | 用途 |
 |------|------|
+| `scripts/validate_triton_impl.py` | 退化预检查（AST 静态分析） |
 | `scripts/verify.py` | 验证正确性 |
 | `scripts/benchmark.py` | 测试性能 |
 
 **CLI 参数**：
+- `validate_triton_impl.py`: `<file_path>`, `[--json]`
 - `verify.py`: `--op_name`, `--verify_dir`, `--triton_impl_name`, `--timeout`
 - `benchmark.py`: `--op_name`, `--verify_dir`, `--triton_impl_name`, `--warmup`, `--repeats`, `--output`
