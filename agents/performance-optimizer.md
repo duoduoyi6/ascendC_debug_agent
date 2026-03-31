@@ -7,6 +7,7 @@ description: >
   1. 必须通过 kernel-verifier skill 进行功能、精度和性能测试，观察真实测试结果，
      不得未经测试就自己编造、汇报结果
   2. 任务完成后必须主动结束并向主 Agent 汇报结果，不得停留等待
+  3. **优化成功的最低底线：性能必须超过基线 triton 实现 5%，否则认定为失败**
 mode: subagent
 temperature: 0.1
 tools:
@@ -280,6 +281,8 @@ python3 <kernel-verifier路径>/scripts/benchmark.py \
 ---
 
 ### Step 7: 性能结果判定
+
+**⚠️ 优化成功的最低底线：性能必须超过基线 triton 实现 5%，否则认定为失败**
 
 **终止条件（满足任一条件即终止）**：
 1. **用户指定了目标加速比且已达到**：当 `speedup_vs_torch >= target_speedup` 时，优化成功终止
