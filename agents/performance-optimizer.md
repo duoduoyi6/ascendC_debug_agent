@@ -7,6 +7,7 @@ description: >
   1. 必须通过 kernel-verifier skill 进行功能、精度和性能测试，观察真实测试结果，
      不得未经测试就自己编造、汇报结果
   2. 任务完成后必须主动结束并向主 Agent 汇报结果，不得停留等待
+  3. **优化成功的最低底线：性能必须超过基线 triton 实现 5%，否则认定为失败**
 mode: subagent
 temperature: 0.1
 tools:
@@ -99,7 +100,7 @@ argument-hint: >
 | target-speedup | 否 | 目标加速比（用户未指定时进行自动优化，不设置目标） |
 | warmup | 否 | 性能测试 warmup 次数（默认 5） |
 | repeats | 否 | 性能测试正式运行次数（默认 50） |
-| max-iterations | 否 | 最大优化迭代次数（默认 5） |
+| max-iterations | 否 | 最大优化迭代次数（默认 3，**最多不能超过 3 次**） |
 
 > **固定参数**：`framework=torch`、`backend=ascend`、`dsl=triton_ascend`，无需传入。
 >
@@ -117,7 +118,7 @@ argument-hint: >
 4. **创建输出目录**：在 `{output-path}/` 目录中按需创建子目录
 5. **初始化状态**：
    - `iteration = 0`
-   - `max_iterations = 5`（或输入参数）
+   - `max_iterations = 3`（或输入参数，**最大不超过 3**）
    - `warmup = 5`（或输入参数）
    - `repeats = 50`（或输入参数）
    - `target_speedup = None`（用户未指定时为 None，此时进行自动优化）
@@ -281,10 +282,12 @@ python3 <kernel-verifier路径>/scripts/benchmark.py \
 
 ### Step 7: 性能结果判定
 
+**⚠️ 优化成功的最低底线：性能必须超过基线 triton 实现 5%，否则认定为失败**
+
 **终止条件（满足任一条件即终止）**：
 1. **用户指定了目标加速比且已达到**：当 `speedup_vs_torch >= target_speedup` 时，优化成功终止
 2. **分析不出优化点**：latency-optimizer 分析认为没有更多优化空间
-3. **达到优化迭代次数上限**：`iteration >= max_iterations`
+3. **达到最大优化迭代次数（3次）**：`iteration >= 3`（**最多只能优化 3 次，禁止超出**）
 
 **决策逻辑**：
 ```
@@ -294,8 +297,8 @@ python3 <kernel-verifier路径>/scripts/benchmark.py \
 2. 分析不出优化点（latency-optimizer 报告无可优化点）
    → 终止，保留最佳结果
 
-3. iteration >= max_iterations
-   → 达到最大迭代次数，终止，保留最佳结果
+3. iteration >= 3（已达到最大优化次数）
+   → **停止优化，向主 Agent 汇报优化失败，禁止输出优化报告**
 
 4. 用户未指定目标加速比且以上条件均未满足
    → 继续优化，回到 Step 2
@@ -327,6 +330,8 @@ python3 <kernel-verifier路径>/scripts/benchmark.py \
 
 #### 决策逻辑
 
+**决策逻辑**：
+
 ```
 1. 验证失败（Step 5 失败）
    → 分析错误类型
@@ -336,7 +341,7 @@ python3 <kernel-verifier路径>/scripts/benchmark.py \
 
 2. 验证通过但优化未达标（Step 6/7）
    → 分析不出优化点 → 终止（保留最佳结果）
-   → iteration >= max_iterations → 终止（保留最佳结果）
+   → iteration >= 3 → 停止优化，向主 Agent 汇报优化失败，禁止输出优化报告
    → 否则继续优化
 ```
 
@@ -344,17 +349,16 @@ python3 <kernel-verifier路径>/scripts/benchmark.py \
 
 ### Step 9: 完成与输出
 
-无论成功还是失败，都**必须**执行以下操作：
+#### 成功时（达到目标加速比）
 
-#### 9.1 确保最终代码
+**必须**执行以下操作：
 
-- `{output-path}/optimized_code.py` 必须存在，内容为最佳优化结果
+1. **确保最终代码**：
+   - `{output-path}/optimized_code.py` 必须存在，内容为最佳优化结果
 
-#### 9.2 生成 summary.json
+2. **生成 summary.json**：
 
 使用 `write` 工具将以下内容写入 `{output-path}/summary.json`：
-
-**成功时（达到目标加速比）**：
 
 ```json
 {
@@ -374,28 +378,7 @@ python3 <kernel-verifier路径>/scripts/benchmark.py \
 }
 ```
 
-**失败时（未达到目标加速比）**：
-
-```json
-{
-  "success": false,
-  "target_speedup": 1.5,
-  "achieved_speedup": 1.23,
-  "iterations": 5,
-  "final_iteration": 4,
-  "failure_reason": "达到最大迭代次数",
-  "best_code_iteration": 3,
-  "perf_data": {
-    "avg_latency_ms": 0.8901,
-    "p50_latency_ms": 0.8700,
-    "p99_latency_ms": 1.0000,
-    "peak_memory_mb": 130.00,
-    "speedup_vs_torch": 1.23
-  }
-}
-```
-
-#### 9.3 汇报结果
+3. **汇报结果**：
 
 向主 Agent 汇报执行结果，包括：
 - 是否成功
@@ -403,6 +386,15 @@ python3 <kernel-verifier路径>/scripts/benchmark.py \
 - 总迭代次数
 - `optimized_code.py` 路径
 - `perf_result.json` 路径
+
+---
+
+#### 失败时（达到最大迭代次数 3 次仍未达到目标）
+
+**⚠️ 重要约束**：当达到最大优化迭代次数（3 次）仍未达到目标加速比时：
+- **禁止输出优化报告**（即不生成 `summary.json`）
+- **立即停止**，向主 Agent 汇报优化失败
+- 汇报内容包括：优化失败、尝试的迭代次数、最佳结果（如果有）
 
 ---
 
@@ -443,12 +435,13 @@ python3 <kernel-verifier路径>/scripts/benchmark.py \
 
 | 约束 | 说明 |
 |------|------|
-| 最大迭代次数 | 默认 5，可通过参数调整 |
+| 最大迭代次数 | **固定 3 次，禁止超出** |
 | 功能一致性 | 优化后的代码必须通过验证，保持功能一致 |
 | 目标加速比 | 用户未指定时进行自动优化（无目标上限）；用户指定时需达到目标 |
 | 文件操作范围 | 所有文件操作限制在 output-path 内 |
 | 语言 | 所有思考、分析、日志必须使用中文 |
 | 文件格式 | verify/ 目录下的三种文件仅需符合 KernelBench 格式，**不包含测试驱动代码**（测试驱动由 kernel-verifier skill 负责） |
+| 优化失败处理 | 达到最大迭代次数（3次）仍未达到目标时，**禁止输出优化报告**，立即向主 Agent 汇报优化失败 |
 
 ## 适用场景
 
@@ -465,4 +458,4 @@ python3 <kernel-verifier路径>/scripts/benchmark.py \
 
 - **典型耗时**：5-15 分钟
 - **优化效果**：通常可达 1.5x - 3x 提升
-- **平均迭代次数**：2-4 次
+- **最大迭代次数**：**3 次**
