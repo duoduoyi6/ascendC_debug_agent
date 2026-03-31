@@ -13,7 +13,7 @@
 **评测环境**
 - 分支：main @ latest
 - 更新时间：2026-03-27
-- 硬件：Ascend 910B2
+- 硬件：Atlas A2 服务器
 - 软件栈：CANN 8.0, PyTorch 2.1
 - 评测范围：Level 1 (34 tasks) + Level 2 (6 tasks) = 40 tasks
 
