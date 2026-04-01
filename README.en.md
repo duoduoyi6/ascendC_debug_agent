@@ -147,34 +147,7 @@ Serially generate tasks of level 1 in NPUKernelBench, with agent_workspace set t
 Please refer to [`benchmarks/BASELINE.md`](benchmarks/BASELINE.md)  for Triton-related data.
 
 #### AscendC(Updated 2026-03-27)
-- **Test Device**: Ascend 910B2
-- **Total Tasks**: 11
-
-| Level | Problem ID | Operator Name | Compilation | Accuracy | PyTorch Latency | Generated Code Latency | Speedup | Final Status |
-|:---:|:---:|---|:---:|:---:|---:|---:|---:|:---:|
-| 1 | 1 | `CrossV2` | ✅ | ✅ | 0.022 ms | 0.024 ms | 0.91x | success |
-| 1 | 2 | `FatreluMul` | ✅ | ✅ | 0.042 ms | 0.027 ms | 1.55x | success |
-| 1 | 3 | `ForeachLerpList` | ✅ | ✅ | 0.063 ms | 0.058 ms | 1.63x | success |
-| 1 | 4 | `ForeachPowList` | ✅ | ✅ | 0.029 ms | 0.014 ms | 2.1x | success |
-| 1 | 5 | `ForeachPowScalarList` | ✅ | ✅ | 0.0117 ms | 0.0195 ms | 0.6x | success |
-| 1 | 6 | `MulAddn` | ✅ | ✅ | 0.049 ms | 0.044 ms | 1.11x | success |
-| 1 | 7 | `LayerNormV4` | ✅ | ✅ | 0.71 ms | 0.539 ms | 1.32x | success |
-| 1 | 8 | `Logit` | ✅ | ✅ | 0.022 ms | 0.031 ms | 1.38x | success |
-| 1 | 9 | `LogitGrad` | ✅ | ✅ | 0.108 ms | 0.028 ms | 3.89x | success |
-| 1 | 10 | `MaxPool3DWithArgmaxV2` | ✅ | ✅ | 0.0154 ms | 0.0171 ms | 0.9x | success |
-| 1 | 11 | `QuantizedBatchNorm` | ✅ | ✅ | 0.571 ms | 0.235 ms | 2.43x | success |
-| 1 | 12 | `AdaptiveAvgPool3d` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
-| 1 | 13 | `AdaptiveAvgPool3dGrad` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
-| 1 | 14 | `AdaptiveMaxPool3DGrad` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
-| 1 | 15 | `TransformBiasRescaleQkv` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
-| 1 | 16 | `AddRmsNormDynamicQuantV2` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
-| 1 | 17 | `STFT` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
-| 1 | 18 | `ApplyTopKTopPWithSorted` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
-| 1 | 19 | `AvgPool3D` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
-| 1 | 20 | `AvgPool3DGrad` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
-| 1 | 21 | `BatchNormV3` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
-| 1 | 22 | `ChamferDistanceGrad` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
-| 1 | 23 | `CTCLossV3` | ✅ | ❌ | ❌ | ❌ | ❌ | failure |
+Please refer to [`benchmarks/BASELINE_0327.md`](benchmarks/BASELINE_0327.md)  for AscendC-related data.
 
 ## Project Structure
 

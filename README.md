@@ -145,34 +145,7 @@ Agent 接收到指令后，将自动执行以下流程：确认参数 → 提取
 关于 Triton 的相关数据，请参阅[`benchmarks/BASELINE.md`](benchmarks/BASELINE.md) 
 
 #### AscendC（更新于 2026-03-27）
-- **测试设备**：Ascend 910B2
-- **总任务数**：23
-
-| Level | Problem ID | 算子名称 | 编译通过 | 精度正确 | PyTorch 延迟 | 生成代码延迟 | 加速比 | 最终状态 |
-|:---:|:---:|---|:---:|:---:|---:|---:|---:|:---:|
-| 1 | 1 | `CrossV2` | ✅ | ✅ | 0.022 ms | 0.024 ms | 0.91x | 成功 |
-| 1 | 2 | `FatreluMul` | ✅ | ✅ | 0.042 ms | 0.027 ms | 1.55x | 成功 |
-| 1 | 3 | `ForeachLerpList` | ✅ | ✅ | 0.063 ms | 0.058 ms | 1.63x | 成功 |
-| 1 | 4 | `ForeachPowList` | ✅ | ✅ | 0.029 ms | 0.014 ms | 2.1x | 成功 |
-| 1 | 5 | `ForeachPowScalarList` | ✅ | ✅ | 0.0117 ms | 0.0195 ms | 0.6x | 成功 |
-| 1 | 6 | `MulAddn` | ✅ | ✅ | 0.049 ms | 0.044 ms | 1.11x | 成功 |
-| 1 | 7 | `LayerNormV4` | ✅ | ✅ | 0.71 ms | 0.539 ms | 1.32x | 成功 |
-| 1 | 8 | `Logit` | ✅ | ✅ | 0.022 ms | 0.031 ms | 1.38x | 成功 |
-| 1 | 9 | `LogitGrad` | ✅ | ✅ | 0.108 ms | 0.028 ms | 3.89x | 成功 |
-| 1 | 10 | `MaxPool3DWithArgmaxV2` | ✅ | ✅ | 0.0154 ms | 0.0171 ms | 0.9x | 成功 |
-| 1 | 11 | `QuantizedBatchNorm` | ✅ | ✅ | 0.571 ms | 0.235 ms | 2.43x | 成功 |
-| 1 | 12 | `AdaptiveAvgPool3d` | ✅ | ❌ | ❌ | ❌ | ❌ | 失败 |
-| 1 | 13 | `AdaptiveAvgPool3dGrad` | ✅ | ❌ | ❌ | ❌ | ❌ | 失败 |
-| 1 | 14 | `AdaptiveMaxPool3DGrad` | ✅ | ❌ | ❌ | ❌ | ❌ | 失败 |
-| 1 | 15 | `TransformBiasRescaleQkv` | ✅ | ❌ | ❌ | ❌ | ❌ | 失败 |
-| 1 | 16 | `AddRmsNormDynamicQuantV2` | ✅ | ❌ | ❌ | ❌ | ❌ | 失败 |
-| 1 | 17 | `STFT` | ✅ | ❌ | ❌ | ❌ | ❌ | 失败 |
-| 1 | 18 | `ApplyTopKTopPWithSorted` | ✅ | ❌ | ❌ | ❌ | ❌ | 失败 |
-| 1 | 19 | `AvgPool3D` | ✅ | ❌ | ❌ | ❌ | ❌ | 失败 |
-| 1 | 20 | `AvgPool3DGrad` | ✅ | ❌ | ❌ | ❌ | ❌ | 失败 |
-| 1 | 21 | `BatchNormV3` | ✅ | ❌ | ❌ | ❌ | ❌ | 失败 |
-| 1 | 22 | `ChamferDistanceGrad` | ✅ | ❌ | ❌ | ❌ | ❌ | 失败 |
-| 1 | 23 | `CTCLossV3` | ✅ | ❌ | ❌ | ❌ | ❌ | 失败 |
+关于 AscendC 的相关数据，请参阅[`benchmarks/BASELINE_0327.md`](benchmarks/BASELINE_0327.md) 
 
 
 
