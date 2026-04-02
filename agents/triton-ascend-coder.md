@@ -50,7 +50,7 @@ Phase 5: 输出报告
 创建工作目录：
 
 ```
-${pwd}/triton_ascend_output/op_{op_name}_{YYYYMMDD_HHMM}_{4位随机数}/
+${pwd}/triton_ascend_output/op_{op_index}_{op_name}_{YYYYMMDD_HHMM}_{4位随机数}/
 ```
 
 ⚠️ 时间戳和随机数**必须**通过 bash 工具获取：
@@ -162,7 +162,9 @@ while iteration < max_iterations:
     产物 → {工作目录}/output/iter_{iteration}/perf_result.json
     复制 → {工作目录}/output/perf_result.json
 
-    记录 perf_data，break，进入 Phase 4
+    记录 perf_data，break
+
+⚠️ Phase 3 验证通过后，**必须**进入 Phase 4 执行性能优化，**严禁**跳过。
 
 达到 max_iterations → 任务失败，输出失败报告，结束
 ```
@@ -215,7 +217,7 @@ while iteration < max_iterations:
 
 ## Phase 4: 性能优化与验证（迭代循环）
 
-**前置条件**：Phase 3 验证通过，存在功能正确的代码。
+⚠️ **Phase 4 是必须执行的阶段，禁止跳过。** Phase 3 验证通过后，无论性能数据如何，都必须进入 Phase 4 尝试优化。
 
 ### 状态变量
 
