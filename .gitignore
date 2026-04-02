@@ -5,3 +5,5 @@ benchmark_results/*
 benchmark_eval*
 kernel_meta/*
 __pycache__
+.claude
+triton_ascend_output
