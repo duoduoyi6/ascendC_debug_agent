@@ -72,38 +72,65 @@ This project mainly provides two core usage scenarios. Please select the corresp
 
 #### **3.1 Triton**
 
-#### Scenario 1: Single Operator Generation (AKG-Triton Agent)
+#### Scenario 1: Single Operator Generation
+
 Suitable for developers who need to quickly generate and verify the Triton implementation of a specific operator.
 
 **Steps**:
-1. In OpenCode, switch to `AKG-Triton` via the `/agents` command.
-2. Enter the operator generation Prompt.
 
-**Prompt Example**:
-```text
-/AKG-Triton
-Generate a softmax_mat operator implementation based on the Triton-Ascend framework. The target device architecture is ascend910b2. Please output the generated code files to the /path/to/output/ directory.
+1. Create `.claude` directory in AscendOpGenAgent and configure the Agent:
+```bash
+mkdir -p .claude
+mv agents/triton-ascend-coder.md .claude/CLAUDE.md
 ```
 
-**Execution Flow**:
-After receiving the instruction, the Agent will automatically execute the following workflow: Confirm parameters → Extract task description → Generate code → Verify accuracy and performance → Output final report.
+2. Enter the AscendOpGenAgent directory and start claude:
+```bash
+cd /path/to/AscendOpGenAgent
+claude
+```
 
-#### Scenario 2: Batch Benchmark Evaluation (Benchmark-Evaluator)
-Suitable for evaluating the overall code generation capability of the Agent on standard datasets (e.g., KernelBench).
+3. Enter the operator generation Prompt:
+```text
+Generate a softmax operator implementation based on the Triton-Ascend framework. The target device architecture is ascend910b1. Please output the generated code files to the /path/to/output/ directory.
+```
+
+**Execution Flow**: Agent automatically executes Phase 0-5: Parameter confirmation → Task construction → Algorithm design → Code generation & verification (iterative) → Performance optimization & verification (iterative) → Output report.
+
+---
+
+#### Scenario 2: Batch Benchmark Evaluation
+
+Suitable for batch generation and evaluation of multiple operators with serial execution to avoid NPU conflicts.
 
 **Steps**:
-1. In OpenCode, switch to `benchmark-evaluator` via the `/skills` command.
-2. Enter the evaluation Prompt.
 
-**Prompt Example 1: Basic Evaluation** (Only specify target and test scope)
-```text
-Evaluate tasks [20,30] of level 1 in KernelBench, with agent_workspace set to <path/to/your/AscendOpGenAgent>, using the <AKG-triton> agent.
+1. Create `.claude` directory in AscendOpGenAgent and configure the Agent:
+```bash
+mkdir -p .claude
+mv agents/triton-ascend-coder.md .claude/CLAUDE.md
 ```
 
-**Prompt Example 2: Advanced Evaluation** (Specify output path, running device, and permissions)
-```text
-Run KernelBench evaluation with the <AKG-triton> agent (workspace: <path/to/your/AscendOpGenAgent>). Target Level 1 problem_id=[6] and Level 2 problem_id=[2]. Save the generated code and results to /path/to/output. Automatically approve all permissions during execution, and specify the device ASCEND_RT_VISIBLE_DEVICES=10.
+2. Enter the AscendOpGenAgent directory and execute the batch scheduling script:
+```bash
+cd /path/to/AscendOpGenAgent
+bash .claude/batch_run.sh \
+    --benchmark-dir /path/to/KernelBench \
+    --level 1 \
+    --range 41-53 \
+    --npu 6 \
+    --output /path/to/output
 ```
+
+**Parameter Description**:
+- `--benchmark-dir`: Path to KernelBench root directory
+- `--level`: Level number (1, 2, 3, 4)
+- `--range`: Operator range, e.g., `41-53` (mutually exclusive with `--ids`)
+- `--ids`: Comma-separated operator IDs, e.g., `3,7,15` (mutually exclusive with `--range`)
+- `--npu`: NPU device ID (default 0)
+- `--output`: Output directory
+
+**Execution Flow**: The script launches an independent claude session for each operator and executes serially. Each operator completes Phase 0-5 fully. Results are automatically summarized in `batch_report.md`.
 
 #### **3.2 AscendC**
 

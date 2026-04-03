@@ -4,4 +4,7 @@ bun.lock
 benchmark_results/*
 benchmark_eval*
 kernel_meta/*
-__pycache__/*
+__pycache__
+triton_ascend_output
+framework_profile*
+.claude
