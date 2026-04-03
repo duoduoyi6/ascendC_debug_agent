@@ -71,41 +71,65 @@ cp -r skills/ ~/.config/opencode/
 本项目主要提供两个核心使用场景，请根据需求选择对应的 Agent 或 Skill。
 #### **3.1 Triton**
 
-#### 场景一：单算子生成 (AKG-Triton Agent)
+#### 场景一：单算子生成
+
 适用于开发者需要快速生成、验证某个特定算子的 Triton 实现。
 
 **操作步骤**：
-1. 在 OpenCode 中，通过 `/agents` 命令切换至 `AKG-Triton`。
-2. 输入算子生成 Prompt。
 
-**Prompt 示例**：
-```text
-/AKG-Triton
-生成一个基于 Triton-Ascend 框架的 softmax_mat 算子实现。目标设备架构为 ascend910b2，请将生成的代码文件输出至 /path/to/output/ 目录下。
+1. 在 AscendOpGenAgent 目录下创建 `.claude` 目录并配置 Agent：
+```bash
+mkdir -p .claude
+mv agents/triton-ascend-coder.md .claude/CLAUDE.md
 ```
 
-**执行流程**：
-Agent 接收到指令后，将自动执行以下流程：确认参数 → 提取任务描述 → 生成代码 → 验证精度与性能 → 输出最终报告。
+2. 进入 AscendOpGenAgent 目录，启动 claude：
+```bash
+claude
+```
 
-#### 场景二：Benchmark 批量评测 (Benchmark-Evaluator)
-适用于评估 Agent 在标准数据集（如 KernelBench）上的整体代码生成能力。
+3. 输入算子生成 Prompt：
+```text
+生成一个基于 Triton-Ascend 框架的 softmax 算子实现。目标设备架构为 ascend910b1，请将生成的代码文件输出至 /path/to/output/ 目录下。
+```
+
+**执行流程**：Agent 自动执行 Phase 0-5：参数确认 → 任务构建 → 算法设计 → 代码生成与验证（迭代） → 性能优化与验证（迭代） → 输出报告。
+
+---
+
+#### 场景二：Benchmark 批量评测
+
+适用于批量评测算子的生成效果，支持串行执行避免 NPU 冲突。
 
 **操作步骤**：
-1. 在 OpenCode 中，通过 `/agents` 命令切换至 `benchmark-scheduler`。
-2. 输入评测 Prompt。
 
-**Prompt 示例 1：基础评测**（仅指定目标与测试范围）
-```text
-评测KernelBench中level1的[20,30]任务,agent_workspace是<path/to/your/AscendOpGenAgent>
+1. 在 AscendOpGenAgent 目录下创建 `.claude` 目录并配置 Agent：
+```bash
+mkdir -p .claude
+mv agents/triton-ascend-coder.md .claude/CLAUDE.md
 ```
 
-**Prompt 示例 2：全量评测**（覆盖基线任务集，指定输出路径与设备）
-```text
-评测KernelBench中Level 1的2, 4, 10, 11, 12, 13, 14, 15, 16, 17, 33, 34, 35, 36, 41, 42, 43, 44, 45, 46, 48, 50, 51, 53, 54, 57, 61, 63, 64, 67, 82, 87, 99, 100和Level 2的6, 12, 17, 23, 30, 94的任务,
-agent_workspace是<path/to/your/AscendOpGenAgent>。
-请将生成的代码和评测结果输出到 /path/to/output 目录下。
-执行期间默认同意所有权限，并指定设备 ASCEND_RT_VISIBLE_DEVICES=10。
+2. 进入 AscendOpGenAgent 目录，执行批量调度脚本：
+```bash
+cd /path/to/AscendOpGenAgent
+bash utils/run_benchmark.sh \
+    --benchmark-dir /path/to/KernelBench \
+    --level 1 \
+    --range 1-10 \
+    --npu 0 \
+    --output /path/to/output
 ```
+
+**参数说明**：
+- `--benchmark-dir`: Benchmark 根目录路径
+- `--level`: Level 编号（1, 2, 3, 4）
+- `--range`: 算子范围，如 `41-53`（与 `--ids` 二选一）
+- `--ids`: 指定算子编号列表，逗号分隔，如 `3,7,15`（与 `--range` 二选一）
+- `--npu`: NPU 设备 ID（默认 0）
+- `--output`: 输出目录
+
+**执行流程**：脚本为每个算子启动独立的 claude session，串行执行，每个算子完整执行 Phase 0-5，自动生成 `batch_report.md` 汇总结果。
+
 #### **3.2 AscendC**
 #### 场景一：单算子生成 (Lingxi-code Agent)
 适用于开发者需要快速生成、验证某个特定算子的 AscendC 实现。
