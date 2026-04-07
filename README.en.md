@@ -22,7 +22,7 @@
       - [Scenario 1: Single Operator Generation (Lingxi-code Agent)](#scenario-1-single-operator-generation-lingxi-code-agent)
       - [Scenario 2: Batch Benchmark Evaluation (Ascend-Benchmark-Evaluator)](#scenario-2-batch-benchmark-evaluation-ascend-benchmark-evaluator)
     - [Evaluation Baseline](#evaluation-baseline)
-      - [Triton(Updated 2026-03-20)](#tritonupdated-2026-03-20)
+      - [Triton(Updated 2026-03-27)](#tritonupdated-2026-03-27)
       - [AscendC(Updated 2026-03-27)](#ascendcupdated-2026-03-27)
   - [Project Structure](#project-structure)
   - [License](#license)
@@ -47,24 +47,22 @@ Before running this project, please ensure your environment meets the following 
 - Ascend CANN 8.0+
 - Triton Ascend
 - PyTorch 2.0+
-- [OpenCode](https://opencode.ai/) (Please ensure it is correctly installed and configured)
+- Claude Code CLI (Please ensure it is correctly installed and configured)
 
 ### 2. Installation & Configuration
 
-First, clone this project and configure it into your OpenCode workspace:
+Clone this project and configure the Claude Code environment:
 
 ```bash
 # 1. Clone the project and enter the directory
 git clone https://github.com/your-repo/AscendOpGenAgent.git
 cd AscendOpGenAgent
 
-# 2. Deploy Agents and Skills to the default OpenCode configuration path
-mkdir -p ~/.config/opencode/
-cp -r agents/ ~/.config/opencode/
-cp -r skills/ ~/.config/opencode/
+# 2. Configure Claude Code (Optional, if custom configuration is needed)
+# Claude Code will automatically recognize the .claude/CLAUDE.md configuration file in the project
 ```
 
-After completion, start OpenCode, and you can select the corresponding Agents and Skills in the UI or command line.
+After completion, you can use Claude Code for development in the project directory.
 
 ### 3. Usage Scenarios
 
@@ -78,15 +76,14 @@ Suitable for developers who need to quickly generate and verify the Triton imple
 
 **Steps**:
 
-1. Create `.claude` directory in AscendOpGenAgent and configure the Agent:
+1. Configure the Agent in the AscendOpGenAgent directory:
 ```bash
 mkdir -p .claude
-mv agents/triton-ascend-coder.md .claude/CLAUDE.md
+cp agents/triton-ascend-coder.md .claude/CLAUDE.md
 ```
 
-2. Enter the AscendOpGenAgent directory and start claude:
+2. Start Claude Code:
 ```bash
-cd /path/to/AscendOpGenAgent
 claude
 ```
 
@@ -105,16 +102,16 @@ Suitable for batch generation and evaluation of multiple operators with serial e
 
 **Steps**:
 
-1. Create `.claude` directory in AscendOpGenAgent and configure the Agent:
+1. Configure the Agent in the AscendOpGenAgent directory:
 ```bash
 mkdir -p .claude
-mv agents/triton-ascend-coder.md .claude/CLAUDE.md
+cp agents/triton-ascend-coder.md .claude/CLAUDE.md
 ```
 
-2. Enter the AscendOpGenAgent directory and execute the batch scheduling script:
+2. Execute the batch scheduling script:
 ```bash
 cd /path/to/AscendOpGenAgent
-bash utils/run_benchmark.sh \
+bash utils/run_benchmark_triton.sh \
     --benchmark-dir /path/to/KernelBench \
     --level 1 \
     --range 1-10 \
@@ -130,7 +127,7 @@ bash utils/run_benchmark.sh \
 - `--npu`: NPU device ID (default 0)
 - `--output`: Output directory
 
-**Execution Flow**: The script launches an independent claude session for each operator and executes serially. Each operator completes Phase 0-5 fully. Results are automatically summarized in `batch_report.md`.
+**Execution Flow**: The script launches an independent claude session for each operator, executes serially, each operator completes Phase 0-5, and automatically generates `batch_report.md` to summarize results.laude session for each operator and executes serially. Each operator completes Phase 0-5 fully. Results are automatically summarized in `batch_report.md`.
 
 #### **3.2 AscendC**
 
@@ -168,13 +165,15 @@ Serially generate tasks of level 1 in NPUKernelBench, with agent_workspace set t
 - `<output_path>`: **[Optional]** Output directory for evaluation results and generated code.
 - `ASCEND_RT_VISIBLE_DEVICES`: **[Optional]** Specify the NPU device ID to use.
 
-### Evaluation Baseline 
+### Evaluation Baseline
+
 #### Triton(Updated 2026-03-27)
 
-Please refer to [`benchmarks/BASELINE.md`](benchmarks/BASELINE.md)  for Triton-related data.
+Please refer to [`benchmarks/BASELINE_0327.md`](benchmarks/BASELINE_0327.md) for Triton-related data.
 
 #### AscendC(Updated 2026-03-27)
-Please refer to [`benchmarks/BASELINE_0327.md`](benchmarks/BASELINE_0327.md)  for AscendC-related data.
+
+Please refer to [`benchmarks/BASELINE_0327.md`](benchmarks/BASELINE_0327.md) for AscendC-related data.
 
 ## Project Structure
 

@@ -22,7 +22,7 @@
       - [场景一：单算子生成 (Lingxi-code Agent)](#场景一单算子生成-lingxi-code-agent)
       - [场景二：Benchmark 批量评测 (Ascend-Benchmark-Evaluator)](#场景二benchmark-批量评测-ascend-benchmark-evaluator)
     - [评测基线](#评测基线)
-      - [Triton（更新于 2026-03-20）](#triton更新于-2026-03-20)
+      - [Triton（更新于 2026-03-27）](#triton更新于-2026-03-27)
       - [AscendC（更新于 2026-03-27）](#ascendc更新于-2026-03-27)
   - [项目结构](#项目结构)
   - [许可证](#许可证)
@@ -47,24 +47,22 @@
 - Ascend CANN 8.0+
 - Triton Ascend
 - PyTorch 2.0+
-- [OpenCode](https://opencode.ai/) (请确保已正确安装并配置)
+- Claude Code CLI (请确保已正确安装并配置)
 
 ### 2. 安装与配置
 
-首先，克隆本项目并将其配置到 OpenCode 的工作环境中：
+克隆本项目并配置 Claude Code 环境：
 
 ```bash
 # 1. 克隆项目并进入目录
 git clone https://github.com/your-repo/AscendOpGenAgent.git
 cd AscendOpGenAgent
 
-# 2. 部署 Agent 和 Skills 到 OpenCode 默认配置路径
-mkdir -p ~/.config/opencode/
-cp -r agents/ ~/.config/opencode/
-cp -r skills/ ~/.config/opencode/
+# 2. 配置 Claude Code（可选，如需自定义配置）
+# Claude Code 会自动识别项目中的 .claude/CLAUDE.md 配置文件
 ```
 
-完成后，启动 OpenCode，即可在界面或命令行中选择对应的 Agents 和 Skills。
+完成后，即可在项目目录中使用 Claude Code 进行开发。
 
 ### 3. 使用场景指南
 
@@ -77,10 +75,12 @@ cp -r skills/ ~/.config/opencode/
 
 **操作步骤**：
 
-1. 在 AscendOpGenAgent 目录下创建 `.claude` 目录并配置 Agent：
+1. 在 AscendOpGenAgent 目录下配置 Agent和skills：
 ```bash
 mkdir -p .claude
+mkdir -p .claude/skills
 mv agents/triton-ascend-coder.md .claude/CLAUDE.md
+mv skills/triton/* .claude/skills/
 ```
 
 2. 进入 AscendOpGenAgent 目录，启动 claude：
@@ -106,13 +106,15 @@ claude
 1. 在 AscendOpGenAgent 目录下创建 `.claude` 目录并配置 Agent：
 ```bash
 mkdir -p .claude
+mkdir -p .claude/skills
 mv agents/triton-ascend-coder.md .claude/CLAUDE.md
+mv skills/triton/* .claude/skills/
 ```
 
 2. 进入 AscendOpGenAgent 目录，执行批量调度脚本：
 ```bash
 cd /path/to/AscendOpGenAgent
-bash utils/run_benchmark.sh \
+bash utils/run_benchmark_triton.sh \
     --benchmark-dir /path/to/KernelBench \
     --level 1 \
     --range 1-10 \
@@ -166,7 +168,9 @@ Agent 接收到指令后，将自动执行以下流程：确认参数 → 提取
 - `ASCEND_RT_VISIBLE_DEVICES`: **[可选]** 指定使用的 NPU 设备 ID。
 
 ### 评测基线
-关于 Triton 的相关数据，请参阅[`benchmarks/BASELINE.md`](benchmarks/BASELINE.md) 
+
+#### Triton（更新于 2026-03-27）
+关于 Triton 的相关数据，请参阅[`benchmarks/BASELINE_0327.md`](benchmarks/BASELINE_0327.md)
 
 #### AscendC（更新于 2026-03-27）
 关于 AscendC 的相关数据，请参阅[`benchmarks/BASELINE_0327.md`](benchmarks/BASELINE_0327.md) 
