@@ -98,36 +98,51 @@ Generate a softmax operator implementation based on the Triton-Ascend framework.
 
 #### Scenario 2: Batch Benchmark Evaluation
 
-Suitable for batch generation and evaluation of multiple operators with serial execution to avoid NPU conflicts.
+Suitable for batch generation and evaluation of multiple operators with support for single NPU serial or multi-NPU parallel execution.
 
 **Steps**:
 
 1. Configure the Agent in the AscendOpGenAgent directory:
 ```bash
 mkdir -p .claude
-cp agents/triton-ascend-coder.md .claude/CLAUDE.md
+mkdir -p .claude/skills
+mv agents/triton-ascend-coder.md .claude/CLAUDE.md
+mv skills/triton/* .claude/skills/
 ```
 
 2. Execute the batch scheduling script:
+
+**Single NPU Serial Mode** (backward compatible):
 ```bash
 cd /path/to/AscendOpGenAgent
 bash utils/run_benchmark_triton.sh \
     --benchmark-dir /path/to/KernelBench \
     --level 1 \
-    --range 1-10 \
+    --range 1-30 \
     --npu 0 \
     --output /path/to/output
 ```
 
-**Parameter Description**:
-- `--benchmark-dir`: Path to KernelBench root directory
-- `--level`: Level number (1, 2, 3, 4)
-- `--range`: Operator range, e.g., `41-53` (mutually exclusive with `--ids`)
-- `--ids`: Comma-separated operator IDs, e.g., `3,7,15` (mutually exclusive with `--range`)
-- `--npu`: NPU device ID (default 0)
-- `--output`: Output directory
+**Multi-NPU Parallel Mode** (recommended for better hardware utilization):
+```bash
+cd /path/to/AscendOpGenAgent
+bash utils/run_benchmark_triton.sh \
+    --benchmark-dir /path/to/KernelBench \
+    --level 1 \
+    --range 1-30 \
+    --npu-list "0,1,2,3,4,5" \
+    --output /path/to/output
+```
 
-**Execution Flow**: The script launches an independent claude session for each operator, executes serially, each operator completes Phase 0-5, and automatically generates `batch_report.md` to summarize results.laude session for each operator and executes serially. Each operator completes Phase 0-5 fully. Results are automatically summarized in `batch_report.md`.
+**Parameter Description**:
+- `--benchmark-dir`: Path to KernelBench root directory (required)
+- `--level`: Level number, e.g., 1, 2, 3, 4 (required)
+- `--range`: Operator range, e.g., `1-30` (mutually exclusive with `--ids`)
+- `--ids`: Comma-separated operator IDs, e.g., `3,7,15` (mutually exclusive with `--range`)
+- `--npu`: Single NPU device ID, e.g., 0 (default 0, mutually exclusive with `--npu-list`)
+- `--npu-list`: Multi-NPU list, comma-separated, e.g., `0,1,2,3,4,5` (mutually exclusive with `--npu`, higher priority)
+- `--output`: Output directory (required)
+
 
 #### **3.2 AscendC**
 
