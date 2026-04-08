@@ -13,18 +13,16 @@ REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-/root/tilelang_eval}"
 CONTAINER_NAME="${CONTAINER_NAME:-zyy_cann}"
 CONTAINER_WORKDIR="${CONTAINER_WORKDIR:-/home/z00893531/tilelang-ascend}"
 REMOTE_EVAL_WORKDIR="${REMOTE_EVAL_WORKDIR:-workdir_remote_eval}"
+ASCENDC_SOC_VERSION="${ASCENDC_SOC_VERSION:-Ascend910B3}"
 ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-3}"
+ASCENDC_CLEAN_BUILD="${ASCENDC_CLEAN_BUILD:-1}"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/evaluate_performance.sh [task] [impl] [warmup] [repeat] [seed]
+Usage: scripts/evaluate_ascendc.sh [task]
 
 Arguments:
-  task      Task directory to benchmark. Defaults to current_task.
-  impl      reference | tilelang | ascendc | all. Defaults to all.
-  warmup    Warmup iterations. Defaults to 5.
-  repeat    Timed iterations. Defaults to 10.
-  seed      Random seed forwarded to utils/performance.py. Defaults to 0.
+  task    Task directory to verify. Defaults to current_task.
 
 Environment overrides:
   SSH_TARGET                 SSH host or ~/.ssh/config alias
@@ -34,14 +32,17 @@ Environment overrides:
   CONTAINER_NAME             Target docker container name
   CONTAINER_WORKDIR          Project root inside the container
   REMOTE_EVAL_WORKDIR        Working directory name used inside the container
+  ASCENDC_SOC_VERSION        SoC passed to utils/build_ascendc.py
   ASCEND_RT_VISIBLE_DEVICES  Device id used inside the container
+  ASCENDC_CLEAN_BUILD        Defaults to 1. Removes task/kernel/build before rebuilding,
+                             and replaces the remote eval workdir before syncing
 
 Examples:
-  scripts/evaluate_performance.sh
-  scripts/evaluate_performance.sh reshape_matmul_rowwise_quant_int8
-  scripts/evaluate_performance.sh reshape_matmul_rowwise_quant_int8 tilelang
-  REMOTE_EVAL_WORKDIR=workdir_remote_eval_wzz scripts/evaluate_performance.sh reshape_matmul_rowwise_quant_int8 all
-  scripts/evaluate_performance.sh reshape_matmul_rowwise_quant_int8 all 2 5 0
+  scripts/evaluate_ascendc.sh
+  scripts/evaluate_ascendc.sh current_task
+  REMOTE_EVAL_WORKDIR=workdir_remote_eval_wzz scripts/evaluate_ascendc.sh quant_matmul
+  ASCENDC_SOC_VERSION=Ascend910B3 scripts/evaluate_ascendc.sh current_task
+  ASCENDC_CLEAN_BUILD=1 scripts/evaluate_ascendc.sh matmul_leakyrelu
 EOF
 }
 
@@ -51,19 +52,19 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 fi
 
 TASK="${1:-current_task}"
-IMPL="${2:-all}"
-WARMUP="${3:-5}"
-REPEAT="${4:-10}"
-SEED="${5:-0}"
-
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 ARCHIVE_NAME="workdir_${TIMESTAMP}.tar.gz"
 LOCAL_ARCHIVE="/tmp/${ARCHIVE_NAME}"
 REMOTE_ARCHIVE="/tmp/${ARCHIVE_NAME}"
 REMOTE_SESSION_DIR="${REMOTE_BASE_DIR}/${TIMESTAMP}"
 
-if [[ ! -f "${WORKDIR}/utils/performance.py" ]]; then
-  echo "Missing performance script: ${WORKDIR}/utils/performance.py" >&2
+if [[ ! -f "${WORKDIR}/utils/verification_ascendc.py" ]]; then
+  echo "Missing verification script: ${WORKDIR}/utils/verification_ascendc.py" >&2
+  exit 1
+fi
+
+if [[ ! -f "${WORKDIR}/utils/build_ascendc.py" ]]; then
+  echo "Missing build script: ${WORKDIR}/utils/build_ascendc.py" >&2
   exit 1
 fi
 
@@ -72,10 +73,20 @@ if [[ ! -d "${WORKDIR}/${TASK}" ]]; then
   exit 1
 fi
 
-if python -c 'import tilelang; import torch; import torch_npu' >/dev/null 2>&1; then
-  echo "Detected local TileLang-Ascend environment, running local performance benchmark"
+if [[ ! -d "${WORKDIR}/${TASK}/kernel" ]]; then
+  echo "Task kernel directory not found: ${WORKDIR}/${TASK}/kernel" >&2
+  exit 1
+fi
+
+if python -c 'import torch; import torch_npu' >/dev/null 2>&1; then
+  echo "Detected local Ascend environment, building kernel and running local verification"
   cd "${WORKDIR}"
-  ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES}" python utils/performance.py "${TASK}" "${IMPL}" "${WARMUP}" "${REPEAT}" "${SEED}"
+  if [[ "${ASCENDC_CLEAN_BUILD}" == "1" ]]; then
+    python utils/build_ascendc.py "${TASK}" -v "${ASCENDC_SOC_VERSION}" --clean
+  else
+    python utils/build_ascendc.py "${TASK}" -v "${ASCENDC_SOC_VERSION}"
+  fi
+  ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES}" python utils/verification_ascendc.py "${TASK}"
   exit 0
 fi
 
@@ -137,7 +148,15 @@ mkdir -p "${REMOTE_SESSION_DIR}"
 tar -xzf "${REMOTE_ARCHIVE}" -C "${REMOTE_SESSION_DIR}"
 rm -f "${REMOTE_ARCHIVE}"
 
-docker exec "${CONTAINER_NAME}" /bin/bash -lc 'mkdir -p "${CONTAINER_WORKDIR}/${REMOTE_EVAL_WORKDIR}"'
+if [[ "${ASCENDC_CLEAN_BUILD}" == "1" ]]; then
+  docker exec "${CONTAINER_NAME}" /bin/bash -lc '
+set -euo pipefail
+rm -rf "${CONTAINER_WORKDIR}/${REMOTE_EVAL_WORKDIR}"
+mkdir -p "${CONTAINER_WORKDIR}"
+'
+else
+  docker exec "${CONTAINER_NAME}" /bin/bash -lc 'mkdir -p "${CONTAINER_WORKDIR}/${REMOTE_EVAL_WORKDIR}"'
+fi
 
 docker cp "${REMOTE_SESSION_DIR}/." "${CONTAINER_NAME}:${CONTAINER_WORKDIR}/${REMOTE_EVAL_WORKDIR}"
 
@@ -146,13 +165,18 @@ set -euo pipefail
 cd "${CONTAINER_WORKDIR}"
 source set_env.sh
 cd "${CONTAINER_WORKDIR}/${REMOTE_EVAL_WORKDIR}"
-ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES}" python utils/performance.py "${TASK}" "${IMPL}" "${WARMUP}" "${REPEAT}" "${SEED}"
+if [[ "${ASCENDC_CLEAN_BUILD}" == "1" ]]; then
+  python utils/build_ascendc.py "${TASK}" -v "${ASCENDC_SOC_VERSION}" --clean
+else
+  python utils/build_ascendc.py "${TASK}" -v "${ASCENDC_SOC_VERSION}"
+fi
+ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES}" python utils/verification_ascendc.py "${TASK}"
 '
 EOF
 
-echo "[3/4] Running performance benchmark inside container ${CONTAINER_NAME}"
+echo "[3/4] Building and verifying AscendC inside container ${CONTAINER_NAME}"
 "${SSH_CMD[@]}" \
   "${SSH_TARGET}" \
   "${REMOTE_SCRIPT}"
 
-echo "[4/4] Performance benchmark completed"
+echo "[4/4] AscendC verification completed"
