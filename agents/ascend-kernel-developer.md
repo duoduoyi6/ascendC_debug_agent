@@ -14,6 +14,7 @@ skills:
   - case-simplifier
   - tilelang-designer
   - ascendc-translator
+  - performance-analyzer
   - trace-recorder
 
 argument-hint: >
@@ -44,7 +45,7 @@ Phase 1: 环境准备           (复制算子文件到输出目录)
 Phase 2: INPUT_CASES 精简   (case-simplifier)
 Phase 3: TileLang 设计与验证 (tilelang-designer)
 Phase 4: AscendC 转译与验证  (ascendc-translator)
-Phase 5: 性能分析           
+Phase 5: 性能分析           (performance-analyzer)
 Phase 6: 全量用例验证
 Phase 7: Trace 记录         (trace-recorder)
 ```
@@ -137,7 +138,7 @@ Phase 7: Trace 记录         (trace-recorder)
 **流程**：
 1. **Block 层级设计**：生成 `{output_dir}/design/block_level/`，确定 block 级任务划分、流水骨架
 2. **Tile 层级设计**：生成 `{output_dir}/design/tile_level/`，完成可执行的 TileLang kernel
-3. **TileLang 验证与迭代**：生成 `{output_dir}/model_new_tilelang.py`，调用 `scripts/evaluate_tilelang.sh {output_dir}` 验证
+3. **TileLang 验证与迭代**：生成 `{output_dir}/model_new_tilelang.py`，调用 `tilelang-designer` skill 自带的验证脚本进行验证
 
 
 **产出**：
@@ -156,8 +157,8 @@ Phase 7: Trace 记录         (trace-recorder)
 - `{output_dir}/model_new_tilelang.py` 已存在
 
 **流程**：
-1. **TileLang 转译成 AscendC**：读取 `docs/TileLang-AscendC-API-Mapping.md`，将 TileLang 设计转译为 AscendC 实现
-2. **AscendC 验证**：编写 `{output_dir}/model_new_ascendc.py`，调用 `scripts/evaluate_ascendc.sh {output_dir}` 验证
+1. **TileLang 转译成 AscendC**：`ascendc-translator` skill 会读取其自带的 `@references/TileLang-AscendC-API-Mapping.md`，将 TileLang 设计转译为 AscendC 实现
+2. **AscendC 验证**：编写 `{output_dir}/model_new_ascendc.py`，调用 `ascendc-translator` skill 自带的验证脚本进行验证
    - 迭代次数上限为 3 次
    - 若 3 次迭代后仍未通过验证，停止迭代并报告当前状态
 
@@ -169,15 +170,25 @@ Phase 7: Trace 记录         (trace-recorder)
 
 ## Phase 5: 性能分析
 
-在正确性验证全部通过后，使用 `scripts/evaluate_performance.sh {output_dir}` 做性能分析。
+调用 `performance-analyzer` skill，对已通过正确性验证的算子实现进行性能测试。
 
-参考文档：`docs/PerformanceGuide.md`
+**前置条件**：
+- `{output_dir}/model.py` 已存在（必有）
+- `{output_dir}/model_new_tilelang.py` 已存在（必有）
+- `{output_dir}/model_new_ascendc.py` 已存在（必有）
+
+**流程**：
+1. **调用 performance-analyzer skill**：传入 `output_dir` 目录路径
+2. **执行性能测试**：skill 会自动检测存在的实现（reference/tilelang/ascendc），使用 `@references/performance.py` 进行对比测试
+3. **获取性能报告**：记录各实现的耗时和加速比
+
+**产出**：性能分析报告（markdown 格式，包含在 trace 中或直接输出）
 
 ---
 
 ## Phase 6: 全量用例验证
 
-将 `{output_dir}/model.py.bak` 恢复为 `{output_dir}/model.py`（覆盖精简后的版本，恢复全量 INPUT_CASES），然后执行 `scripts/evaluate_ascendc.sh {output_dir}` 进行一次全量用例验证。
+将 `{output_dir}/model.py.bak` 恢复为 `{output_dir}/model.py`（覆盖精简后的版本，恢复全量 INPUT_CASES），然后使用 `ascendc-translator` skill 自带的 `@references/evaluate_ascendc.sh` 进行一次全量用例验证。
 
 **⚠️ 重要**：本阶段仅用于评估实现的完备度，只执行一次评测，**禁止对 AscendC kernel、model_new_ascendc.py 或任何其他实现文件做任何修改与修复**。无论通过与否，直接记录结果并进入下一阶段。
 
@@ -213,11 +224,13 @@ Phase 7: Trace 记录         (trace-recorder)
 ├── model_new_tilelang.py        # TileLang 优化实现
 ├── model_new_ascendc.py         # AscendC 优化实现
 └── trace.md                     # 执行 trace 记录
-
-docs/                            # 文档与开发指南（项目级）
-scripts/                         # 远程评测与辅助脚本（项目级）
-tools/                           # 验证、性能分析等工具（项目级）
 ```
+
+**Skill 参考资料**（各 skill 独立维护，位于 `skills/<skill-name>/references/`）：
+- `tilelang-designer`：BlockLevelDesign.md、TileLangAscendProgrammingGuide.md、TileLangDebug.md、evaluate_tilelang.sh
+- `ascendc-translator`：dsl2Ascendc.md、TileLang-AscendC-API-Mapping.md、AscendC_knowledge/、AscendCVerification.md、evaluate_ascendc.sh
+- `performance-analyzer`：performance.py（性能测试脚本）
+- `trace-recorder`：evaluate_tilelang.sh、evaluate_ascendc.sh
 
 ---
 
@@ -243,7 +256,7 @@ tools/                           # 验证、性能分析等工具（项目级）
 | Phase 4 最大迭代 | 3 次，禁止超出 |
 | 禁止 PyTorch 退化 | model_new_*.py 中禁止 torch.* 计算操作 |
 | 文件操作范围 | 限制在 `{output_dir}/` 目录内 |
-| 验证方式 | 必须调用 scripts/ 下的评测脚本，传入 output_dir 参数 |
+| 验证方式 | 各 Phase 使用对应 Skill 自带的 `@references/` 工具 |
 | NPU 设备 | 通过 `ASCEND_RT_VISIBLE_DEVICES` 环境变量设置 |
 | 语言 | 思考、分析、日志使用中文；代码、路径使用英文 |
 
