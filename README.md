@@ -22,8 +22,8 @@
       - [场景一：单算子生成 (Lingxi-code Agent)](#场景一单算子生成-lingxi-code-agent)
       - [场景二：Benchmark 批量评测 (Ascend-Benchmark-Evaluator)](#场景二benchmark-批量评测-ascend-benchmark-evaluator)
     - [评测基线](#评测基线)
-      - [Triton（更新于 2026-03-27）](#triton更新于-2026-03-27)
-      - [AscendC（更新于 2026-03-27）](#ascendc更新于-2026-03-27)
+      - [Triton](#triton)
+      - [AscendC](#ascendc)
   - [项目结构](#项目结构)
   - [许可证](#许可证)
 
@@ -182,10 +182,10 @@ Agent 接收到指令后，将自动执行以下流程：确认参数 → 提取
 
 ### 评测基线
 
-#### Triton（更新于 2026-03-27）
-关于 Triton 的相关数据，请参阅[`benchmarks/BASELINE_0327.md`](benchmarks/BASELINE_0327.md)
+#### Triton
+关于 Triton 的相关数据，请参阅[`benchmarks/BASELINE_0408.md`](benchmarks/BASELINE_0408.md)
 
-#### AscendC（更新于 2026-03-27）
+#### AscendC
 关于 AscendC 的相关数据，请参阅[`benchmarks/BASELINE_0327.md`](benchmarks/BASELINE_0327.md) 
 
 

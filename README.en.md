@@ -22,8 +22,8 @@
       - [Scenario 1: Single Operator Generation (Lingxi-code Agent)](#scenario-1-single-operator-generation-lingxi-code-agent)
       - [Scenario 2: Batch Benchmark Evaluation (Ascend-Benchmark-Evaluator)](#scenario-2-batch-benchmark-evaluation-ascend-benchmark-evaluator)
     - [Evaluation Baseline](#evaluation-baseline)
-      - [Triton(Updated 2026-03-27)](#tritonupdated-2026-03-27)
-      - [AscendC(Updated 2026-03-27)](#ascendcupdated-2026-03-27)
+      - [Triton](#triton)
+      - [AscendC](#ascendc)
   - [Project Structure](#project-structure)
   - [License](#license)
 
@@ -182,11 +182,11 @@ Serially generate tasks of level 1 in NPUKernelBench, with agent_workspace set t
 
 ### Evaluation Baseline
 
-#### Triton(Updated 2026-03-27)
+#### Triton
 
-Please refer to [`benchmarks/BASELINE_0327.md`](benchmarks/BASELINE_0327.md) for Triton-related data.
+Please refer to [`benchmarks/BASELINE_0408.md`](benchmarks/BASELINE_0408.md) for Triton-related data.
 
-#### AscendC(Updated 2026-03-27)
+#### AscendC
 
 Please refer to [`benchmarks/BASELINE_0327.md`](benchmarks/BASELINE_0327.md) for AscendC-related data.
 
