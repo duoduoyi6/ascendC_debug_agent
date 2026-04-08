@@ -1,0 +1,26 @@
+========================================================================
+AscendC Verification Report (Full Cases)
+========================================================================
+Status    : FAIL
+Operator  : current_task
+Tolerance : atol=0.01, rtol=0.01
+------------------------------------------------------------------------
+Comparison (50 cases)
+------------------------------------------------------------------------
+case[0]-[9]: matched (all 10 simplified cases)
+case[10]: [512,512] float16 dim=0, 234 unequal (0.18%), max_abs_diff=4.41
+case[11]-[12]: matched
+case[13]: [1024,1024] float16 dim=0, 234 unequal (0.04%), max_abs_diff=4.83
+case[14]-[15]: matched
+case[16]: [128,256] float32 dim=-1, 240 unequal (1.46%), max_abs_diff=3.84
+case[17]-[39]: matched
+case[40]: [4096,8192] float32 dim=-1, 6160 unequal (0.04%), max_abs_diff=8.29
+case[41]: matched
+case[42]: [5007,3840] float16 dim=-1, 4785 unequal (0.05%), max_abs_diff=70.07
+case[43]: [1829,3072] float16 dim=-1, 1649 unequal (0.06%), max_abs_diff=1212.87
+case[44]-[46]: matched
+case[47]: [2677,13824] float32 dim=-1, 128588 unequal (0.69%), max_abs_diff=14.78
+case[48]: [1001,18432] float16 dim=-1, 119 unequal (0.001%), max_abs_diff=4.54
+case[49]: [1776,24576] float16 dim=0, 93141 unequal (0.43%), max_abs_diff=11.71
+------------------------------------------------------------------------
+Result: fail (41/50 pass, 9 fail)
