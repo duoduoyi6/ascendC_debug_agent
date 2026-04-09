@@ -12,29 +12,33 @@ class Model(nn.Module):
 
     # PyTorch native implementation of forward function
     # def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    #     B, N, S, D = x.shape
-    # 
-    #     x_reshaped = x.reshape(B, N, S, D // 2, 2)
-    # 
+    #     orig_dtype = x.dtype
+
+    #     x_f32 = x.float()
+    #     cos_f32 = cos.float()
+    #     sin_f32 = sin.float()
+
+    #     B, N, S, D = x_f32.shape
+
+    #     x_reshaped = x_f32.reshape(B, N, S, D // 2, 2)
     #     x_transposed = x_reshaped.transpose(-1, -2)
-    # 
     #     x_interleaved = x_transposed.reshape(B, N, S, D)
-    # 
-    #     cos_expanded = cos
-    #     sin_expanded = sin
-    # 
+
+    #     cos_expanded = cos_f32
+    #     sin_expanded = sin_f32
+
     #     if cos_expanded.shape[2] == 1 and S > 1:
     #         cos_expanded = cos_expanded.expand(B, N, S, D)
     #     if sin_expanded.shape[2] == 1 and S > 1:
     #         sin_expanded = sin_expanded.expand(B, N, S, D)
-    # 
+
     #     x_rotated = torch.zeros_like(x_interleaved)
     #     x_rotated[..., :D // 2] = -x_interleaved[..., D // 2:]
     #     x_rotated[..., D // 2:] = x_interleaved[..., :D // 2]
-    # 
-    #     output = x_interleaved * cos_expanded + x_rotated * sin_expanded
-    # 
-    #     return output
+
+    #     output_f32 = x_interleaved * cos_expanded + x_rotated * sin_expanded
+
+    #     return output_f32.to(orig_dtype)
 
     def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
         """

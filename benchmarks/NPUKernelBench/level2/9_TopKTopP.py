@@ -12,40 +12,24 @@ class Model(nn.Module):
 
     # PyTorch native implementation of forward function
     # def forward(self, logits: torch.Tensor, p: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
-    #     batch_size, vocab_size = logits.shape
-    #     device = logits.device
-    #     dtype = logits.dtype
-    # 
-    #     sorted_logits, sorted_indices = torch.sort(logits, dim=-1, descending=False)
-    # 
-    #     k_int = k.to(torch.int64)
-    #     k_int = torch.clamp(k_int, 1, vocab_size)
-    # 
-    #     gather_indices = (vocab_size - k_int).unsqueeze(1)
-    #     gather_indices = torch.clamp(gather_indices, 0, vocab_size - 1)
-    #     top_k_values = torch.gather(sorted_logits, 1, gather_indices)
-    # 
-    #     top_k_mask = sorted_logits < top_k_values
-    # 
-    #     sorted_logits_filtered = sorted_logits.clone()
-    #     sorted_logits_filtered[top_k_mask] = float('-inf')
-    # 
-    #     probs = F.softmax(sorted_logits_filtered, dim=-1)
-    # 
-    #     cumsum_probs = torch.cumsum(probs, dim=-1)
-    # 
-    #     p_expanded = p.unsqueeze(1)
-    #     top_p_mask = cumsum_probs <= (1.0 - p_expanded)
-    # 
+    #     ori_dtype = logits.dtype
+    #     p = p.to(torch.float32)
+
+    #     logits_sort, logits_idx = logits.sort(dim=-1, descending=False, stable=True)
+    #     kth_idx = logits_sort.size(1) - k.to(torch.long)
+    #     kth_value = logits_sort.gather(1, kth_idx.unsqueeze(dim=1))
+    #     top_k_mask = logits_sort < kth_value
+    #     logits_sort.masked_fill_(top_k_mask, -float("inf"))
+
+    #     softmax_res = logits_sort.to(torch.float32).softmax(dim=-1)
+    #     cumsum_res = softmax_res.cumsum(dim=-1)
+    #     top_p_mask = cumsum_res <= 1 - p.unsqueeze(dim=1)
     #     top_p_mask[:, -1] = False
-    # 
-    #     sorted_logits_filtered[top_p_mask] = float('-inf')
-    # 
-    #     output = torch.empty_like(logits)
-    #     for i in range(batch_size):
-    #         output[i, sorted_indices[i]] = sorted_logits_filtered[i]
-    # 
-    #     return output
+    #     logits_sort.masked_fill_(top_p_mask, -float("inf"))
+
+    #     logits = torch.empty_like(logits_sort).scatter_(dim=-1, index=logits_idx, src=logits_sort)
+
+    #     return logits.to(ori_dtype)
 
     def forward(self, logits: torch.Tensor, p: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
         """

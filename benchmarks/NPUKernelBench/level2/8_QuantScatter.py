@@ -15,30 +15,45 @@ class Model(nn.Module):
     #             quant_scales: torch.Tensor, quant_zero_points: torch.Tensor = None,
     #             axis: int = 0, quant_axis: int = 1, reduce: str = 'update') -> torch.Tensor:
     #     if axis < 0:
-    #         axis = updates.ndim + axis
-    #     if quant_axis < 0:
-    #         quant_axis = updates.ndim + quant_axis
-    # 
+    #         axis = input.ndim + axis
+
+    #     output = input.clone()
+
+    #     neg_inf_mask = (updates == -torch.inf)
+    #     pos_inf_mask = (updates == torch.inf)
+
     #     quant_scales_expanded = quant_scales
     #     while quant_scales_expanded.ndim < updates.ndim:
     #         quant_scales_expanded = quant_scales_expanded.unsqueeze(0)
-    # 
-    #     quantized_updates = torch.round(updates / quant_scales_expanded).to(torch.int8)
-    # 
-    #     output = input.clone()
-    # 
+
+    #     if quant_zero_points is not None:
+    #         quant_zp_expanded = quant_zero_points
+    #         while quant_zp_expanded.ndim < updates.ndim:
+    #             quant_zp_expanded = quant_zp_expanded.unsqueeze(0)
+    #         quantized = torch.round(updates.float() / quant_scales_expanded.float() + quant_zp_expanded.float())
+    #     else:
+    #         quantized = torch.round(updates.float() / quant_scales_expanded.float())
+    #     quantized = quantized.clamp(-128, 127).to(torch.int8)
+
+    #     quantized[neg_inf_mask] = -128
+    #     quantized[pos_inf_mask] = 127
+
     #     indices_int64 = indices.to(torch.int64)
-    # 
-    #     for i, idx in enumerate(indices_int64):
-    #         idx_val = idx.item()
-    #         slices = [slice(None)] * output.ndim
-    #         slices[axis] = idx_val
-    # 
-    #         update_slices = [slice(None)] * quantized_updates.ndim
-    #         update_slices[0] = i
-    # 
-    #         output[tuple(slices)] = quantized_updates[tuple(update_slices)]
-    # 
+    #     update_len = updates.shape[axis]
+
+    #     for i in range(indices_int64.shape[0]):
+    #         idx_val = indices_int64[i].item()
+    #         for j in range(update_len):
+    #             src_slices = [slice(None)] * quantized.ndim
+    #             src_slices[0] = i
+    #             src_slices[axis] = j
+
+    #             dst_slices = [slice(None)] * output.ndim
+    #             dst_slices[0] = i
+    #             dst_slices[axis] = idx_val + j
+
+    #             output[tuple(dst_slices)] = quantized[tuple(src_slices)]
+
     #     return output
 
     def forward(self, input: torch.Tensor, indices: torch.Tensor, updates: torch.Tensor,

@@ -11,103 +11,116 @@ class Model(nn.Module):
         super(Model, self).__init__()
 
     # PyTorch native implementation of forward function
-    # def forward(self, x: torch.Tensor, smooth_scales: torch.Tensor = None, offsets: torch.Tensor = None,
+    # def forward(self, x: torch.Tensor, smooth_scales: torch.Tensor = None, offsets: torch.Tensor = None,    
     #             group_index: torch.Tensor = None, activate_left: bool = False, quant_mode: int = 0,
     #             group_list_type: int = 0, dst_type = None) -> tuple:
     #     x_float = x.float()
-    # 
+
     #     half_size = x_float.shape[-1] // 2
     #     x_left = x_float[..., :half_size]
     #     x_right = x_float[..., half_size:]
-    # 
+
     #     if activate_left:
     #         activated = torch.sigmoid(x_left) * x_left
     #         output = activated * x_right
     #     else:
     #         activated = torch.sigmoid(x_right) * x_right
     #         output = activated * x_left
-    # 
-    #     if smooth_scales is not None and group_index is not None:
+
+    #     # Reshape to 2D for group operations
+    #     ori_shape = output.shape
+    #     prefix_shape = output.shape[:-1]
+    #     prefix_dims = 1
+    #     for s in prefix_shape:
+    #         prefix_dims *= s
+    #     last_dim = output.shape[-1]
+    #     output_2d = output.reshape(prefix_dims, last_dim)
+    #     swiglu_2d = output_2d.clone()
+
+    #     # Parse group boundaries
+    #     boundaries = None
+    #     if group_index is not None:
     #         if group_list_type == 0:
-    #             group_boundaries = [0] + group_index.tolist()
+    #             boundaries = [0] + group_index.tolist()
     #         else:
-    #             group_boundaries = [0]
+    #             boundaries = [0]
     #             cumsum = 0
-    #             for count in group_index.tolist():
-    #                 cumsum += count
-    #                 group_boundaries.append(cumsum)
-    # 
-    #         output_scaled = output.clone()
-    #         for i in range(len(group_boundaries) - 1):
-    #             start_idx = group_boundaries[i]
-    #             end_idx = group_boundaries[i + 1]
-    #             if start_idx < end_idx:
-    #                 scale = smooth_scales[i]
-    #                 output_scaled[start_idx:end_idx] = output[start_idx:end_idx] * scale
-    # 
-    #         output = output_scaled
-    #     elif smooth_scales is not None:
-    #         output = output * smooth_scales
-    # 
-    #     if quant_mode == 1:
-    #         if group_index is not None:
-    #             quant_scales_list = []
-    #             quantized_output_list = []
-    # 
-    #             if group_list_type == 0:
-    #                 group_boundaries = [0] + group_index.tolist()
-    #             else:
-    #                 group_boundaries = [0]
-    #                 cumsum = 0
-    #                 for count in group_index.tolist():
-    #                     cumsum += count
-    #                     group_boundaries.append(cumsum)
-    # 
-    #             for i in range(len(group_boundaries) - 1):
-    #                 start_idx = group_boundaries[i]
-    #                 end_idx = group_boundaries[i + 1]
-    # 
-    #                 if start_idx >= end_idx:
-    #                     continue
-    # 
-    #                 group_data = output[start_idx:end_idx]
-    # 
-    #                 if group_data.numel() > 0:
-    #                     max_val = torch.max(torch.abs(group_data))
-    #                     if max_val == 0:
-    #                         scale = torch.tensor(1.0, dtype=torch.float32, device=output.device)
-    #                     else:
-    #                         scale = max_val / 127.0
-    #                     quant_scales_list.append(scale)
-    # 
-    #                     quantized_group = torch.round(group_data / scale).to(torch.int8)
-    #                     quantized_output_list.append(quantized_group)
-    # 
-    #             if quantized_output_list:
-    #                 quantized_output = torch.cat(quantized_output_list, dim=0)
-    #                 quant_scales = torch.stack(quant_scales_list)
-    #             else:
-    #                 quantized_output = torch.zeros_like(output, dtype=torch.int8)
-    #                 quant_scales = torch.ones(1, dtype=torch.float32, device=output.device)
-    #         else:
-    #             if output.numel() > 0:
-    #                 max_val = torch.max(torch.abs(output))
-    #                 if max_val == 0:
-    #                     quant_scales = torch.tensor(1.0, dtype=torch.float32, device=output.device)
-    #                 else:
-    #                     quant_scales = max_val / 127.0
-    #             else:
-    #                 quant_scales = torch.tensor(1.0, dtype=torch.float32, device=output.device)
-    #             quantized_output = torch.round(output / quant_scales).to(torch.int8)
+    #             for c in group_index.tolist():
+    #                 cumsum += int(c)
+    #                 boundaries.append(cumsum)
+
+    #     # Determine int scale based on dst_type
+    #     is_int4 = dst_type is not None and (str(dst_type) == 'int4' or dst_type == torch.quint4x2)
+    #     if is_int4:
+    #         int_scale = 7
+    #         clip_min, clip_max = -8, 7
     #     else:
-    #         if smooth_scales is not None:
-    #             quant_scales = smooth_scales
-    #         else:
-    #             quant_scales = torch.ones(1, dtype=torch.float32, device=output.device)
-    # 
-    #         quantized_output = torch.round(output / quant_scales).to(torch.int8)
-    # 
-    #     return quantized_output, quant_scales
+    #         int_scale = 127
+    #         clip_min, clip_max = -128, 127
+
+    #     if quant_mode == 1:  # Dynamic quantization
+    #         # Apply group scales
+    #         if smooth_scales is not None and boundaries is not None:
+    #             smooth_f = smooth_scales.float()
+    #             for i in range(len(boundaries) - 1):
+    #                 start = boundaries[i]
+    #                 end = boundaries[i + 1]
+    #                 if start < end and i < smooth_f.shape[0]:
+    #                     s = smooth_f[i]
+    #                     if s.dim() >= 1 and s.shape[-1] != last_dim:
+    #                         s = s[:last_dim] if s.shape[-1] > last_dim else s
+    #                     output_2d[start:end] = swiglu_2d[start:end] * s
+    #         elif smooth_scales is not None:
+    #             output_2d = output_2d * smooth_scales.float()
+
+    #         # Per-row dynamic quantization
+    #         y_max = torch.amax(torch.abs(output_2d), dim=-1, keepdim=True)
+    #         y_max = torch.clamp(y_max, min=1e-10)
+    #         dynamic_scale = float(int_scale) / y_max
+    #         quantized_2d = torch.round(torch.clamp(output_2d * dynamic_scale, clip_min, clip_max)).to(torch.int8)
+            
+    #         if is_int4:
+    #             quantized_2d = pack_int4_to_int8(quantized_2d)
+    #             ori_shape = list(ori_shape)
+    #             ori_shape[-1] = ori_shape[-1] // 2
+            
+    #         quantized = quantized_2d.reshape(ori_shape)
+    #         quant_scales = dynamic_scale.squeeze(-1).reshape(prefix_shape)
+    #         return quantized, quant_scales
+
+    #     else:  # Static quantization (quant_mode == 0)
+    #         # Apply group scales and offsets
+    #         if smooth_scales is not None and boundaries is not None:
+    #             smooth_f = smooth_scales.float()
+    #             offsets_f = offsets.float() if offsets is not None else None
+    #             for i in range(len(boundaries) - 1):
+    #                 start = boundaries[i]
+    #                 end = boundaries[i + 1]
+    #                 if start < end and i < smooth_f.shape[0]:
+    #                     s = smooth_f[i]
+    #                     if s.dim() >= 1 and s.shape[-1] != last_dim:
+    #                         s = s[:last_dim] if s.shape[-1] > last_dim else s
+    #                     output_2d[start:end] = swiglu_2d[start:end] * s
+    #                     if offsets_f is not None and i < offsets_f.shape[0]:
+    #                         o = offsets_f[i]
+    #                         if o.dim() >= 1 and o.shape[-1] != last_dim:
+    #                             o = o[:last_dim] if o.shape[-1] > last_dim else o
+    #                         output_2d[start:end] = output_2d[start:end] + o
+    #         elif smooth_scales is not None:
+    #             output_2d = output_2d * smooth_scales.float()
+    #             if offsets is not None:
+    #                 output_2d = output_2d + offsets.float()
+
+    #         quantized_2d = torch.round(output_2d).clamp(clip_min, clip_max).to(torch.int8)
+            
+    #         if is_int4:
+    #             quantized_2d = pack_int4_to_int8(quantized_2d)
+    #             ori_shape = list(ori_shape)
+    #             ori_shape[-1] = ori_shape[-1] // 2
+            
+    #         quantized = quantized_2d.reshape(ori_shape)
+    #         quant_scales = torch.zeros(prefix_shape, dtype=torch.float32)
+    #         return quantized, quant_scales
 
     def forward(self, x: torch.Tensor, smooth_scales: torch.Tensor = None, offsets: torch.Tensor = None,
                 group_index: torch.Tensor = None, activate_left: bool = False, quant_mode: int = 0,
