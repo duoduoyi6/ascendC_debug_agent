@@ -48,6 +48,7 @@
 - Triton Ascend
 - PyTorch 2.0+
 - Claude Code CLI (请确保已正确安装并配置)
+- tilelang-ascend (参考https://github.com/tile-ai/tilelang-ascend/blob/ascendc_pto/README.md#method-3-compile-and-install-from-source 安装)
 
 ### 2. 安装与配置
 

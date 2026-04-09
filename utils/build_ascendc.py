@@ -20,10 +20,6 @@ def _resolve_task_dir(op: str) -> Path:
     if direct.is_dir():
         return direct
 
-    nested = WORKDIR / "current_task"
-    if nested.is_dir() and op == "current_task":
-        return nested
-
     raise FileNotFoundError(f"Cannot find task directory for op '{op}'")
 
 
