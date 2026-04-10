@@ -191,7 +191,7 @@ Phase 7: Trace 记录         (trace-recorder)
 
 将 `{output_dir}/model.py.bak` 恢复为 `{output_dir}/model.py`（覆盖精简后的版本，恢复全量 INPUT_CASES），然后使用 `ascendc-translator` skill 自带的 `@references/evaluate_ascendc.sh` 进行一次全量用例验证。
 
-**⚠️ 重要**：本阶段仅用于评估实现的完备度，只执行一次评测，**禁止对 AscendC kernel、model_new_ascendc.py 或任何其他实现文件做任何修改与修复**。无论通过与否，直接记录结果并进入下一阶段。
+如果验证过程中出现失败用例，**仅允许修改 `{output_dir}/kernel/` 目录下的 AscendC kernel 文件**（禁止修改 `model_new_ascendc.py` 或其他任何文件）。每次修复后重新运行验证，**最多尝试 3 次**（含首次验证），超过次数或所有失败用例均已解决后，无论通过与否，直接记录结果并进入下一阶段。
 
 ---
 
