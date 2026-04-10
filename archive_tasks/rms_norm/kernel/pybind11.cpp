@@ -24,6 +24,14 @@ extern "C" void rms_norm_single_row_do(
     uint8_t *y,
     uint8_t *tiling);
 
+extern "C" void rms_norm_splitd_do(
+    uint32_t blockDim,
+    void *stream,
+    uint8_t *x,
+    uint8_t *gamma,
+    uint8_t *y,
+    uint8_t *tiling);
+
 namespace rms_norm_ext {
 
 using LaunchFn = void (*)(uint32_t, void *, uint8_t *, uint8_t *, uint8_t *, uint8_t *);
@@ -62,7 +70,14 @@ at::Tensor run_rms_norm(const at::Tensor &x, const at::Tensor &gamma, double eps
     auto tilingNpu = tilingCpu.to(at::kPrivateUse1);
 
     auto aclStream = c10_npu::getCurrentNPUStream().stream(false);
-    LaunchFn launch = (n <= 1024) ? rms_norm_merge_n_do : rms_norm_single_row_do;
+    LaunchFn launch = nullptr;
+    if (n <= 1024) {
+        launch = rms_norm_merge_n_do;
+    } else if (n > 8192) {
+        launch = rms_norm_splitd_do;
+    } else {
+        launch = rms_norm_single_row_do;
+    }
     launch(
         usedCoreNum,
         aclStream,

@@ -190,12 +190,10 @@ def rms_norm(M, N, eps=1e-5, in_dtype="float32", out_dtype="float32"):
             x_ub = T.alloc_ub((1, block_N), "float32")
             x_sq_ub = T.alloc_ub((1, block_N), "float32")
             gamma_ub = T.alloc_ub((1, block_N), "float32")
-            gamma_broad_ub = T.alloc_ub((1, block_N), "float32")
             out_ub = T.alloc_ub((1, block_N), "float32")
             out_cast_ub = T.alloc_ub((1, block_N), out_dtype)
 
             reduce_tmp = T.alloc_ub((2 * block_N,), "uint8")
-            gamma_bcast_tmp = T.alloc_ub((2, block_N), "uint8")
 
             with T.Scope("V"):
                 for local_idx in T.serial(tasks_per_core):
@@ -244,9 +242,8 @@ def rms_norm(M, N, eps=1e-5, in_dtype="float32", out_dtype="float32"):
                                     else:
                                         T.copy(Gamma[col_base:col_base + valid_n], gamma_ub[0, 0:valid_n])
 
-                                    T.tile.broadcast(gamma_broad_ub, gamma_ub, gamma_bcast_tmp)
                                     T.tile.mul(out_ub, x_ub, inv_rms)
-                                    T.tile.mul(out_ub, out_ub, gamma_broad_ub)
+                                    T.tile.mul(out_ub, out_ub, gamma_ub)
 
                                     if need_cast_output:
                                         T.tile.cast(out_cast_ub, out_ub, mode=out_cast_mode, count=block_N)
