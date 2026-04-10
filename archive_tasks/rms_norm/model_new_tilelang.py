@@ -22,8 +22,7 @@ class ModelNew(nn.Module):
             m,
             n,
             eps=self.eps,
-            in_dtype=str(x.dtype).split(".")[-1],
-            out_dtype=str(x.dtype).split(".")[-1],
+            dtype=str(x.dtype).split(".")[-1],
         )
 
     def forward(self, x: torch.Tensor, gamma: torch.Tensor):

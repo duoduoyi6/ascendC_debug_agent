@@ -5,8 +5,8 @@ This file keeps three specialized prim_funcs:
 - single_row: preferred when 1024 < N <= 8192
 - splitd: preferred when N > 8192
 
-The kernel performs both the input cast to float32 and the final cast back to
-the requested output dtype, so the Python wrapper only handles reshaping.
+The kernel uses one external dtype for input/output tensors and accumulates in
+float32 internally, matching the AscendC interface.
 """
 
 import tilelang
@@ -19,7 +19,7 @@ pass_configs = {
 
 
 @tilelang.jit(out_idx=[2], pass_configs=pass_configs)
-def rms_norm(M, N, eps=1e-5, in_dtype="float32", out_dtype="float32"):
+def rms_norm(M, N, eps=1e-5, dtype="float32"):
     block_M = 64
     block_N = 1024
     num_physical_cores = 20
@@ -32,25 +32,24 @@ def rms_norm(M, N, eps=1e-5, in_dtype="float32", out_dtype="float32"):
     row_factor = 8
     row_loops = T.ceildiv(sub_block_M, row_factor)
     n_num = T.ceildiv(N, block_N)
-    need_cast_input = in_dtype != "float32"
-    need_cast_output = out_dtype != "float32"
-    out_cast_mode = "CAST_ROUND" if out_dtype == "bfloat16" else "CAST_NONE"
+    need_cast = dtype != "float32"
+    out_cast_mode = "CAST_ROUND" if dtype == "bfloat16" else "CAST_NONE"
 
     eps_const = T.float32(eps)
     inv_n_const = T.float32(1.0 / N)
 
     @T.prim_func
     def merge_n(
-        X: T.Tensor((M, N), in_dtype),
-        Gamma: T.Tensor((N,), in_dtype),
-        Y: T.Tensor((M, N), out_dtype),
+        X: T.Tensor((M, N), dtype),
+        Gamma: T.Tensor((N,), dtype),
+        Y: T.Tensor((M, N), dtype),
     ):
         with T.Kernel(used_core_num, is_npu=True) as (cid, vid):
-            gamma_in_ub = T.alloc_ub((1, N), in_dtype)
-            x_in_rows_ub = T.alloc_ub((row_factor, N), in_dtype)
-            out_cast_rows_ub = T.alloc_ub((row_factor, N), out_dtype)
-            single_x_in_row_ub = T.alloc_ub((1, N), in_dtype)
-            single_out_cast_row_ub = T.alloc_ub((1, N), out_dtype)
+            gamma_in_ub = T.alloc_ub((1, N), dtype)
+            x_in_rows_ub = T.alloc_ub((row_factor, N), dtype)
+            out_cast_rows_ub = T.alloc_ub((row_factor, N), dtype)
+            single_x_in_row_ub = T.alloc_ub((1, N), dtype)
+            single_out_cast_row_ub = T.alloc_ub((1, N), dtype)
             x_ub = T.alloc_ub((row_factor, N), "float32")
             x_sq_ub = T.alloc_ub((row_factor, N), "float32")
             gamma_ub = T.alloc_ub((1, N), "float32")
@@ -73,7 +72,7 @@ def rms_norm(M, N, eps=1e-5, in_dtype="float32", out_dtype="float32"):
             single_reduce_tmp = T.alloc_ub((2 * N,), "uint8")
 
             with T.Scope("V"):
-                if need_cast_input:
+                if need_cast:
                     T.copy(Gamma[0], gamma_in_ub)
                     T.tile.cast(gamma_ub, gamma_in_ub, mode="CAST_NONE", count=N)
                 else:
@@ -88,7 +87,7 @@ def rms_norm(M, N, eps=1e-5, in_dtype="float32", out_dtype="float32"):
                         for r in T.serial(row_loops):
                             row_base = bx * block_M + vid * sub_block_M + r * row_factor
                             if row_base + row_factor <= M:
-                                if need_cast_input:
+                                if need_cast:
                                     T.copy(X[row_base:row_base + row_factor, :], x_in_rows_ub)
                                     T.tile.cast(x_ub, x_in_rows_ub, mode="CAST_NONE", count=row_factor * N)
                                 else:
@@ -101,7 +100,7 @@ def rms_norm(M, N, eps=1e-5, in_dtype="float32", out_dtype="float32"):
                                 T.tile.broadcast(rstd_broad_ub, rstd_ub, rstd_bcast_tmp)
                                 T.tile.mul(out_ub, x_ub, rstd_broad_ub)
                                 T.tile.mul(out_ub, out_ub, gamma_broad_ub)
-                                if need_cast_output:
+                                if need_cast:
                                     T.tile.cast(out_cast_rows_ub, out_ub, mode=out_cast_mode, count=row_factor * N)
                                     T.copy(out_cast_rows_ub, Y[row_base:row_base + row_factor, :])
                                 else:
@@ -110,7 +109,7 @@ def rms_norm(M, N, eps=1e-5, in_dtype="float32", out_dtype="float32"):
                                 for rr in T.serial(row_factor):
                                     row_idx = row_base + rr
                                     if row_idx < M:
-                                        if need_cast_input:
+                                        if need_cast:
                                             T.copy(X[row_idx, :], single_x_in_row_ub)
                                             T.tile.cast(single_x_ub, single_x_in_row_ub, mode="CAST_NONE", count=N)
                                         else:
@@ -123,7 +122,7 @@ def rms_norm(M, N, eps=1e-5, in_dtype="float32", out_dtype="float32"):
                                         single_rstd = single_x_sq_ub[0, 0]
                                         T.tile.mul(single_out_ub, single_x_ub, single_rstd)
                                         T.tile.mul(single_out_ub, single_out_ub, gamma_ub)
-                                        if need_cast_output:
+                                        if need_cast:
                                             T.tile.cast(single_out_cast_row_ub, single_out_ub, mode=out_cast_mode, count=N)
                                             T.copy(single_out_cast_row_ub, Y[row_idx, :])
                                         else:
@@ -131,14 +130,14 @@ def rms_norm(M, N, eps=1e-5, in_dtype="float32", out_dtype="float32"):
 
     @T.prim_func
     def single_row(
-        X: T.Tensor((M, N), in_dtype),
-        Gamma: T.Tensor((N,), in_dtype),
-        Y: T.Tensor((M, N), out_dtype),
+        X: T.Tensor((M, N), dtype),
+        Gamma: T.Tensor((N,), dtype),
+        Y: T.Tensor((M, N), dtype),
     ):
         with T.Kernel(used_core_num, is_npu=True) as (cid, vid):
-            gamma_in_row_ub = T.alloc_ub((1, N), in_dtype)
-            x_in_row_ub = T.alloc_ub((1, N), in_dtype)
-            out_cast_row_ub = T.alloc_ub((1, N), out_dtype)
+            gamma_in_row_ub = T.alloc_ub((1, N), dtype)
+            x_in_row_ub = T.alloc_ub((1, N), dtype)
+            out_cast_row_ub = T.alloc_ub((1, N), dtype)
             x_ub = T.alloc_ub((1, N), "float32")
             x_sq_ub = T.alloc_ub((1, N), "float32")
             gamma_ub = T.alloc_ub((1, N), "float32")
@@ -147,7 +146,7 @@ def rms_norm(M, N, eps=1e-5, in_dtype="float32", out_dtype="float32"):
             reduce_tmp = T.alloc_ub((2 * N,), "uint8")
 
             with T.Scope("V"):
-                if need_cast_input:
+                if need_cast:
                     T.copy(Gamma[0], gamma_in_row_ub)
                     T.tile.cast(gamma_ub, gamma_in_row_ub, mode="CAST_NONE", count=N)
                 else:
@@ -159,7 +158,7 @@ def rms_norm(M, N, eps=1e-5, in_dtype="float32", out_dtype="float32"):
                         for row in T.serial(sub_block_M):
                             row_idx = bx * block_M + vid * sub_block_M + row
                             if row_idx < M:
-                                if need_cast_input:
+                                if need_cast:
                                     T.copy(X[row_idx, :], x_in_row_ub)
                                     T.tile.cast(x_ub, x_in_row_ub, mode="CAST_NONE", count=N)
                                 else:
@@ -172,7 +171,7 @@ def rms_norm(M, N, eps=1e-5, in_dtype="float32", out_dtype="float32"):
                                 inv_rms = x_sq_ub[0, 0]
                                 T.tile.mul(out_ub, x_ub, inv_rms)
                                 T.tile.mul(out_ub, out_ub, gamma_ub)
-                                if need_cast_output:
+                                if need_cast:
                                     T.tile.cast(out_cast_row_ub, out_ub, mode=out_cast_mode, count=N)
                                     T.copy(out_cast_row_ub, Y[row_idx, :])
                                 else:
@@ -180,18 +179,18 @@ def rms_norm(M, N, eps=1e-5, in_dtype="float32", out_dtype="float32"):
 
     @T.prim_func
     def splitd(
-        X: T.Tensor((M, N), in_dtype),
-        Gamma: T.Tensor((N,), in_dtype),
-        Y: T.Tensor((M, N), out_dtype),
+        X: T.Tensor((M, N), dtype),
+        Gamma: T.Tensor((N,), dtype),
+        Y: T.Tensor((M, N), dtype),
     ):
         with T.Kernel(used_core_num, is_npu=True) as (cid, vid):
-            x_in_ub = T.alloc_ub((1, block_N), in_dtype)
-            gamma_in_ub = T.alloc_ub((1, block_N), in_dtype)
+            x_in_ub = T.alloc_ub((1, block_N), dtype)
+            gamma_in_ub = T.alloc_ub((1, block_N), dtype)
             x_ub = T.alloc_ub((1, block_N), "float32")
             x_sq_ub = T.alloc_ub((1, block_N), "float32")
             gamma_ub = T.alloc_ub((1, block_N), "float32")
             out_ub = T.alloc_ub((1, block_N), "float32")
-            out_cast_ub = T.alloc_ub((1, block_N), out_dtype)
+            out_cast_ub = T.alloc_ub((1, block_N), dtype)
 
             reduce_tmp = T.alloc_ub((2 * block_N,), "uint8")
 
@@ -208,7 +207,7 @@ def rms_norm(M, N, eps=1e-5, in_dtype="float32", out_dtype="float32"):
                                     col_base = by * block_N
                                     valid_n = T.if_then_else(col_base + block_N <= N, block_N, N - col_base)
                                     T.tile.fill(x_ub, 0.0)
-                                    if need_cast_input:
+                                    if need_cast:
                                         T.tile.fill(x_in_ub, 0.0)
                                         T.copy(X[row_idx:row_idx + 1, col_base:col_base + valid_n], x_in_ub[:, 0:valid_n])
                                         T.tile.cast(x_ub, x_in_ub, mode="CAST_NONE", count=block_N)
@@ -227,7 +226,7 @@ def rms_norm(M, N, eps=1e-5, in_dtype="float32", out_dtype="float32"):
                                     col_base = by * block_N
                                     valid_n = T.if_then_else(col_base + block_N <= N, block_N, N - col_base)
                                     T.tile.fill(x_ub, 0.0)
-                                    if need_cast_input:
+                                    if need_cast:
                                         T.tile.fill(x_in_ub, 0.0)
                                         T.copy(X[row_idx:row_idx + 1, col_base:col_base + valid_n], x_in_ub[:, 0:valid_n])
                                         T.tile.cast(x_ub, x_in_ub, mode="CAST_NONE", count=block_N)
@@ -235,7 +234,7 @@ def rms_norm(M, N, eps=1e-5, in_dtype="float32", out_dtype="float32"):
                                         T.copy(X[row_idx:row_idx + 1, col_base:col_base + valid_n], x_ub[:, 0:valid_n])
 
                                     T.tile.fill(gamma_ub, 0.0)
-                                    if need_cast_input:
+                                    if need_cast:
                                         T.tile.fill(gamma_in_ub, 0.0)
                                         T.copy(Gamma[col_base:col_base + valid_n], gamma_in_ub[0, 0:valid_n])
                                         T.tile.cast(gamma_ub, gamma_in_ub, mode="CAST_NONE", count=block_N)
@@ -245,7 +244,7 @@ def rms_norm(M, N, eps=1e-5, in_dtype="float32", out_dtype="float32"):
                                     T.tile.mul(out_ub, x_ub, inv_rms)
                                     T.tile.mul(out_ub, out_ub, gamma_ub)
 
-                                    if need_cast_output:
+                                    if need_cast:
                                         T.tile.cast(out_cast_ub, out_ub, mode=out_cast_mode, count=block_N)
                                         T.copy(out_cast_ub[:, 0:valid_n], Y[row_idx:row_idx + 1, col_base:col_base + valid_n])
                                     else:
