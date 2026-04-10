@@ -174,7 +174,7 @@ python utils/verification_tilelang.py "${TASK}"
 EOF
 
 echo "[3/4] Running verification inside container ${CONTAINER_NAME}"
-timeout 3600 "${SSH_CMD[@]}" \
+"${SSH_CMD[@]}" \
   "${SSH_TARGET}" \
   "${REMOTE_SCRIPT}"
 
