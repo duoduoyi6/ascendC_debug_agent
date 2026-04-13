@@ -21,7 +21,7 @@ argument-hint: >
   输入格式: "生成ascendC算子，npu=<NPU_ID>，算子描述文件为 <OP_FILE>，输出到 <OUTPUT_DIR>/"
   参数:
     - npu: NPU 设备 ID (默认 0)
-    - 算子描述文件: 算子的 PyTorch Model 定义文件路径 (包含 INPUT_CASES)
+    - 算子描述文件: 算子的 PyTorch Model 定义文件路径
     - 输出目录: 结果输出目录路径
 ---
 
@@ -42,7 +42,7 @@ argument-hint: >
 ```
 Phase 0: 参数确认           (解析 npu, op_file, output_dir)
 Phase 1: 环境准备           (复制算子文件到输出目录)
-Phase 2: INPUT_CASES 精简   (case-simplifier)
+Phase 2: 测试用例精简       (case-simplifier)
 Phase 3: TileLang 设计与验证 (tilelang-designer + 退化检测)
 Phase 4: AscendC 转译与验证  (ascendc-translator + 退化检测)
 Phase 5: 性能分析           (performance-analyzer)
@@ -100,7 +100,8 @@ Phase 7: Trace 记录         (trace-recorder)
 ```
 {output_dir}/                    # 用户指定的输出目录
 ├── model.py                     # 从 op_file 复制（算子描述文件）
-├── model.py.bak                 # 原始 model.py 备份（用于全量验证）
+├── <op_name>.json               # 从原始 benchmark 复制（测试用例，JSON Lines）
+├── <op_name>.json.bak           # 原始 .json 备份（用于全量验证）
 ├── design/                      # TileLang 设计文件
 │   ├── block_level/             # Block-level 设计
 │   └── tile_level/              # Tile-level 设计（完整 TileLang kernel）
@@ -113,27 +114,29 @@ Phase 7: Trace 记录         (trace-recorder)
 **操作步骤**：
 1. 创建 `{output_dir}/` 目录（如不存在）
 2. 复制 `{op_file}` 到 `{output_dir}/model.py`
-3. 后续所有操作都在 `{output_dir}/` 目录下进行
+3. 查找 `{op_file}` 同级目录下与算子同名的 `.json` 文件（如 `31_ELU.json`），若存在则复制到 `{output_dir}/`
+4. 后续所有操作都在 `{output_dir}/` 目录下进行
 
 
 
 ---
 
-## Phase 2: INPUT_CASES 精简
+## Phase 2: 测试用例精简
 
-调用 `case-simplifier` skill，读取 `{output_dir}/model.py` 中的 `INPUT_CASES`，对其进行精简，使 case 数量尽量不超过 10 个，同时保证覆盖度。
+调用 `case-simplifier` skill，读取 `{output_dir}` 中与算子对应的 `.json` 文件（JSON Lines 格式，每行一个 `{"inputs": [...]}` 对象），对其中的测试 cases 进行精简，使 case 数量尽量不超过 10 个，同时保证覆盖度。
 
 **前置操作**：
-- 先将 `{output_dir}/model.py` 备份为 `{output_dir}/model.py.bak`（保留全量用例原件）
+- 先将目标 `.json` 文件备份为同名 `.json.bak`（保留全量用例原件）
+- 如果 `{output_dir}` 中同时存在原始 benchmark 的 `.json` 文件，需确保它已被复制到输出目录
 
 **精简原则**：
-1. **dtype 覆盖**：原 INPUT_CASES 中出现的每种 tensor dtype 至少保留一个 case
+1. **dtype 覆盖**：原 cases 中出现的每种 tensor dtype 至少保留一个 case
 2. **attribute 可选值覆盖**：对于 `type: "attr"` 的输入，覆盖不同取值类别
-3. **shape 维度覆盖**：覆盖原 INPUT_CASES 中出现的不同 tensor 维度数
+3. **shape 维度覆盖**：覆盖原 cases 中出现的不同 tensor 维度数
 4. **shape 极端值覆盖**：保留极端小和极端大的 case
 5. **广播模式覆盖**：保留至少一个 broadcasting case（如适用）
 
-**产出**：精简后的 `{output_dir}/model.py`（INPUT_CASES ≤ 10）
+**产出**：精简后的 `{output_dir}/<op_name>.json`（case 数 ≤ 10）
 
 ---
 
@@ -440,7 +443,7 @@ while ac_iteration < max_ac_iterations:
 
 ## Phase 6: 全量用例验证
 
-将 `{output_dir}/model.py.bak` 恢复为 `{output_dir}/model.py`（覆盖精简后的版本，恢复全量 INPUT_CASES），然后使用 `ascendc-translator` skill 自带的 `@references/evaluate_ascendc.sh` 进行一次全量用例验证。
+将 `{output_dir}/<op_name>.json.bak` 恢复为 `{output_dir}/<op_name>.json`（覆盖精简后的版本，恢复全量测试用例），然后使用 `ascendc-translator` skill 自带的 `@references/evaluate_ascendc.sh` 进行一次全量用例验证。
 
 如果验证过程中出现失败用例，**仅允许修改 `{output_dir}/kernel/` 目录下的 AscendC kernel 文件**（禁止修改 `model_new_ascendc.py` 或其他任何文件）。每次修复后重新运行验证，**最多尝试 3 次**（含首次验证），超过次数或所有失败用例均已解决后，无论通过与否，直接记录结果并进入下一阶段。
 
@@ -467,8 +470,9 @@ while ac_iteration < max_ac_iterations:
 
 ```
 ├── {output_dir}/                   # 用户指定的输出目录（如 31_ELU/）
-|  ├── model.py                     # 算子描述文件（精简后）
-|  ├── model.py.bak                 # 原始 model.py 备份
+|  ├── model.py                     # 算子描述文件
+|  ├── <op_name>.json               # 测试用例文件（精简后）
+|  ├── <op_name>.json.bak           # 原始 .json 备份
 |  ├── design/                      # TileLang 设计文件
 |  │   ├── block_level/             # Block-level 设计
 |  │   └── tile_level/              # Tile-level 设计
