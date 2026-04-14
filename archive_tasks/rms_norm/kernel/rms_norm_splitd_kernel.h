@@ -10,16 +10,19 @@
 
 #include "kernel_common.h"
 #include "rms_norm_tiling.h"
+#include "vector_tile.h"
 
 template <typename dataType>
 class RmsNormSplitDKernel {
 public:
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR gamma, GM_ADDR y, GM_ADDR tilingGM, AscendC::TPipe *pipe)
+    __aicore__ inline void Init(
+        GM_ADDR x, GM_ADDR gamma, GM_ADDR y, GM_ADDR invRms, GM_ADDR tilingGM, AscendC::TPipe *pipe)
     {
         CopyTiling(&tiling_, tilingGM);
         xGM_.SetGlobalBuffer(reinterpret_cast<__gm__ dataType *>(x), tiling_.M * tiling_.N);
         gammaGM_.SetGlobalBuffer(reinterpret_cast<__gm__ dataType *>(gamma), tiling_.N);
         yGM_.SetGlobalBuffer(reinterpret_cast<__gm__ dataType *>(y), tiling_.M * tiling_.N);
+        invRmsGM_.SetGlobalBuffer(reinterpret_cast<__gm__ dataType *>(invRms), tiling_.M);
 
         if ASCEND_IS_AIV {
             pipe_ = pipe;
@@ -27,10 +30,11 @@ public:
             pipe_->InitBuffer(xInQueue_, 1, kBlockN * sizeof(dataType));
             pipe_->InitBuffer(gammaInQueue_, 1, kBlockN * sizeof(dataType));
             pipe_->InitBuffer(yOutQueue_, 1, kBlockN * sizeof(dataType));
-            pipe_->InitBuffer(accumBuf_, kTileFloatBytes);
+            pipe_->InitBuffer(invRmsOutQueue_, 1, sizeof(dataType));
             pipe_->InitBuffer(reduceBuf_, kBlockN * sizeof(float));
             pipe_->InitBuffer(sumBuf_, 16 * sizeof(float));
             pipe_->InitBuffer(tempBuf_, kTileFloatBytes);
+            pipe_->InitBuffer(invRmsBuf_, sizeof(float));
             if constexpr (!std::is_same_v<dataType, float>) {
                 pipe_->InitBuffer(xCastBuf_, kTileFloatBytes);
                 pipe_->InitBuffer(gammaCastBuf_, kTileFloatBytes);
@@ -80,35 +84,6 @@ private:
         return (colBase + kBlockN <= tiling_.N) ? kBlockN : (tiling_.N - colBase);
     }
 
-    template <typename T>
-    __aicore__ inline uint32_t ValidBytes(int32_t validN) const
-    {
-        return static_cast<uint32_t>(validN * static_cast<int32_t>(sizeof(T)));
-    }
-
-    template <typename T>
-    __aicore__ inline void CopyGmToUbTile(
-        AscendC::LocalTensor<T> &dst,
-        AscendC::GlobalTensor<T> src,
-        int32_t validN)
-    {
-        const uint32_t validBytes = ValidBytes<T>(validN);
-        const uint32_t padElems = static_cast<uint32_t>(kBlockN - validN);
-        AscendC::DataCopyExtParams copyParams{1, validBytes, 0, 0, 0};
-        AscendC::DataCopyPadExtParams<T> padParams{true, 0, static_cast<uint8_t>(padElems), static_cast<T>(0)};
-        AscendC::DataCopyPad(dst, src, copyParams, padParams);
-    }
-
-    template <typename T>
-    __aicore__ inline void CopyUbToGmTile(
-        AscendC::GlobalTensor<T> dst,
-        AscendC::LocalTensor<T> &src,
-        int32_t validN)
-    {
-        AscendC::DataCopyExtParams copyParams{1, ValidBytes<T>(validN), 0, 0, 0};
-        AscendC::DataCopyPad(dst, src, copyParams);
-    }
-
     __aicore__ inline AscendC::RoundMode OutputRoundMode() const
     {
         if constexpr (std::is_same_v<dataType, bfloat16_t>) {
@@ -155,63 +130,108 @@ private:
         }
     }
 
-    __aicore__ inline void ProcessRow(int rowIdx)
+    __aicore__ inline void PrepareInvRmsTensor(
+        AscendC::LocalTensor<float> &dst,
+        AscendC::LocalTensor<dataType> &out)
     {
-        accumLocal_ = accumBuf_.Get<float>();
+        if constexpr (std::is_same_v<dataType, float>) {
+            dst = out.template ReinterpretCast<float>();
+        } else {
+            dst = invRmsBuf_.Get<float>();
+        }
+    }
+
+    __aicore__ inline void CopyInX(int32_t rowIdx, int32_t colBase, int32_t validN)
+    {
+        xInQueue_.AllocTensor<dataType>(xInLocal_);
+        LoadGmToUb(xInLocal_, xGM_[rowIdx * tiling_.N + colBase], static_cast<uint32_t>(validN));
+        xInQueue_.EnQue(xInLocal_);
+    }
+
+    __aicore__ inline void CopyInGamma(int32_t colBase, int32_t validN)
+    {
+        gammaInQueue_.AllocTensor<dataType>(gammaInLocal_);
+        LoadGmToUb(gammaInLocal_, gammaGM_[colBase], static_cast<uint32_t>(validN));
+        gammaInQueue_.EnQue(gammaInLocal_);
+    }
+
+    __aicore__ inline void CopyOutY(int32_t rowIdx, int32_t colBase, int32_t validN)
+    {
+        yOutQueue_.DeQue<dataType>(yOutLocal_);
+        StoreUbToGm(yGM_[rowIdx * tiling_.N + colBase], yOutLocal_, static_cast<uint32_t>(validN));
+        yOutQueue_.FreeTensor(yOutLocal_);
+    }
+
+    __aicore__ inline void CopyOutInvRms(int32_t rowIdx)
+    {
+        invRmsOutQueue_.DeQue<dataType>(invRmsOutLocal_);
+        StoreUbToGm(invRmsGM_[rowIdx], invRmsOutLocal_, 1);
+        invRmsOutQueue_.FreeTensor(invRmsOutLocal_);
+    }
+
+    __aicore__ inline float ComputeInvRms(int32_t rowIdx)
+    {
         reduceLocal_ = reduceBuf_.Get<float>();
         sumLocal_ = sumBuf_.Get<float>();
         tempLocal_ = tempBuf_.Get<float>();
-
-        AscendC::Duplicate(accumLocal_, 0.0f, kBlockN);
+        invRmsOutQueue_.AllocTensor<dataType>(invRmsOutLocal_);
+        PrepareInvRmsTensor(invRmsLocal_, invRmsOutLocal_);
+        float sumSq = 0.0f;
 
         for (int by = 0; by < NumTiles(); ++by) {
             const int colBase = by * kBlockN;
             const int validN = GetValidN(colBase);
 
-            xInQueue_.AllocTensor<dataType>(xInLocal_);
-            CopyGmToUbTile(xInLocal_, xGM_[rowIdx * tiling_.N + colBase], validN);
-            xInQueue_.EnQue(xInLocal_);
+            CopyInX(rowIdx, colBase, validN);
 
             xInQueue_.DeQue<dataType>(xInLocal_);
-            PrepareInputTensor(xLocal_, xInLocal_, xCastBuf_, kBlockN);
-            AscendC::Mul(tempLocal_, xLocal_, xLocal_, kBlockN);
-            AscendC::Add(accumLocal_, accumLocal_, tempLocal_, kBlockN);
+            PrepareInputTensor(xLocal_, xInLocal_, xCastBuf_, validN);
+            AscendC::Mul(tempLocal_, xLocal_, xLocal_, validN);
+            AscendC::ReduceSum<float>(sumLocal_, tempLocal_, reduceLocal_, validN);
+            sumSq += sumLocal_.GetValue(0);
             xInQueue_.FreeTensor(xInLocal_);
         }
 
-        AscendC::ReduceSum<float>(sumLocal_, accumLocal_, reduceLocal_, kBlockN);
-        float invRms = sumLocal_.GetValue(0) * tiling_.invN + tiling_.eps;
-        AscendC::Duplicate(sumLocal_, invRms, 1);
-        AscendC::Rsqrt(sumLocal_, sumLocal_, 1);
-        invRms = sumLocal_.GetValue(0);
+        AscendC::Duplicate(sumLocal_, sumSq * tiling_.invN + tiling_.eps, 1);
+        AscendC::Rsqrt(invRmsLocal_, sumLocal_, 1);
+        AscendC::PipeBarrier<PIPE_ALL>();
+        float invRms = invRmsLocal_.GetValue(0);
+        AscendC::PipeBarrier<PIPE_ALL>();
+        FinalizeOutputTensor(invRmsOutLocal_, invRmsLocal_, 1);
+
+        invRmsOutQueue_.EnQue(invRmsOutLocal_);
+        return invRms;
+    }
+
+    __aicore__ inline void ComputeTile(float invRms, int32_t validN)
+    {
+        yOutQueue_.AllocTensor<dataType>(yOutLocal_);
+        xInQueue_.DeQue<dataType>(xInLocal_);
+        gammaInQueue_.DeQue<dataType>(gammaInLocal_);
+        PrepareInputTensor(xLocal_, xInLocal_, xCastBuf_, validN);
+        PrepareInputTensor(gammaLocal_, gammaInLocal_, gammaCastBuf_, validN);
+        PrepareOutputTensor(yLocal_, yOutLocal_, yCastBuf_);
+        AscendC::Muls(yLocal_, xLocal_, invRms, validN);
+        AscendC::Mul(yLocal_, yLocal_, gammaLocal_, validN);
+        FinalizeOutputTensor(yOutLocal_, yLocal_, validN);
+        xInQueue_.FreeTensor(xInLocal_);
+        gammaInQueue_.FreeTensor(gammaInLocal_);
+        yOutQueue_.EnQue(yOutLocal_);
+    }
+
+    __aicore__ inline void ProcessRow(int rowIdx)
+    {
+        float invRms = ComputeInvRms(rowIdx);
+        CopyOutInvRms(rowIdx);
 
         for (int by = 0; by < NumTiles(); ++by) {
             const int colBase = by * kBlockN;
             const int validN = GetValidN(colBase);
 
-            xInQueue_.AllocTensor<dataType>(xInLocal_);
-            gammaInQueue_.AllocTensor<dataType>(gammaInLocal_);
-            CopyGmToUbTile(xInLocal_, xGM_[rowIdx * tiling_.N + colBase], validN);
-            CopyGmToUbTile(gammaInLocal_, gammaGM_[colBase], validN);
-            xInQueue_.EnQue(xInLocal_);
-            gammaInQueue_.EnQue(gammaInLocal_);
-
-            yOutQueue_.AllocTensor<dataType>(yOutLocal_);
-            xInQueue_.DeQue<dataType>(xInLocal_);
-            gammaInQueue_.DeQue<dataType>(gammaInLocal_);
-            PrepareInputTensor(xLocal_, xInLocal_, xCastBuf_, kBlockN);
-            PrepareInputTensor(gammaLocal_, gammaInLocal_, gammaCastBuf_, kBlockN);
-            PrepareOutputTensor(yLocal_, yOutLocal_, yCastBuf_);
-            AscendC::Muls(yLocal_, xLocal_, invRms, kBlockN);
-            AscendC::Mul(yLocal_, yLocal_, gammaLocal_, kBlockN);
-            FinalizeOutputTensor(yOutLocal_, yLocal_, kBlockN);
-            xInQueue_.FreeTensor(xInLocal_);
-            gammaInQueue_.FreeTensor(gammaInLocal_);
-            yOutQueue_.EnQue(yOutLocal_);
-
-            yOutQueue_.DeQue<dataType>(yOutLocal_);
-            CopyUbToGmTile(yGM_[rowIdx * tiling_.N + colBase], yOutLocal_, validN);
-            yOutQueue_.FreeTensor(yOutLocal_);
+            CopyInX(rowIdx, colBase, validN);
+            CopyInGamma(colBase, validN);
+            ComputeTile(invRms, validN);
+            CopyOutY(rowIdx, colBase, validN);
         }
     }
 
@@ -223,14 +243,16 @@ private:
     AscendC::GlobalTensor<dataType> xGM_;
     AscendC::GlobalTensor<dataType> gammaGM_;
     AscendC::GlobalTensor<dataType> yGM_;
+    AscendC::GlobalTensor<dataType> invRmsGM_;
 
     AscendC::TQue<AscendC::TPosition::VECIN, 0> xInQueue_;
     AscendC::TQue<AscendC::TPosition::VECIN, 0> gammaInQueue_;
     AscendC::TQue<AscendC::TPosition::VECOUT, 0> yOutQueue_;
-    AscendC::TBuf<AscendC::TPosition::VECCALC> accumBuf_;
+    AscendC::TQue<AscendC::TPosition::VECOUT, 0> invRmsOutQueue_;
     AscendC::TBuf<AscendC::TPosition::VECCALC> reduceBuf_;
     AscendC::TBuf<AscendC::TPosition::VECCALC> sumBuf_;
     AscendC::TBuf<AscendC::TPosition::VECCALC> tempBuf_;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> invRmsBuf_;
     AscendC::TBuf<AscendC::TPosition::VECCALC> xCastBuf_;
     AscendC::TBuf<AscendC::TPosition::VECCALC> gammaCastBuf_;
     AscendC::TBuf<AscendC::TPosition::VECCALC> yCastBuf_;
@@ -238,10 +260,11 @@ private:
     AscendC::LocalTensor<dataType> xInLocal_;
     AscendC::LocalTensor<dataType> gammaInLocal_;
     AscendC::LocalTensor<dataType> yOutLocal_;
+    AscendC::LocalTensor<dataType> invRmsOutLocal_;
+    AscendC::LocalTensor<float> invRmsLocal_;
     AscendC::LocalTensor<float> xLocal_;
     AscendC::LocalTensor<float> gammaLocal_;
     AscendC::LocalTensor<float> yLocal_;
-    AscendC::LocalTensor<float> accumLocal_;
     AscendC::LocalTensor<float> reduceLocal_;
     AscendC::LocalTensor<float> sumLocal_;
     AscendC::LocalTensor<float> tempLocal_;

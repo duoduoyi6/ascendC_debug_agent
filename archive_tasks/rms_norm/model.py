@@ -7,12 +7,12 @@ class Model(nn.Module):
         super().__init__()
         self.eps = eps
 
-    def forward(self, x: torch.Tensor, gamma: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, gamma: torch.Tensor):
         x_fp32 = x.to(torch.float32)
         mean_sq = torch.mean(x_fp32 * x_fp32, dim=-1, keepdim=True)
         inv_rms = torch.rsqrt(mean_sq + self.eps)
         out = x_fp32 * inv_rms * gamma.to(torch.float32)
-        return out.to(x.dtype)
+        return out.to(x.dtype), inv_rms.to(x.dtype)
 
 
 RMS_NORM_CASES = [
