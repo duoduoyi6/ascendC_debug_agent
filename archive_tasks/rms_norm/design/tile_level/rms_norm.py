@@ -18,7 +18,7 @@ pass_configs = {
 }
 
 
-@tilelang.jit(out_idx=[2], pass_configs=pass_configs)
+@tilelang.jit(out_idx=[2, 3], pass_configs=pass_configs)
 def rms_norm(M, N, eps=1e-5, dtype="float32"):
     block_M = 64
     block_N = 1024
@@ -43,24 +43,28 @@ def rms_norm(M, N, eps=1e-5, dtype="float32"):
         X: T.Tensor((M, N), dtype),
         Gamma: T.Tensor((N,), dtype),
         Y: T.Tensor((M, N), dtype),
+        InvRMS: T.Tensor((M,), dtype),
     ):
         with T.Kernel(used_core_num, is_npu=True) as (cid, vid):
             gamma_in_ub = T.alloc_ub((1, N), dtype)
             x_in_rows_ub = T.alloc_ub((row_factor, N), dtype)
             out_cast_rows_ub = T.alloc_ub((row_factor, N), dtype)
+            inv_rms_cast_ub = T.alloc_ub((row_factor, 1), dtype)
             single_x_in_row_ub = T.alloc_ub((1, N), dtype)
             single_out_cast_row_ub = T.alloc_ub((1, N), dtype)
+            single_inv_rms_cast_ub = T.alloc_ub((1, 1), dtype)
             x_ub = T.alloc_ub((row_factor, N), "float32")
             x_sq_ub = T.alloc_ub((row_factor, N), "float32")
             gamma_ub = T.alloc_ub((1, N), "float32")
             gamma_broad_ub = T.alloc_ub((row_factor, N), "float32")
             sum_sq_ub = T.alloc_ub((row_factor, 1), "float32")
-            rstd_ub = T.alloc_ub((row_factor, 1), "float32")
+            inv_rms_ub = T.alloc_ub((row_factor, 1), "float32")
             rstd_broad_ub = T.alloc_ub((row_factor, N), "float32")
             out_ub = T.alloc_ub((row_factor, N), "float32")
 
             single_x_ub = T.alloc_ub((1, N), "float32")
             single_x_sq_ub = T.alloc_ub((1, N), "float32")
+            single_inv_rms_ub = T.alloc_ub((1, 1), "float32")
             single_out_ub = T.alloc_ub((1, N), "float32")
 
             inv_n_ub = T.alloc_ub((row_factor, 1), "float32")
@@ -96,8 +100,13 @@ def rms_norm(M, N, eps=1e-5, dtype="float32"):
                                 T.reduce_sum(x_sq_ub, sum_sq_ub, reduce_tmp, dim=-1)
                                 T.tile.mul(sum_sq_ub, sum_sq_ub, inv_n_ub)
                                 T.tile.add(sum_sq_ub, sum_sq_ub, eps_ub)
-                                T.tile.rsqrt(rstd_ub, sum_sq_ub)
-                                T.tile.broadcast(rstd_broad_ub, rstd_ub, rstd_bcast_tmp)
+                                T.tile.rsqrt(inv_rms_ub, sum_sq_ub)
+                                if need_cast:
+                                    T.tile.cast(inv_rms_cast_ub, inv_rms_ub, mode=out_cast_mode, count=row_factor)
+                                    T.copy(inv_rms_cast_ub[:, 0], InvRMS[row_base:row_base + row_factor])
+                                else:
+                                    T.copy(inv_rms_ub[:, 0], InvRMS[row_base:row_base + row_factor])
+                                T.tile.broadcast(rstd_broad_ub, inv_rms_ub, rstd_bcast_tmp)
                                 T.tile.mul(out_ub, x_ub, rstd_broad_ub)
                                 T.tile.mul(out_ub, out_ub, gamma_broad_ub)
                                 if need_cast:
@@ -118,10 +127,15 @@ def rms_norm(M, N, eps=1e-5, dtype="float32"):
                                         T.reduce_sum(single_x_sq_ub, single_x_sq_ub[:, 0], single_reduce_tmp, dim=-1)
                                         single_sum_sq = single_x_sq_ub[0, 0] * inv_n_const + eps_const
                                         single_x_sq_ub[0, 0] = single_sum_sq
-                                        T.tile.rsqrt(single_x_sq_ub[:, 0], single_x_sq_ub[:, 0])
-                                        single_rstd = single_x_sq_ub[0, 0]
+                                        T.tile.rsqrt(single_inv_rms_ub[:, 0], single_x_sq_ub[:, 0])
+                                        single_rstd = single_inv_rms_ub[0, 0]
                                         T.tile.mul(single_out_ub, single_x_ub, single_rstd)
                                         T.tile.mul(single_out_ub, single_out_ub, gamma_ub)
+                                        if need_cast:
+                                            T.tile.cast(single_inv_rms_cast_ub, single_inv_rms_ub, mode=out_cast_mode, count=1)
+                                            T.copy(single_inv_rms_cast_ub[:, 0], InvRMS[row_idx:row_idx + 1])
+                                        else:
+                                            T.copy(single_inv_rms_ub[:, 0], InvRMS[row_idx:row_idx + 1])
                                         if need_cast:
                                             T.tile.cast(single_out_cast_row_ub, single_out_ub, mode=out_cast_mode, count=N)
                                             T.copy(single_out_cast_row_ub, Y[row_idx, :])
@@ -133,14 +147,17 @@ def rms_norm(M, N, eps=1e-5, dtype="float32"):
         X: T.Tensor((M, N), dtype),
         Gamma: T.Tensor((N,), dtype),
         Y: T.Tensor((M, N), dtype),
+        InvRMS: T.Tensor((M,), dtype),
     ):
         with T.Kernel(used_core_num, is_npu=True) as (cid, vid):
             gamma_in_row_ub = T.alloc_ub((1, N), dtype)
             x_in_row_ub = T.alloc_ub((1, N), dtype)
             out_cast_row_ub = T.alloc_ub((1, N), dtype)
+            inv_rms_cast_ub = T.alloc_ub((1, 1), dtype)
             x_ub = T.alloc_ub((1, N), "float32")
             x_sq_ub = T.alloc_ub((1, N), "float32")
             gamma_ub = T.alloc_ub((1, N), "float32")
+            inv_rms_ub = T.alloc_ub((1, 1), "float32")
             out_ub = T.alloc_ub((1, N), "float32")
 
             reduce_tmp = T.alloc_ub((2 * N,), "uint8")
@@ -167,10 +184,15 @@ def rms_norm(M, N, eps=1e-5, dtype="float32"):
                                 T.reduce_sum(x_sq_ub, x_sq_ub[:, 0], reduce_tmp, dim=-1)
                                 sum_sq = x_sq_ub[0, 0] * inv_n_const + eps_const
                                 x_sq_ub[0, 0] = sum_sq
-                                T.tile.rsqrt(x_sq_ub[:, 0], x_sq_ub[:, 0])
-                                inv_rms = x_sq_ub[0, 0]
+                                T.tile.rsqrt(inv_rms_ub[:, 0], x_sq_ub[:, 0])
+                                inv_rms = inv_rms_ub[0, 0]
                                 T.tile.mul(out_ub, x_ub, inv_rms)
                                 T.tile.mul(out_ub, out_ub, gamma_ub)
+                                if need_cast:
+                                    T.tile.cast(inv_rms_cast_ub, inv_rms_ub, mode=out_cast_mode, count=1)
+                                    T.copy(inv_rms_cast_ub[:, 0], InvRMS[row_idx:row_idx + 1])
+                                else:
+                                    T.copy(inv_rms_ub[:, 0], InvRMS[row_idx:row_idx + 1])
                                 if need_cast:
                                     T.tile.cast(out_cast_row_ub, out_ub, mode=out_cast_mode, count=N)
                                     T.copy(out_cast_row_ub, Y[row_idx, :])
@@ -182,6 +204,7 @@ def rms_norm(M, N, eps=1e-5, dtype="float32"):
         X: T.Tensor((M, N), dtype),
         Gamma: T.Tensor((N,), dtype),
         Y: T.Tensor((M, N), dtype),
+        InvRMS: T.Tensor((M,), dtype),
     ):
         with T.Kernel(used_core_num, is_npu=True) as (cid, vid):
             x_in_ub = T.alloc_ub((1, block_N), dtype)
@@ -189,6 +212,8 @@ def rms_norm(M, N, eps=1e-5, dtype="float32"):
             x_ub = T.alloc_ub((1, block_N), "float32")
             x_sq_ub = T.alloc_ub((1, block_N), "float32")
             gamma_ub = T.alloc_ub((1, block_N), "float32")
+            inv_rms_ub = T.alloc_ub((1, 1), "float32")
+            inv_rms_cast_ub = T.alloc_ub((1, 1), dtype)
             out_ub = T.alloc_ub((1, block_N), "float32")
             out_cast_ub = T.alloc_ub((1, block_N), dtype)
 
@@ -215,8 +240,13 @@ def rms_norm(M, N, eps=1e-5, dtype="float32"):
 
                                 T.reduce_sum(out_ub, out_ub[:, 0], reduce_tmp, dim=-1)
                                 x_sq_ub[0, 0] = out_ub[0, 0] * inv_n_const + eps_const
-                                T.tile.rsqrt(x_sq_ub[:, 0], x_sq_ub[:, 0])
-                                inv_rms = x_sq_ub[0, 0]
+                                T.tile.rsqrt(inv_rms_ub[:, 0], x_sq_ub[:, 0])
+                                inv_rms = inv_rms_ub[0, 0]
+                                if need_cast:
+                                    T.tile.cast(inv_rms_cast_ub, inv_rms_ub, mode=out_cast_mode, count=1)
+                                    T.copy(inv_rms_cast_ub[:, 0], InvRMS[row_idx:row_idx + 1])
+                                else:
+                                    T.copy(inv_rms_ub[:, 0], InvRMS[row_idx:row_idx + 1])
 
                                 for by in T.serial(n_num):
                                     col_base = by * block_N

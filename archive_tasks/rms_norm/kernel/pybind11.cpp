@@ -14,6 +14,7 @@ extern "C" void rms_norm_merge_n_do_fp32(
     uint8_t *x,
     uint8_t *gamma,
     uint8_t *y,
+    uint8_t *invRms,
     uint8_t *tiling);
 
 extern "C" void rms_norm_merge_n_do_fp16(
@@ -22,6 +23,7 @@ extern "C" void rms_norm_merge_n_do_fp16(
     uint8_t *x,
     uint8_t *gamma,
     uint8_t *y,
+    uint8_t *invRms,
     uint8_t *tiling);
 
 extern "C" void rms_norm_merge_n_do_bf16(
@@ -30,6 +32,7 @@ extern "C" void rms_norm_merge_n_do_bf16(
     uint8_t *x,
     uint8_t *gamma,
     uint8_t *y,
+    uint8_t *invRms,
     uint8_t *tiling);
 
 extern "C" void rms_norm_single_row_do_fp32(
@@ -38,6 +41,7 @@ extern "C" void rms_norm_single_row_do_fp32(
     uint8_t *x,
     uint8_t *gamma,
     uint8_t *y,
+    uint8_t *invRms,
     uint8_t *tiling);
 
 extern "C" void rms_norm_single_row_do_fp16(
@@ -46,6 +50,7 @@ extern "C" void rms_norm_single_row_do_fp16(
     uint8_t *x,
     uint8_t *gamma,
     uint8_t *y,
+    uint8_t *invRms,
     uint8_t *tiling);
 
 extern "C" void rms_norm_single_row_do_bf16(
@@ -54,6 +59,7 @@ extern "C" void rms_norm_single_row_do_bf16(
     uint8_t *x,
     uint8_t *gamma,
     uint8_t *y,
+    uint8_t *invRms,
     uint8_t *tiling);
 
 extern "C" void rms_norm_splitd_do_fp32(
@@ -62,6 +68,7 @@ extern "C" void rms_norm_splitd_do_fp32(
     uint8_t *x,
     uint8_t *gamma,
     uint8_t *y,
+    uint8_t *invRms,
     uint8_t *tiling);
 
 extern "C" void rms_norm_splitd_do_fp16(
@@ -70,6 +77,7 @@ extern "C" void rms_norm_splitd_do_fp16(
     uint8_t *x,
     uint8_t *gamma,
     uint8_t *y,
+    uint8_t *invRms,
     uint8_t *tiling);
 
 extern "C" void rms_norm_splitd_do_bf16(
@@ -78,13 +86,14 @@ extern "C" void rms_norm_splitd_do_bf16(
     uint8_t *x,
     uint8_t *gamma,
     uint8_t *y,
+    uint8_t *invRms,
     uint8_t *tiling);
 
 namespace rms_norm_ext {
 
-using LaunchFn = void (*)(uint32_t, void *, uint8_t *, uint8_t *, uint8_t *, uint8_t *);
+using LaunchFn = void (*)(uint32_t, void *, uint8_t *, uint8_t *, uint8_t *, uint8_t *, uint8_t *);
 
-at::Tensor run_rms_norm(const at::Tensor &x, const at::Tensor &gamma, double eps)
+pybind11::tuple run_rms_norm(const at::Tensor &x, const at::Tensor &gamma, double eps)
 {
     TORCH_CHECK(x.dim() == 2, "x must be [M, N]");
     TORCH_CHECK(gamma.dim() == 1, "gamma must be [N]");
@@ -104,6 +113,7 @@ at::Tensor run_rms_norm(const at::Tensor &x, const at::Tensor &gamma, double eps
     const int32_t tasksPerCore = (mNum + usedCoreNum - 1) / usedCoreNum;
 
     at::Tensor y = at::empty_like(x);
+    at::Tensor invRms = at::empty({m}, x.options());
 
     at::Tensor tilingCpu = at::empty(
         {static_cast<long>(sizeof(RmsNormKernelTiling))},
@@ -154,8 +164,9 @@ at::Tensor run_rms_norm(const at::Tensor &x, const at::Tensor &gamma, double eps
         static_cast<uint8_t *>(const_cast<void *>(x.storage().data())),
         static_cast<uint8_t *>(const_cast<void *>(gamma.storage().data())),
         static_cast<uint8_t *>(const_cast<void *>(y.storage().data())),
+        static_cast<uint8_t *>(const_cast<void *>(invRms.storage().data())),
         static_cast<uint8_t *>(const_cast<void *>(tilingNpu.storage().data())));
-    return y;
+    return pybind11::make_tuple(y, invRms);
 }
 
 }  // namespace rms_norm_ext

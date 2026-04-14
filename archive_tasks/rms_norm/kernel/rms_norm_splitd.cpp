@@ -1,11 +1,12 @@
 #include "rms_norm_splitd_kernel.h"
 
-extern "C" __global__ __aicore__ void rms_norm_splitd_custom_fp32(GM_ADDR x, GM_ADDR gamma, GM_ADDR y, GM_ADDR tiling)
+extern "C" __global__ __aicore__ void rms_norm_splitd_custom_fp32(
+    GM_ADDR x, GM_ADDR gamma, GM_ADDR y, GM_ADDR invRms, GM_ADDR tiling)
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
     AscendC::TPipe pipe;
     RmsNormSplitDKernel<float> kernel;
-    kernel.Init(x, gamma, y, tiling, &pipe);
+    kernel.Init(x, gamma, y, invRms, tiling, &pipe);
     kernel.Process();
 }
 
@@ -15,7 +16,8 @@ extern "C" void rms_norm_splitd_do_fp32(
     uint8_t *x,
     uint8_t *gamma,
     uint8_t *y,
+    uint8_t *invRms,
     uint8_t *tiling)
 {
-    rms_norm_splitd_custom_fp32<<<blockDim, nullptr, stream>>>(x, gamma, y, tiling);
+    rms_norm_splitd_custom_fp32<<<blockDim, nullptr, stream>>>(x, gamma, y, invRms, tiling);
 }
