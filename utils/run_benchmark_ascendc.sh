@@ -309,10 +309,29 @@ if [[ "$USE_PARALLEL" == true ]]; then
     echo "- NPU 日志: npu_0.log, npu_1.log, ... (在输出目录中)" >> "$REPORT_FILE"
 fi
 
+
+if [[ "$USE_PARALLEL" == true ]]; then
+    echo "NPU 日志目录: ${OUTPUT_DIR}/"
+fi
+echo "================================================================"
+
+# ==================================================================
+# 🚀 新增：调用外部 Python 汇总脚本
+# ==================================================================
+echo ""
+echo "================================================================"
+echo "正在调用 generate_report_dynamic.py 生成详细报告..."
+echo "================================================================"
+# 请根据你的文件实际路径调整下面这一行
+python3 generate_report_dynamic.py -i "$OUTPUT_DIR" -o "$OUTPUT_DIR/../final_batch_report.md"
+
+
+# 最后的结束语
 echo ""
 echo "================================================================"
 echo "批量执行完成: 成功 ${SUCCESS}/${TOTAL}, 失败 ${FAIL}/${TOTAL}"
-echo "报告: ${REPORT_FILE}"
+echo "基础报告: ${REPORT_FILE}"
+echo "详细报告: ${OUTPUT_DIR}/final_batch_report.md (如果生成成功)"
 if [[ "$USE_PARALLEL" == true ]]; then
     echo "NPU 日志目录: ${OUTPUT_DIR}/"
 fi
