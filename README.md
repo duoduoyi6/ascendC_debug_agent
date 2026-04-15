@@ -274,6 +274,222 @@ AscendOpGenAgent/
 ```
 
 
+## 单用例多 Shape 支持
+
+本框架支持在一个算子用例中定义多个 Shape 配置进行批量验证和性能评测，适用于需要测试算子在不同规模输入下的性能表现的场景。
+
+### 输入规格（算子描述文件）
+
+#### 单 Shape 格式（向后兼容）
+
+```python
+import torch
+import torch.nn as nn
+
+class Model(nn.Module):
+    def __init__(self):
+        super(Model, self).__init__()
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.gelu(x)
+
+def get_inputs():
+    """返回单组输入，形式为 List[Tensor/...]"""
+    return [torch.randn(128, 128, dtype=torch.float16)]
+
+def get_init_inputs():
+    """返回初始化参数列表"""
+    return []
+```
+
+**规格说明**：
+- `get_inputs()`: 返回 `List[Tensor/...]`，代表单组输入
+- 适用于单一 Shape 场景
+- `get_init_inputs()`: 返回 `__init__` 的初始化参数列表
+
+#### 多 Shape 格式
+
+```python
+import torch
+import torch.nn as nn
+
+class Model(nn.Module):
+    def __init__(self):
+        super(Model, self).__init__()
+        
+    def forward(self, x: torch.Tensor, approximate='none') -> torch.Tensor:
+        return torch.nn.functional.gelu(x, approximate=approximate)
+
+# 多 Shape 配置列表
+INPUT_CASES = [
+    {'inputs': [{'dtype': 'float32', 'name': 'x', 'shape': [128, 128], 'type': 'tensor'},
+                 {'dtype': 'str', 'name': 'approximate', 'type': 'attr', 'value': 'none'}]},
+    {'inputs': [{'dtype': 'float32', 'name': 'x', 'shape': [256, 256], 'type': 'tensor'},
+                 {'dtype': 'str', 'name': 'approximate', 'type': 'attr', 'value': 'tanh'}]},
+    {'inputs': [{'dtype': 'float16', 'name': 'x', 'shape': [1024, 1024], 'type': 'tensor'},
+                 {'dtype': 'str', 'name': 'approximate', 'type': 'attr', 'value': 'none'}]},
+]
+
+# 必须实现，返回 List[List[Tensor/...]]
+def get_input_groups():
+    """返回多组输入列表，每组对应一个 Shape 配置"""
+    input_groups = []
+    for case in INPUT_CASES:
+        group = []
+        for spec in case['inputs']:
+            if spec['type'] == 'tensor':
+                dtype = {'float16': torch.float16, 'float32': torch.float32}[spec['dtype']]
+                group.append(torch.randn(*spec['shape'], dtype=dtype))
+            elif spec['type'] == 'attr':
+                group.append(spec['value'])
+        input_groups.append(group)
+    return input_groups
+
+# 可选实现，用于向后兼容
+def get_inputs():
+    """返回单组输入，取第一组"""
+    return get_input_groups()[0]
+
+def get_init_inputs():
+    """返回初始化参数列表"""
+    return []
+```
+
+**输入规格说明**：
+
+| 函数 | 返回类型 | 用途 | 必需 |
+|------|---------|------|------|
+| `get_input_groups()` | `List[List[Tensor/...]]` | 多 Shape 入口，每组对应一个测试配置 | ✅ 多 Shape 场景必需 |
+| `get_inputs()` | `List[Tensor/...]` | 单 Shape 入口，返回第一组或单组输入 | 建议实现（向后兼容） |
+| `get_init_inputs()` | `List[Any]` | `Model.__init__` 的初始化参数 | ✅ 必需 |
+
+**输入配置字段说明**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `dtype` | `str` | 数据类型：float16/float32/float64/bfloat16/int8/int16/int32/int64/bool |
+| `shape` | `List[int]` | 张量形状，如 `[128, 256]` |
+| `name` | `str` | 参数名称 |
+| `type` | `str` | 类型："tensor"（张量）、"attr"（属性值）、"tensor_list"（张量列表） |
+| `value` | `Any` | 当 `type="attr"` 时，属性值 |
+
+### 输出规格（性能报告）
+
+#### 单 Shape 性能报告
+
+```json
+{
+  "op_name": "gelu",
+  "warmup": 5,
+  "repeats": 50,
+  "total_cases": 1,
+  "framework": {
+    "avg_latency_ms": 0.2345,
+    "peak_memory_mb": 2.50
+  },
+  "implementation": {
+    "avg_latency_ms": 0.1567,
+    "peak_memory_mb": 1.25
+  },
+  "speedup_vs_torch": 1.50,
+  "perf_method": "profiler",
+  "skill_path": "/path/to/.claude/skills/kernel-verifier"
+}
+```
+
+#### 多 Shape 性能报告
+
+```json
+{
+  "op_name": "gelu",
+  "warmup": 5,
+  "repeats": 50,
+  "total_cases": 3,
+  "framework": {
+    "avg_latency_ms": 0.4567,
+    "peak_memory_mb": 8.50
+  },
+  "implementation": {
+    "avg_latency_ms": 0.3123,
+    "peak_memory_mb": 4.25
+  },
+  "speedup_vs_torch": 1.46,
+  "perf_method": "profiler",
+  "skill_path": "/path/to/.claude/skills/kernel-verifier",
+  "per_shape_results": [
+    {
+      "shape": [128, 128],
+      "framework": {
+        "avg_latency_ms": 0.0234,
+        "peak_memory_mb": 0.50
+      },
+      "implementation": {
+        "avg_latency_ms": 0.0156,
+        "peak_memory_mb": 0.25
+      },
+      "speedup_vs_torch": 1.50
+    },
+    {
+      "shape": [256, 256],
+      "framework": {
+        "avg_latency_ms": 0.0891,
+        "peak_memory_mb": 2.00
+      },
+      "implementation": {
+        "avg_latency_ms": 0.0588,
+        "peak_memory_mb": 1.00
+      },
+      "speedup_vs_torch": 1.52
+    },
+    {
+      "shape": [1024, 1024],
+      "framework": {
+        "avg_latency_ms": 1.2577,
+        "peak_memory_mb": 8.00
+      },
+      "implementation": {
+        "avg_latency_ms": 0.8625,
+        "peak_memory_mb": 12.50
+      },
+      "speedup_vs_torch": 1.46
+    }
+  ]
+}
+```
+
+**输出字段说明**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `op_name` | `str` | 算子名称 |
+| `warmup` | `int` | 预热次数 |
+| `repeats` | `int` | 正式测试次数 |
+| `total_cases` | `int` | 测试的 Shape 数量（单 Shape 为 1，多 Shape ≥2） |
+| `framework.avg_latency_ms` | `float` | PyTorch 实现平均延迟（毫秒）各 Shape 平均 |
+| `framework.peak_memory_mb` | `float` | PyTorch 峰值内存（MB）各 Shape 平均 |
+| `implementation.avg_latency_ms` | `float` | 实现平均延迟（毫秒）各 Shape 平均 |
+| `implementation.peak_memory_mb` | `float` | 实现峰值内存（MB）各 Shape 平均 |
+| `speedup_vs_torch` | `float` | 相比 PyTorch 的加速比（各 Shape 加速比的平均值） |
+| `perf_method` | `str` | 评测方式："profiler"（torch_npu.profiler）或 "fallback"（time.perf_counter 兜底） |
+| `skill_path` | `str` | 使用的 benchmark skill 路径 |
+| `per_shape_results` | `List[Dict]` | 多 Shape 明细数据（当 `total_cases > 1` 时出现） |
+
+**per_shape_results 元素说明**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `shape` | `List[int]` | 主要输入张量的形状 |
+| `framework.avg_latency_ms` | `float` | 该 Shape 的 PyTorch 延迟 |
+| `implementation.avg_latency_ms` | `float` | 该 Shape 的实现延迟 |
+| `speedup_vs_torch` | `float` | 该 Shape 的加速比 |
+
+### 适用场景
+
+1. **算子泛化性测试**：验证生成的 Triton 算子在多种输入规模下的正确性和稳定性
+2. **性能趋势分析**：通过对比不同 Shape 的加速比，识别算子的优势和局限性
+3. **AI 模型场景复现**：模拟真实模型中的典型输入 Shape 分布（如 LLM 的多种序列长度）
+4. **自动 Benchmark 评测**：批量评测时自动覆盖多种 Shape，减少重复工作量
+
 ## 许可证
 
 本项目采用 [Apache 2.0 License](LICENSE) 开源许可证。

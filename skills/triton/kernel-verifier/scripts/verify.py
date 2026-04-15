@@ -27,6 +27,31 @@ def get_limit(data_type):
         return 0.02
 
 
+def resolve_input_provider(torch_module):
+    """解析任务文件的输入提供方式。
+
+    支持两种格式：
+        - get_inputs(): 旧格式，返回单组输入
+        - get_input_groups(): 新格式，返回多组输入列表
+
+    Returns:
+        (input_groups, total_cases)
+        - input_groups: 输入组列表
+        - total_cases: 测试用例总数
+    """
+    if hasattr(torch_module, "get_input_groups"):
+        # 新格式：多组输入（如 26_GELU_.py 有 51 组 shape 用例）
+        groups = torch_module.get_input_groups()
+        return groups, len(groups)
+    elif hasattr(torch_module, "get_inputs"):
+        # 旧格式：单组输入（保持向后兼容）
+        return [torch_module.get_inputs()], 1
+    else:
+        raise AttributeError(
+            f"模块必须提供 get_inputs() 或 get_input_groups() 方法"
+        )
+
+
 def compare(fw_out, impl_out, limit, data_type):
     """对比框架输出和实现输出"""
     import torch
@@ -118,70 +143,118 @@ def compare(fw_out, impl_out, limit, data_type):
         raise AssertionError(error_msg)
 
 
-def verify_implementations(op_name, verify_dir, triton_impl_name="triton_ascend_impl"):
-    """验证框架实现和生成实现的结果一致性"""
-    import torch
-    sys.path.insert(0, verify_dir)
+def run_single_case(
+    framework_model,
+    impl_model,
+    inputs,
+    device,
+    case_idx,
+    total_cases
+):
+    """验证单组输入。
 
-    torch_module = __import__(f"{op_name}_torch")
-    FrameworkModel = torch_module.Model
-    get_inputs = torch_module.get_inputs
-    get_init_inputs = torch_module.get_init_inputs
+    注意: 此函数依赖 torch，应在已导入 torch 的上下文中调用，
+    或由 verify_implementations() 调用（该函数会导入 torch）。
 
-    impl_module = __import__(f"{op_name}_{triton_impl_name}")
-    ModelNew = impl_module.ModelNew
+    Args:
+        framework_model: 参考实现模型
+        impl_model: 生成的实现模型
+        inputs: 输入张量/参数列表
+        device: NPU 设备
+        case_idx: 当前用例序号（从1开始）
+        total_cases: 总用例数
+    """
+    import torch  # 延迟导入：确保 torch 在此作用域可用
 
-    import torch_npu  # noqa: F401
-    device = torch.device("npu")
+    print(f"  测试第 {case_idx}/{total_cases} 组输入...", file=sys.stderr)
 
-    init_params = get_init_inputs()
+    # 将输入移至设备
+    inputs_for_impl = [
+        x.to(device) if isinstance(x, torch.Tensor) else x 
+        for x in inputs
+    ]
+    inputs_for_framework = [
+        x.to(device) if isinstance(x, torch.Tensor) else x 
+        for x in inputs
+    ]
 
-    # 分别在每个模型创建前重置种子，确保含随机权重的算子（如 Conv2d）
-    # 在 Model 和 ModelNew 中获得完全一致的初始化参数
-    torch.manual_seed(0)
-    torch.npu.manual_seed(0)
-    framework_model = FrameworkModel(*init_params).to(device)
-
-    torch.manual_seed(0)
-    torch.npu.manual_seed(0)
-    impl_model = ModelNew(*init_params).to(device)
-
-    torch.manual_seed(0)
-    torch.npu.manual_seed(0)
-    inputs_for_impl = [x.to(device) if isinstance(x, torch.Tensor) else x for x in get_inputs()]
-
-    torch.manual_seed(0)
-    torch.npu.manual_seed(0)
-    inputs_for_framework = [x.to(device) if isinstance(x, torch.Tensor) else x for x in get_inputs()]
-
+    # 前向推理
     with torch.no_grad():
         impl_output = impl_model(*inputs_for_impl)
-
-    with torch.no_grad():
         framework_output = framework_model(*inputs_for_framework)
 
+    # 标准化输出格式
     if not isinstance(framework_output, (list, tuple)):
         framework_output = [framework_output]
     if not isinstance(impl_output, (list, tuple)):
         impl_output = [impl_output]
 
+    # 验证输出数量
     if len(framework_output) != len(impl_output):
         raise AssertionError(
-            f"验证失败，输出数量不一致: framework={len(framework_output)}, "
-            f"impl={len(impl_output)}"
+            f"[用例 {case_idx}/{total_cases}] 输出数量不一致: "
+            f"framework={len(framework_output)}, impl={len(impl_output)}"
         )
 
+    # 比较每个输出
     for i, (fw_out, impl_out) in enumerate(zip(framework_output, impl_output)):
         if fw_out is None or impl_out is None:
             raise AssertionError(
-                f"输出 {i} 为 None: framework={fw_out is None}, impl={impl_out is None}"
+                f"[用例 {case_idx}/{total_cases}] 输出 {i} 为 None: "
+                f"framework={fw_out is None}, impl={impl_out is None}"
             )
         if isinstance(fw_out, torch.Tensor) and isinstance(impl_out, torch.Tensor):
-            data_type = fw_out.dtype
-            limit = get_limit(data_type)
-            compare(fw_out, impl_out, limit, data_type)
+            try:
+                data_type = fw_out.dtype
+                limit = get_limit(data_type)
+                compare(fw_out, impl_out, limit, data_type)
+            except AssertionError as e:
+                raise AssertionError(f"[用例 {case_idx}/{total_cases}] {str(e)}") from e
 
-    print("验证成功")
+
+def verify_implementations(op_name, verify_dir, triton_impl_name="triton_ascend_impl"):
+    """验证框架实现和生成实现的结果一致性，支持多组输入验证。"""
+    import torch
+    import torch_npu  # noqa: F401
+    
+    sys.path.insert(0, verify_dir)
+
+    # 加载模块
+    torch_module = __import__(f"{op_name}_torch")
+    impl_module = __import__(f"{op_name}_{triton_impl_name}")
+
+    FrameworkModel = torch_module.Model
+    ModelNew = impl_module.ModelNew
+    get_init_inputs = torch_module.get_init_inputs
+
+    # 解析输入（支持 get_inputs 或 get_input_groups 格式）
+    input_groups, total_cases = resolve_input_provider(torch_module)
+    
+    device = torch.device("npu")
+    init_params = get_init_inputs()
+
+    # 对每组输入进行验证
+    for case_idx, inputs in enumerate(input_groups, start=1):
+        # 创建模型（确保权重一致）
+        torch.manual_seed(0)
+        torch.npu.manual_seed(0)
+        framework_model = FrameworkModel(*init_params).to(device)
+
+        torch.manual_seed(0)
+        torch.npu.manual_seed(0)
+        impl_model = ModelNew(*init_params).to(device)
+
+        # 验证该组输入
+        run_single_case(
+            framework_model, 
+            impl_model, 
+            inputs, 
+            device, 
+            case_idx, 
+            total_cases
+        )
+
+    print(f"验证成功：共 {total_cases} 组测试用例通过")
 
 
 if __name__ == "__main__":

@@ -273,6 +273,222 @@ AscendOpGenAgent/
 ```
 
 
+## Single Case Multi-Shape Support
+
+This framework supports defining multiple Shape configurations within a single operator case for batch verification and performance evaluation, suitable for scenarios requiring performance testing across different input scales.
+
+### Input Specifications (Operator Description File)
+
+#### Single Shape Format (Backward Compatible)
+
+```python
+import torch
+import torch.nn as nn
+
+class Model(nn.Module):
+    def __init__(self):
+        super(Model, self).__init__()
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.gelu(x)
+
+def get_inputs():
+    """Return single input group as List[Tensor/...]"""
+    return [torch.randn(128, 128, dtype=torch.float16)]
+
+def get_init_inputs():
+    """Return initialization parameter list"""
+    return []
+```
+
+**Specifications**:
+- `get_inputs()`: Returns `List[Tensor/...]` representing a single input group
+- For single-shape scenarios only
+- `get_init_inputs()`: Returns parameter list for `Model.__init__`
+
+#### Multi-Shape Format
+
+```python
+import torch
+import torch.nn as nn
+
+class Model(nn.Module):
+    def __init__(self):
+        super(Model, self).__init__()
+        
+    def forward(self, x: torch.Tensor, approximate='none') -> torch.Tensor:
+        return torch.nn.functional.gelu(x, approximate=approximate)
+
+# Multi-Shape configuration list
+INPUT_CASES = [
+    {'inputs': [{'dtype': 'float32', 'name': 'x', 'shape': [128, 128], 'type': 'tensor'},
+                 {'dtype': 'str', 'name': 'approximate', 'type': 'attr', 'value': 'none'}]},
+    {'inputs': [{'dtype': 'float32', 'name': 'x', 'shape': [256, 256], 'type': 'tensor'},
+                 {'dtype': 'str', 'name': 'approximate', 'type': 'attr', 'value': 'tanh'}]},
+    {'inputs': [{'dtype': 'float16', 'name': 'x', 'shape': [1024, 1024], 'type': 'tensor'},
+                 {'dtype': 'str', 'name': 'approximate', 'type': 'attr', 'value': 'none'}]},
+]
+
+# Required: returns List[List[Tensor/...]]
+def get_input_groups():
+    """Return multiple input groups, each corresponding to a Shape configuration"""
+    input_groups = []
+    for case in INPUT_CASES:
+        group = []
+        for spec in case['inputs']:
+            if spec['type'] == 'tensor':
+                dtype = {'float16': torch.float16, 'float32': torch.float32}[spec['dtype']]
+                group.append(torch.randn(*spec['shape'], dtype=dtype))
+            elif spec['type'] == 'attr':
+                group.append(spec['value'])
+        input_groups.append(group)
+    return input_groups
+
+# Optional for backward compatibility
+def get_inputs():
+    """Return single input group, using the first group"""
+    return get_input_groups()[0]
+
+def get_init_inputs():
+    """Return initialization parameter list"""
+    return []
+```
+
+**Input Specifications**:
+
+| Function | Return Type | Purpose | Required |
+|----------|-------------|---------|----------|
+| `get_input_groups()` | `List[List[Tensor/...]]` | Multi-Shape entry, each group for a test configuration | ✅ Required for multi-shape |
+| `get_inputs()` | `List[Tensor/...]` | Single-Shape entry, returns first or single group | Recommended (backward compatible) |
+| `get_init_inputs()` | `List[Any]` | Initialization parameters for `Model.__init__` | ✅ Required |
+
+**Input Configuration Fields**:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `dtype` | `str` | Data type: float16/float32/float64/bfloat16/int8/int16/int32/int64/bool |
+| `shape` | `List[int]` | Tensor shape, e.g., `[128, 256]` |
+| `name` | `str` | Parameter name |
+| `type` | `str` | Type: "tensor", "attr" (attribute value), or "tensor_list" |
+| `value` | `Any` | Attribute value when `type="attr"` |
+
+### Output Specifications (Performance Report)
+
+#### Single Shape Performance Report
+
+```json
+{
+  "op_name": "gelu",
+  "warmup": 5,
+  "repeats": 50,
+  "total_cases": 1,
+  "framework": {
+    "avg_latency_ms": 0.2345,
+    "peak_memory_mb": 2.50
+  },
+  "implementation": {
+    "avg_latency_ms": 0.1567,
+    "peak_memory_mb": 1.25
+  },
+  "speedup_vs_torch": 1.50,
+  "perf_method": "profiler",
+  "skill_path": "/path/to/.claude/skills/kernel-verifier"
+}
+```
+
+#### Multi-Shape Performance Report
+
+```json
+{
+  "op_name": "gelu",
+  "warmup": 5,
+  "repeats": 50,
+  "total_cases": 3,
+  "framework": {
+    "avg_latency_ms": 0.4567,
+    "peak_memory_mb": 8.50
+  },
+  "implementation": {
+    "avg_latency_ms": 0.3123,
+    "peak_memory_mb": 4.25
+  },
+  "speedup_vs_torch": 1.46,
+  "perf_method": "profiler",
+  "skill_path": "/path/to/.claude/skills/kernel-verifier",
+  "per_shape_results": [
+    {
+      "shape": [128, 128],
+      "framework": {
+        "avg_latency_ms": 0.0234,
+        "peak_memory_mb": 0.50
+      },
+      "implementation": {
+        "avg_latency_ms": 0.0156,
+        "peak_memory_mb": 0.25
+      },
+      "speedup_vs_torch": 1.50
+    },
+    {
+      "shape": [256, 256],
+      "framework": {
+        "avg_latency_ms": 0.0891,
+        "peak_memory_mb": 2.00
+      },
+      "implementation": {
+        "avg_latency_ms": 0.0588,
+        "peak_memory_mb": 1.00
+      },
+      "speedup_vs_torch": 1.52
+    },
+    {
+      "shape": [1024, 1024],
+      "framework": {
+        "avg_latency_ms": 1.2577,
+        "peak_memory_mb": 8.00
+      },
+      "implementation": {
+        "avg_latency_ms": 0.8625,
+        "peak_memory_mb": 12.50
+      },
+      "speedup_vs_torch": 1.46
+    }
+  ]
+}
+```
+
+**Output Field Description**:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `op_name` | `str` | Operator name |
+| `warmup` | `int` | Warmup iterations |
+| `repeats` | `int` | Test iterations |
+| `total_cases` | `int` | Number of Shape tests (1 for single, ≥2 for multi) |
+| `framework.avg_latency_ms` | `float` | PyTorch average latency (ms), average across all Shapes |
+| `framework.peak_memory_mb` | `float` | PyTorch peak memory (MB), average across all Shapes |
+| `implementation.avg_latency_ms` | `float` | Implementation average latency (ms), average across all Shapes |
+| `implementation.peak_memory_mb` | `float` | Implementation peak memory (MB), average across all Shapes |
+| `speedup_vs_torch` | `float` | Speedup over PyTorch (average of all Shape speedups) |
+| `perf_method` | `str` | Profiling method: "profiler" (torch_npu.profiler) or "fallback" (time.perf_counter) |
+| `skill_path` | `str` | Path to the benchmark skill used |
+| `per_shape_results` | `List[Dict]` | Multi-Shape details (present when `total_cases > 1`) |
+
+**per_shape_results Elements**:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `shape` | `List[int]` | Main input tensor shape |
+| `framework.avg_latency_ms` | `float` | PyTorch latency for this Shape |
+| `implementation.avg_latency_ms` | `float` | Implementation latency for this Shape |
+| `speedup_vs_torch` | `float` | Speedup for this Shape |
+
+### Applicable Scenarios
+
+1. **Operator Generalization Testing**: Verify correctness and stability of generated Triton operators across various input scales
+2. **Performance Trend Analysis**: Identify operator advantages and limitations by comparing speedups across different Shapes
+3. **AI Model Scenario Reproduction**: Simulate typical input Shape distributions in real models (e.g., multiple sequence lengths in LLMs)
+4. **Automated Benchmark Evaluation**: Automatically cover multiple Shapes during batch evaluation to reduce repetitive work
+
 ## License
 
 This project is licensed under the [Apache 2.0 License](LICENSE).

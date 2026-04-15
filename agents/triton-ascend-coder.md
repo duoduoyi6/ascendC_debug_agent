@@ -64,7 +64,17 @@ python3 -c "import datetime,random; ts=datetime.datetime.now().strftime('%Y%m%d_
 
 调用 `op-task-extractor` skill，从用户描述中构建 KernelBench 格式的任务描述文件。
 
-**产出**：`{工作目录}/{op_name}.py`（仅包含 Model 类 + `get_inputs()` + `get_init_inputs()`，不含测试驱动）。
+**产出**：`{工作目录}/{op_name}.py`（仅包含 Model 类 + 输入函数 + `get_init_inputs()`，不含测试驱动）。
+
+**输入函数格式**：
+- 单 shape 场景：使用 `get_inputs()` 返回单组输入
+- 多 shape 场景：使用 `get_input_groups()` 返回多组输入列表，每组输入对应一个测试 shape
+
+**多 shape 场景处理**：
+当用户提供多个 shape 配置或明确表示需要测试多种输入大小时：
+- 任务文件应提供 `get_input_groups()` 函数，返回 `List[List[Tensor/...]]`
+- 每组输入对应一个 shape 配置，例如：`[[tensor1_shapeA, tensor2_shapeA], [tensor1_shapeB, tensor2_shapeB], ...]`
+- 验证和性能测试将遍历所有 shape 组，输出每个 shape 的性能数据
 
 验证通过后直接进入 Phase 2。
 
@@ -162,7 +172,14 @@ while iteration < max_iterations:
     产物 → {工作目录}/output/iter_{iteration}/perf_result.json
     复制 → {工作目录}/output/perf_result.json
 
-    记录 perf_data，break
+    **多 shape 性能数据处理**：
+    - 若 `total_cases > 1`（即原任务使用 `get_input_groups()`），`perf_result.json` 包含：
+      - 顶层聚合数据：`framework.avg_latency_ms`、`implementation.avg_latency_ms`、`speedup_vs_torch`
+      - 明细数据：`per_shape_results` 数组，每个元素包含单个 shape 的性能数据
+    - 报告输出时显示：汇总平均指标 + 每个 shape 的明细表格
+    - 判定性能成功标准：以汇总 `speedup_vs_torch > 1.0` 为基准（存在优化空间）
+
+    记录 perf_data（包含汇总指标和 shape 明细），break
 
 ⚠️ Phase 3 验证通过后，**必须**进入 Phase 4 执行性能优化，**严禁**跳过。
 
@@ -308,9 +325,13 @@ while opt_iteration < max_opt_iterations:
 - 基本信息：arch、工作目录
 - 生成结果：迭代次数、最终版本来源
 - 性能数据：加速比、延迟
+- 性能明细：读取 `output/perf_result.json` 中的 `per_shape_results`（如 `total_cases == 1`，则显示单条记录；多 shape 时显示多行），
+  以 Markdown 表格形式输出各 shape 的 framework 延迟、implementation 延迟和 speedup。
 - 代码路径：`{op_name}_generated.py`
 
 **写入 `{工作目录}/summary.json`**：
+
+**注意**：多 Shape 场景下，`summary.json` 的 `perf_data` 应为 **汇总的平均指标**，包含 `total_cases` 和 `per_shape_results`。批量评测脚本（如 `run_benchmark_triton.sh`）会通过读取 `summary.json` 来生成 `batch_report.md`，因此必须确保多 Shape 数据正确写入。
 
 成功时：
 ```json
@@ -319,13 +340,23 @@ while opt_iteration < max_opt_iterations:
   "gen_iterations": 2,
   "opt_iterations": 1,
   "optimized": true,
+  "perf_method": "profiler",
+  "skill_path": ".claude/skills/kernel-verifier",
   "perf_data": {
     "avg_latency_ms": 0.5678,
     "speedup_vs_torch": 2.17,
-    "speedup_vs_baseline": 1.35
+    "speedup_vs_baseline": 1.35,
+    "total_cases": 5,
+    "per_shape_results": [
+      {"shape": [128], "speedup_vs_torch": 1.82},
+      {"shape": [256, 256], "speedup_vs_torch": 2.15},
+      {"shape": [1024, 1024], "speedup_vs_torch": 2.31}
+    ]
   }
 }
 ```
+
+**说明**：`total_cases` 表示测试的 Shape 数量，当 `total_cases > 1` 时，需要在 `per_shape_results` 中记录每个 Shape 的性能数据。批量评测报告需要读取这些信息来显示多 Shape 汇总。
 
 Phase 3 失败时：
 ```json
