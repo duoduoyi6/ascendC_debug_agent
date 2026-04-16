@@ -37,5 +37,8 @@ class ModelNew(nn.Module):
         gamma_1d = gamma.contiguous()
 
         kernel = self._build_kernel(x_2d)
-        y_2d = kernel(x_2d, gamma_1d)
-        return y_2d.reshape(original_shape)
+        y_2d, inv_rms_1d = kernel(x_2d, gamma_1d)
+        return (
+            y_2d.reshape(original_shape),
+            inv_rms_1d.reshape(*original_shape[:-1], 1),
+        )
