@@ -12,7 +12,7 @@ subagent:
     需要 Agent 结合数值/日志证据和代码理解做深度推理。
     subagent 内部按 final_status.failure_type 锁定一条分支, 不跨分支跳转。
   timeout: 5400
-  max_iterations: 60
+  max_iterations: 3
 ---
 
 ## What I do

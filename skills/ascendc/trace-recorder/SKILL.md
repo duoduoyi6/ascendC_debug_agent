@@ -27,6 +27,10 @@ argument-hint: >
 - 遇到的错误信息
 - 是否发生违规路径：外部 web 检索、直接整体复制参考实现、PyTorch / torch_npu 语义回退
 
+## 字段权威：主 agent `Trace 字段契约`
+
+> **所有定量字段（次数 / 路径 / 阶段结果）的字段名与取值来源以 `agents/ascend-kernel-developer-with-ascendc-debug.md` 的 `## Trace 字段契约` 小节为唯一事实源。** 本 SKILL.md 的模板只引用契约字段名（`phase3_tl_iterations` / `phase4_ac_iterations` / `phase6_full_verify_runs` / `phase{3,4,6}_final_result` / `tl_last_error_summary` / `ac_last_error_summary` / `phase4_ac_cap_violated` / `trace_drift_warnings`），**禁止**在字段名位置出现执行器命令名（`evaluate_*.sh` / `verification_*.py` / `classify_verify_result.py`）。命令名只能出现在说明性文字或错误摘要原文引用里。
+
 ## 输出格式
 
 将以下内容写入 `{output_dir}/trace.md`：
@@ -47,9 +51,10 @@ argument-hint: >
 
 ## 阶段一: TileLang
 
-- 结果: 通过 / 失败
-- evaluate_tilelang.sh 执行次数: {n}
-- 关键错误信息: {评测脚本返回的错误，原文引用}
+- phase3_final_result: {PASS / FAIL / SKIPPED}
+- phase3_tl_iterations: {n}   # 来源见契约表；禁止 agent 回忆估数
+- tl_last_error_summary: |
+    {最后一次 TileLang 失败的 stdout/stderr tail，原文引用；PASS 时留空}
 - Agent 行为记录:
   - 第 1 轮: {agent 做了什么，结果如何}
   - 第 2 轮: {修改了什么，结果如何}
@@ -58,9 +63,13 @@ argument-hint: >
 
 ## 阶段二: AscendC
 
-- 结果: 通过 / 失败
-- evaluate_ascendc.sh 执行次数: {n}
-- 关键错误信息: {评测脚本返回的错误，原文引用}
+- phase4_final_result: {PASS / FAIL / N/A}
+- phase4_ac_iterations: {n}   # 以 .verify_status/phase4_attempt*.json 文件数为准
+- phase4_ac_cap_violated: {true / false}   # 若 true，必须同时在 final_status.trace_drift_warnings 中声明
+- phase6_full_verify_runs: {n}
+- phase6_final_result: {PASS / FAIL / N/A}
+- ac_last_error_summary: |
+    {latest.json.stdout_tail + stderr_tail 原文引用；success 时留空}
 - Agent 行为记录:
   - 第 1 轮: {agent 做了什么，结果如何}
   - 第 2 轮: {修改了什么，结果如何}
@@ -77,7 +86,7 @@ argument-hint: >
 
 ## 评测输出摘要
 
-{粘贴最后一次 evaluate 脚本的关键输出片段，包括 PASS/FAIL 状态和错误详情}
+{粘贴 latest.json / 最后一次 phase{3,4,6} 验证的关键 stdout/stderr 片段，包括 PASS/FAIL 状态和错误详情；原文引用，不做改写}
 
 ## 违规路径记录
 
@@ -132,7 +141,7 @@ argument-hint: >
 1. `kernel/` 目录为空 → `failure_type = "no_kernel"`，`debug_eligible = false`
 2. `model_new_ascendc.py` AST 退化 → `failure_type = "degraded"`，`debug_eligible = false`
 3. Phase 3 失败且未进到 Phase 4 → `failure_type = "tilelang_only_failed"`，`debug_eligible = false`
-4. `verify_status.latest.json.failure_type == "execution_aborted"` → 照搬 `execution_aborted` + `debug_eligible = false`（环境/harness 问题，subagent 无法处理）
+4. `verify_status.latest.json.failure_type == "execution_aborted"` → 照搬 `execution_aborted` + `debug_eligible = false`（**专指**外部原因：SSH 断线 / Docker daemon 不可达 / outer harness kill 等，subagent 无法处理）。**注意**: NPU kernel 侧 `aicore exception` / `MTE illegal` / `ACL stream synchronize failed (error code:5xxxxx)` 等设备端异常已在 `classify_verify_result.py` 中归为 `runtime_error`（带 `exit_signal: "NPU_AICORE_EXCEPTION"`），**不**落入本 bucket
 5. 否则 → 照搬 `verify_status.latest.json.failure_type`（`success` / `precision_failed` / `build_failed` / `import_failed` / `runtime_error` / `timeout`）
 
 ### `debug_eligible` 计算规则

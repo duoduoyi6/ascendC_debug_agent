@@ -72,6 +72,19 @@ _DOCKER_UNREACHABLE = [
     r"container .* not running", r"Cannot connect to the Docker daemon",
     r"Error response from daemon", r"docker: Error",
 ]
+# NPU kernel 设备端运行异常（aicore / MTE / ACL sync）。Python 进程通常以 rc=1 退出（RuntimeError
+# 被 Python 正常抛出而非 POSIX signal），所以 (e) 的 `rc in _CRASH_SIGNALS` 分支抓不到；语义上这
+# 属于 kernel runtime 错误，必须落到 runtime_error 以便 Phase 8 debug subagent 接手。
+_NPU_RUNTIME_PATTERNS = [
+    r"aicore exception",
+    r"The instruction configuration of MTE is illegal",
+    r"MTE (error|illegal)",
+    r"ACL stream synchronize failed,\s*error code:\s*\d+",
+    r"rt(Device|Stream)Synchronize[A-Za-z]*\s*execution failed",
+    r"Kernel task happen error",
+    r"E[EZ]9999.*Inner Error",
+    r"The aicore execution is abnormal",
+]
 
 
 def _match_any(patterns: list[str], text: str) -> bool:
@@ -138,6 +151,16 @@ def classify_failure(status: dict, proc=None) -> dict:
         out["failed_step"] = "execute"
         out["exit_signal"] = _CRASH_SIGNALS[rc]
         out["execute"] = {"status": "crashed", "crash_signal": _CRASH_SIGNALS[rc]}
+        return out
+
+    # (e.2) runtime_error：NPU 设备端 aicore / MTE / ACL sync 异常
+    #       Python 进程抛 RuntimeError 以 rc=1（非负）退出，(e) 的 signal-only 分支抓不到；
+    #       但语义上是 kernel runtime 错误，必须落到 runtime_error 以便 Phase 8 debug subagent 接手。
+    if rc != 0 and _match_any(_NPU_RUNTIME_PATTERNS, combined):
+        out["failure_type"] = "runtime_error"
+        out["failed_step"] = "execute"
+        out["exit_signal"] = "NPU_AICORE_EXCEPTION"
+        out["execute"] = {"status": "crashed", "crash_signal": "NPU_AICORE_EXCEPTION"}
         return out
 
     # (f) precision_failed：verify 阶段正常退出但数值对比失败
