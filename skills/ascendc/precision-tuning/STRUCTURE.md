@@ -2,8 +2,8 @@
 
 ```
 skills/ascendc/precision-tuning/
-├── README.md                          # Skill 说明文档（设计概览、双 Subagent 架构、知识库结构）
-├── SKILL.md                           # Agent 执行手册（主流程、Sub-steps、Gate 协议）
+├── README.md                          # Skill 说明文档（设计概览、双 Subagent 架构、知识库结构、gates/ 2 层架构）
+├── SKILL.md                           # Agent 执行手册（Step 0 ~ Step 7，含 Step 0.3 分流 + Step 1-P/B/I/R/T + Step 7 退出前产物）
 ├── STRUCTURE.md                       # 本文件：目录结构示意图
 │
 ├── references/                        # 静态参考资料
@@ -19,12 +19,39 @@ skills/ascendc/precision-tuning/
 │       ├── reduce_sum.md              # Reduction 模式
 │       └── softmax.md                 # Softmax（Reduction + Normalization）
 │
-└── scripts/                           # 精度调优工具脚本（Subagent 共用）
-    ├── precision_forensics.py         # 取证脚本：运行算子、采集误差数据
-    ├── precision_gate.py              # Gate 脚本：判断精度是否达标、决定 loop_signal
+└── scripts/                           # 精度 / debug 工具脚本（Subagent 共用）
+    ├── precision_forensics.py         # 取证脚本：运行算子、采集误差数据（1-P 分支专用）
+    ├── precision_gate.py              # Gate 入口路由器：先跑通用层，再按 failure_type 派发到 gates/ 分支层
+    ├── eval_status.py                 # eval_status.json loader / validator（读取 utils/eval_wrapper.py 产出）
     ├── precision_knowledge.py         # 知识库管理：load / search / dump
-    └── anticheat.py                   # 反作弊检测：sha256 hash + Python AST + C++ 源码扫描（snapshot/verify/restore 子命令）
+    ├── anticheat.py                   # 反作弊检测：sha256 hash + Python AST + C++ 源码扫描（snapshot/verify/restore 子命令）
+    │
+    └── gates/                         # 2 层 Gate 包（通用层 + 分支层）
+        ├── __init__.py
+        ├── common.py                  # 通用层：反作弊 hash / AST 退化 / baseline / eval_status 产出 / 目录完整性
+        ├── branch_precision.py        # 1-P 分支：F/A/V 精度 Gate（原 precision_gate.py 精度逻辑抽离）
+        ├── branch_build.py            # 1-B 分支：编译错误 Gate（COMPILE_ERROR_CITATION + FIX_TYPE 白名单）
+        ├── branch_import.py           # 1-I 分支：import kernel_side 符号 Gate（IMPORT_TRACEBACK_CITATION + 拒绝 env_side fix_type）
+        ├── branch_runtime.py          # 1-R 分支：runtime crash Gate（RUNTIME_ERROR_CITATION）
+        └── branch_timeout.py          # 1-T 分支：死锁 / 死循环 Gate（SYNC_POINT_ANALYSIS）
 ```
+
+### `gates/` 2 层 Gate 协议
+
+| 层 | 负责 | 通过条件 |
+|---|---|---|
+| 通用层 `common.py` | 反作弊 / AST / baseline / `eval_status` / 目录完整性 | 所有不变量成立 |
+| 分支层 `branch_*.py` | 对应失败类型的 F / A / V 语义 | 取证产物 / audit section schema / 验证推进判据通过 |
+
+通用层**不**检查 audit section 格式（避免和精度分支现有 `[FORENSICS_SUMMARY] + [REFERENCE_IMPL_SPEC]` 打架，findings §3.3）。每个分支层自定义 audit schema：
+
+| 分支 | 必填 audit section |
+|---|---|
+| `branch_precision.py` | `[FORENSICS_SUMMARY]` + `[REFERENCE_IMPL_SPEC]` + `[ROOT_CAUSE]` + `[FIX_PLAN]`（兼容旧精度路径 9 section 方案） |
+| `branch_build.py` | `[COMPILE_ERROR_CITATION]` + `[ROOT_CAUSE]` + `[FIX_PLAN]` + `[FIX_TYPE]` ∈ whitelist |
+| `branch_import.py` | `[IMPORT_TRACEBACK_CITATION]` + `[ROOT_CAUSE]` + `[FIX_PLAN]` + `[FIX_TYPE]` ∈ kernel-side whitelist（显式拒绝 env-side） |
+| `branch_runtime.py` | `[RUNTIME_ERROR_CITATION]` + `[ROOT_CAUSE]` + `[FIX_PLAN]` |
+| `branch_timeout.py` | `[SYNC_POINT_ANALYSIS]` + `[ROOT_CAUSE]` + `[FIX_PLAN]` |
 
 ## Subagent 架构
 
@@ -41,8 +68,11 @@ skills/ascendc/precision-tuning/
 
 | 组件 | 说明 |
 |------|------|
-| `precision_forensics.py` | L0-L8 数值取证，输出结构化报告 |
-| `precision_gate.py` | 链式 Gate 验证（Gate-F/A/X/V）+ 循环控制 |
+| `precision_forensics.py` | L0-L8 数值取证，输出结构化报告（1-P 分支专用） |
+| `precision_gate.py` | Gate 入口路由器（派发到 gates/ 分支层）+ 循环控制 |
+| `eval_status.py` | `eval_status.json` loader / schema 校验器，消费 `utils/eval_wrapper.py` 产出 |
+| `gates/common.py` | 通用层：反作弊 / AST / baseline / eval_status / 目录完整性 |
+| `gates/branch_*.py` | 分支层：precision / build / import / runtime / timeout 各自的 F/A/V 语义 |
 | `precision_knowledge.py` | 知识库 RAG 检索与管理 |
 | `anticheat.py` | 反作弊检测：snapshot / verify / restore，覆盖 Python wrapper 改动与 C++ kernel 偷调 ATen 的场景 |
 | `precision_knowledge_base.json` | 精度问题模式库 + 算子 CHECKLIST |
@@ -61,11 +91,14 @@ skills/ascendc/precision-tuning/
 
 | 文件 | 阶段 | 职责 | 使用方 |
 |------|------|------|--------|
-| `SKILL.md` | 全流程 | Agent 执行手册，定义 Sub-steps 1~3 及 Gate 协议 | 双 Subagent |
-| `README.md` | 参考 | 设计文档，含双 Subagent 架构说明、知识库结构 | 开发者 |
-| `precision_forensics.py` | Sub-step 1 | 运行算子取证，输出误差统计与 worst element 数据 | 双 Subagent |
-| `precision_gate.py` | Sub-step 3 末尾 | 评估精度结果，输出 `loop_signal=PASS/CONTINUE/FAIL` | 双 Subagent |
-| `precision_knowledge.py` | Sub-step 2.1 / 2.4 / 3 | 知识库 RAG 检索、加载、写入 | 双 Subagent |
+| `SKILL.md` | 全流程 | Agent 执行手册，定义 Step 0 ~ Step 7（含 Step 0.3 分流 + Step 1-P/B/I/R/T + Step 7 退出前强制产物） | 双 Subagent |
+| `README.md` | 参考 | 设计文档，含双 Subagent 架构、gates/ 2 层架构、知识库结构 | 开发者 |
+| `precision_forensics.py` | Step 1-P 取证 | 运行算子取证，输出误差统计与 worst element 数据 | 双 Subagent（1-P 分支专用） |
+| `precision_gate.py` | 每步 Gate 末尾 | Gate 入口路由器，派发到 gates/ 分支层；通用层先跑 | 双 Subagent |
+| `eval_status.py` | Step 0.3 / 每轮 Step 4 | 读取 `utils/eval_wrapper.py` 产出的 `eval_status.json`，schema 校验 | 双 Subagent |
+| `gates/common.py` | 每次 Gate | 反作弊 / AST / baseline / eval_status / 目录完整性，通用不变量 | 双 Subagent |
+| `gates/branch_*.py` | 每次 Gate | 对应分支的 F/A/V 语义 + audit section schema | 双 Subagent |
+| `precision_knowledge.py` | Sub-step 2.1 / 2.4 / Step 5 | 知识库 RAG 检索、加载、写入 | 双 Subagent |
 | `anticheat.py` | Step 0.1 / 每轮编译前 / 验收 | 检测 Python wrapper 被偷改、C++ kernel 偷调 ATen 等退化路径 | 双 Subagent |
 | `precision_knowledge_base.json` | Sub-step 2.4 | 已知精度问题模式 + 算子 CHECKLIST | 双 Subagent |
 | `decomposition_examples/*.md` | Sub-step 2.2 | 按算子类型提供计算分解示例 | 双 Subagent（构建式强制、发现式可选） |
