@@ -1,7 +1,7 @@
 """branch_timeout.py — 超时分支 Gate.
 
 契约（findings.md §3.3 ⑦）:
-  - Gate-F: eval_status.duration_sec ≥ 配置阈值；timeout_marker_present == true
+  - Gate-F: verify_status.duration_sec ≥ 配置阈值；timeout_marker_present == true
   - Gate-A: audit 含 [SYNC_POINT_ANALYSIS] [ROOT_CAUSE] [FIX_PLAN]；
             fix_plan 指向同步/tiling/barrier/pipe
   - Gate-V: 新一轮在时限内完成（failure_type != timeout 且无 timeout_marker）
@@ -22,7 +22,7 @@ class TimeoutBranch:
 
     def run_gate_f(self, task_dir, attempt: int) -> GateOutcome:
         task_dir = Path(task_dir)
-        latest = task_dir / ".eval_status" / "latest.json"
+        latest = task_dir / ".verify_status" / "latest.json"
         checks = {"latest_present": latest.exists()}
         if latest.exists():
             try:
@@ -53,7 +53,7 @@ class TimeoutBranch:
 
     def run_gate_v(self, task_dir, attempt: int) -> GateOutcome:
         task_dir = Path(task_dir)
-        curr = task_dir / ".eval_status" / f"phase8_attempt{attempt}.json"
+        curr = task_dir / ".verify_status" / f"phase8_attempt{attempt}.json"
         checks = {"curr_present": curr.exists()}
         loop_signal = "CONTINUE"
         if curr.exists():

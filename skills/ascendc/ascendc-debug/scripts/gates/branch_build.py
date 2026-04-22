@@ -1,10 +1,10 @@
 """branch_build.py — 编译失败分支 Gate.
 
 契约（findings.md §3.3 ④）:
-  - Gate-F: .eval_logs/ 内最新 build log 存在，含 compile 错误块
+  - Gate-F: .verify_logs/ 内最新 build log 存在，含 compile 错误块
   - Gate-A: audit 含 [COMPILE_ERROR_CITATION] [ROOT_CAUSE] [FIX_PLAN]
             fix_type ∈ build_fix_whitelist
-  - Gate-V: 新一轮 eval_status.failed_step 从 compile 推进到 execute/verify
+  - Gate-V: 新一轮 verify_status.failed_step 从 compile 推进到 execute/verify
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ class BuildBranch:
 
     def run_gate_f(self, task_dir, attempt: int) -> GateOutcome:
         task_dir = Path(task_dir)
-        latest = task_dir / ".eval_status" / "latest.json"
+        latest = task_dir / ".verify_status" / "latest.json"
         checks = {"latest_present": latest.exists()}
         if latest.exists():
             try:
@@ -69,7 +69,7 @@ class BuildBranch:
 
     def run_gate_v(self, task_dir, attempt: int) -> GateOutcome:
         task_dir = Path(task_dir)
-        curr = task_dir / ".eval_status" / f"phase8_attempt{attempt}.json"
+        curr = task_dir / ".verify_status" / f"phase8_attempt{attempt}.json"
         checks = {"curr_present": curr.exists()}
         loop_signal = "CONTINUE"
         if curr.exists():

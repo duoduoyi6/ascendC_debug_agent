@@ -108,15 +108,15 @@ argument-hint: >
 
 ### 输入来源
 
-1. **`{task_dir}/.eval_status/latest.json`**（eval_wrapper 产出，唯一事实源）
-   - 读取方式：调用 `skills/ascendc/ascendc-debug/scripts/eval_status.py`
+1. **`{task_dir}/.verify_status/latest.json`**（classify_verify_result 产出，唯一事实源）
+   - 读取方式：调用 `skills/ascendc/ascendc-debug/scripts/verify_status.py`
      ```bash
-     python3 skills/ascendc/ascendc-debug/scripts/eval_status.py \
+     python3 skills/ascendc/ascendc-debug/scripts/verify_status.py \
          --task-dir {task_dir} --summarize
      ```
    - 该脚本对外 API：`load_latest_status(task_dir)` 返回已校验的 dict；`summarize_for_trace(status)` 返回 `failure_type` / `import_subtype` / `abort_subtype` / `last_evaluate_phase` / `last_evaluate_attempt` / `failed_step` 等字段子集。
 
-2. **Phase 4 迭代历史**：主 agent 在调用 trace-recorder 前写入 `{output_dir}/.phase4_history.json`（数组，每项形如 `{attempt, verifier_error, conductor_suggestion, eval_status_path, ended_at}`）。trace-recorder 读取后原样嵌入 `ac_iterations`。若文件不存在，用空数组 `[]` 兜底。
+2. **Phase 4 迭代历史**：主 agent 在调用 trace-recorder 前写入 `{output_dir}/.phase4_history.json`（数组，每项形如 `{attempt, verifier_error, conductor_suggestion, verify_status_path, ended_at}`）。trace-recorder 读取后原样嵌入 `ac_iterations`。若文件不存在，用空数组 `[]` 兜底。
 
 3. **目录状态**
    - `kernel/` 目录是否为空（glob `*.cpp` / `*.h` 均无 → 为空）
@@ -132,8 +132,8 @@ argument-hint: >
 1. `kernel/` 目录为空 → `failure_type = "no_kernel"`，`debug_eligible = false`
 2. `model_new_ascendc.py` AST 退化 → `failure_type = "degraded"`，`debug_eligible = false`
 3. Phase 3 失败且未进到 Phase 4 → `failure_type = "tilelang_only_failed"`，`debug_eligible = false`
-4. `eval_status.latest.json.failure_type == "execution_aborted"` → 照搬 `execution_aborted` + `debug_eligible = false`（环境/harness 问题，subagent 无法处理）
-5. 否则 → 照搬 `eval_status.latest.json.failure_type`（`success` / `precision_failed` / `build_failed` / `import_failed` / `runtime_error` / `timeout`）
+4. `verify_status.latest.json.failure_type == "execution_aborted"` → 照搬 `execution_aborted` + `debug_eligible = false`（环境/harness 问题，subagent 无法处理）
+5. 否则 → 照搬 `verify_status.latest.json.failure_type`（`success` / `precision_failed` / `build_failed` / `import_failed` / `runtime_error` / `timeout`）
 
 ### `debug_eligible` 计算规则
 
@@ -154,14 +154,14 @@ argument-hint: >
   "has_compiled_kernel": true,
   "has_degradation": false,
   "last_evaluate_phase": 6,
-  "last_evaluate_status_path": "{task_dir}/.eval_status/phase6_attempt0.json",
+  "last_verify_status_path": "{task_dir}/.verify_status/phase6_attempt0.json",
   "tl_iterations_used": 3,
   "ac_iterations": [
     {
       "attempt": 0,
       "verifier_error": "A-AscendCFallback-Type3: ...",
       "conductor_suggestion": "...",
-      "eval_status_path": "{task_dir}/.eval_status/phase4_attempt0.json",
+      "verify_status_path": "{task_dir}/.verify_status/phase4_attempt0.json",
       "ended_at": "2026-04-22T10:15:58Z"
     }
   ],
@@ -175,11 +175,11 @@ argument-hint: >
 | 字段 | 来源 |
 |------|------|
 | `failure_type` | 判定优先级规则（见上） |
-| `import_subtype` / `abort_subtype` | `eval_status.latest.json` 同名字段；若 `failure_type` 非对应类别则 `null` |
+| `import_subtype` / `abort_subtype` | `verify_status.latest.json` 同名字段；若 `failure_type` 非对应类别则 `null` |
 | `has_kernel` | `kernel/` 目录是否含 `.cpp`/`.h` |
 | `has_compiled_kernel` | `kernel/` 下是否存在 `.so` / 编译产物 |
 | `has_degradation` | `validate_ascendc_impl.py` 退出码 |
-| `last_evaluate_phase` / `last_evaluate_status_path` | `eval_status.latest.json.phase` / 对应 `phase{N}_attempt{M}.json` 路径 |
+| `last_evaluate_phase` / `last_verify_status_path` | `verify_status.latest.json.phase` / 对应 `phase{N}_attempt{M}.json` 路径 |
 | `tl_iterations_used` | Phase 3 实际迭代次数（从会话信息汇总） |
 | `ac_iterations` | 直接内嵌 `{output_dir}/.phase4_history.json` 数组内容（不存在则 `[]`） |
 | `debug_eligible` / `debug_eligible_reason` | 按上述规则计算 |

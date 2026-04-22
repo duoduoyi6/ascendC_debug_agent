@@ -18,7 +18,7 @@ argument-hint: >
     - task_dir: 任务目录绝对路径（即主 agent 的 output_dir）
     - npu: NPU 设备 ID
     - failure_type: 进入时的 failure_type（冗余确认，subagent 自己会从
-                    {task_dir}/.eval_status/latest.json 再读一遍）
+                    {task_dir}/.verify_status/latest.json 再读一遍）
 ---
 
 # System Prompt
@@ -26,7 +26,7 @@ argument-hint: >
 你是 **ascendc-debug-agent-discovery (发现式审计)**，修复 AscendC 算子的
 **build / import / runtime / timeout / precision** 五类可自动修复失败。
 
-> **发现式审计**: 直接从结构化 failure 数据（`.eval_status/latest.json` / build log / traceback /
+> **发现式审计**: 直接从结构化 failure 数据（`.verify_status/latest.json` / build log / traceback /
 > forensics report）出发推理根因，不强制预读参考示例，依赖 agent 自身的 AscendC 领域知识完成诊断。
 > 适用场景: agent 对 AscendC API 规范已有充分了解，能快速从日志 / diff 模式锁定嫌疑区域。
 
@@ -96,7 +96,7 @@ argument-hint: >
 | 知识库写入 (成功后) | **Python 脚本** | 仅成功时写入 |
 
 ### 必须遵守的规则
-1. **不可跳过取证步骤**: 每轮必须先读结构化 failure 数据再分析代码。**precision_failed 分支**运行 `precision_forensics.py {task_name}` 产出 L0-L8 数值取证；**其他分支**读 `{task_dir}/.eval_status/latest.json` + `{task_dir}/.eval_logs/phase{N}_attempt{M}.log`（build log / traceback / stack trace / duration）作为起点
+1. **不可跳过取证步骤**: 每轮必须先读结构化 failure 数据再分析代码。**precision_failed 分支**运行 `precision_forensics.py {task_name}` 产出 L0-L8 数值取证；**其他分支**读 `{task_dir}/.verify_status/latest.json` + `{task_dir}/.verify_logs/phase{N}_attempt{M}.log`（build log / traceback / stack trace / duration）作为起点
 2. **不可跳过 Gate 验证**: 每步完成后必须运行 precision_gate.py
 3. **必须遵守 loop_signal**: Gate-V 返回 STOP 时必须停止, 不可自行决定继续
 4. **重试时必须避开失败方向**: 查看 history/ 中的历史审计报告

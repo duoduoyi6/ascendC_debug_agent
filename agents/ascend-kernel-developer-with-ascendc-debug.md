@@ -365,22 +365,33 @@ while ac_iteration < max_ac_iterations:
       → 继续 4.3
 
     ── 4.3 功能验证 ──────────────────────────────────
-    通过 eval_wrapper 驱动 evaluate_ascendc.sh，产出机器可读 eval_status.json
+    直接在本地 docker 内调用 utils/verification_ascendc.py，
+    再用 utils/classify_verify_result.py 落盘机器可读 .verify_status/*.json
 
-    python3 utils/eval_wrapper.py \
-        --phase 4 --attempt ${ac_iteration} --task-dir ${output_dir}
+    mkdir -p ${output_dir}/.verify_logs
+    STDOUT=${output_dir}/.verify_logs/phase4_attempt${ac_iteration}.stdout
+    STDERR=${output_dir}/.verify_logs/phase4_attempt${ac_iteration}.stderr
 
-    读取 {output_dir}/.eval_status/phase4_attempt${ac_iteration}.json 获取 failure_type:
+    python3 utils/verification_ascendc.py ${output_dir} >$STDOUT 2>$STDERR
+    rc=$?
+    python3 utils/classify_verify_result.py \
+        --exit-code $rc \
+        --stdout-path $STDOUT --stderr-path $STDERR \
+        --task-dir ${output_dir} \
+        --phase 4 --attempt ${ac_iteration} --write-status
+
+    读取 {output_dir}/.verify_status/phase4_attempt${ac_iteration}.json 获取 failure_type:
 
     failure_type == "success":
       → break，Phase 4 成功，进入 Phase 5
 
     failure_type == "execution_aborted":
-      # eval_wrapper 已内部对 ssh_disconnected / docker_unreachable 重试 1 次
-      → 标记 execution_aborted，跳到 Phase 7（不走 Conductor，环境问题无法修复）
+      # 已是本地容器内执行，ssh / docker 类 abort 理论上不会出现；
+      # 若仍落到此 bucket 说明 verification 自身被外部信号杀掉，属不可修复
+      → 标记 execution_aborted，跳到 Phase 7（不走 Conductor）
 
     其他 failure_type:
-      ac_verifier_error = eval_status.stdout_tail / stderr_tail 摘要
+      ac_verifier_error = verify_status.stdout_tail / stderr_tail 摘要
       → 跳到 4.4 Conductor
 
     ── 4.4 Conductor 分析与决策 ──────────────────────
@@ -399,7 +410,7 @@ while ac_iteration < max_ac_iterations:
         → 生成 ac_conductor_suggestion
         → ac_history_attempts.append({
             attempt, verifier_error, conductor_suggestion,
-            eval_status_path: "{output_dir}/.eval_status/phase4_attempt${attempt}.json",
+            verify_status_path: "{output_dir}/.verify_status/phase4_attempt${attempt}.json",
             ended_at,
           })
         → ac_iteration++
@@ -480,11 +491,22 @@ while ac_iteration < max_ac_iterations:
 
 ## Phase 6: 全量用例验证（只读）
 
-将 `{output_dir}/<op_name>.json.bak` 恢复为 `{output_dir}/<op_name>.json`（覆盖精简后的版本，恢复全量测试用例），通过 `utils/eval_wrapper.py` 运行一次全量验证：
+将 `{output_dir}/<op_name>.json.bak` 恢复为 `{output_dir}/<op_name>.json`（覆盖精简后的版本，恢复全量测试用例），直接跑一次 `verification_ascendc.py` 并用 `classify_verify_result.py` 落盘：
 
 ```bash
 cp {output_dir}/<op_name>.json.bak {output_dir}/<op_name>.json
-python3 utils/eval_wrapper.py --phase 6 --attempt 0 --task-dir {output_dir}
+
+mkdir -p {output_dir}/.verify_logs
+STDOUT={output_dir}/.verify_logs/phase6_attempt0.stdout
+STDERR={output_dir}/.verify_logs/phase6_attempt0.stderr
+
+python3 utils/verification_ascendc.py {output_dir} >$STDOUT 2>$STDERR
+rc=$?
+python3 utils/classify_verify_result.py \
+    --exit-code $rc \
+    --stdout-path $STDOUT --stderr-path $STDERR \
+    --task-dir {output_dir} \
+    --phase 6 --attempt 0 --write-status
 ```
 
 **不做任何修复**。无论成功失败，直接进入 Phase 7。失败用例的修复由 Phase 8 的 debug subagent 接手。
@@ -607,7 +629,7 @@ subagent 正常退出时必产出 `{output_dir}/debug_trace.md` + `{output_dir}/
 | 退化检测前置 | 每次生成/修改 model_new_tilelang.py 或 model_new_ascendc.py 后，必须先通过退化检测脚本，再执行功能验证 |
 | A 类连续上限 | 同一退化子类型连续 ≥ 3 次 → 自动终止 |
 | 文件操作范围 | 限制在 `{output_dir}/` 目录内 |
-| 验证方式 | Phase 4/6 通过 `utils/eval_wrapper.py` 驱动 evaluate_ascendc.sh |
+| 验证方式 | Phase 4/6 直接调用 `utils/verification_ascendc.py {output_dir}`，再用 `utils/classify_verify_result.py` 落盘 `.verify_status/phase{N}_attempt{M}.json` + `latest.json`；本地 docker 内执行，不走 SSH |
 | NPU 设备 | 通过 `ASCEND_RT_VISIBLE_DEVICES` 环境变量设置 |
 | 语言 | 思考、分析、日志使用中文；代码、路径使用英文 |
 

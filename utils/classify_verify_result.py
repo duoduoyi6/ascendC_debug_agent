@@ -1,37 +1,38 @@
 #!/usr/bin/env python3
-"""eval_wrapper.py — 机器可读包装器，驱动 evaluate_ascendc.sh 并落盘 eval_status.json。
+"""classify_verify_result.py — Verification 结果机器可读分类器。
 
-对外约定详见 `.planning/findings.md` §1.2–1.4。下游（trace-recorder / Phase 8 / subagent
-Step 0.3 / Gate-V）唯一消费此脚本的输出，不再解析 evaluate_ascendc.sh stdout。
+从 utils/verification_ascendc.py 的 (exit_code, stdout_path, stderr_path) 推断
+failure_type，写 {task_dir}/.verify_status/phase{N}_attempt{M}.json + latest.json。
+
+schema_version=1；字段与老的 .eval_status/*.json 产物完全一致，下游
+(trace-recorder / Phase 8 subagent / Gate-V) 无需改读取逻辑。
+
+典型用法（主 agent Phase 4.3 / 6）:
+    python3 utils/verification_ascendc.py {task_dir} \
+        >$TASK_DIR/.verify_logs/phase4_attempt{N}.stdout \
+        2>$TASK_DIR/.verify_logs/phase4_attempt{N}.stderr
+    rc=$?
+    python3 utils/classify_verify_result.py \
+        --exit-code $rc \
+        --stdout-path $TASK_DIR/.verify_logs/phase4_attempt{N}.stdout \
+        --stderr-path $TASK_DIR/.verify_logs/phase4_attempt{N}.stderr \
+        --task-dir $TASK_DIR --phase 4 --attempt {N} --write-status
 """
 from __future__ import annotations
 
 import argparse
 import datetime as dt
 import json
-import os
 import re
 import signal
-import subprocess
 import sys
 from pathlib import Path
 
 SCHEMA_VERSION = 1
-SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent
-EVALUATE_SH = REPO_ROOT / "skills" / "ascendc" / "ascendc-translator" / "references" / "evaluate_ascendc.sh"
 
 
 def _utcnow_iso() -> str:
     return dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _ensure_dirs(task_dir: Path) -> tuple[Path, Path]:
-    status_dir = task_dir / ".eval_status"
-    logs_dir = task_dir / ".eval_logs"
-    status_dir.mkdir(parents=True, exist_ok=True)
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    return status_dir, logs_dir
 
 
 def _tail(text: str, n: int = 50) -> str:
@@ -41,7 +42,7 @@ def _tail(text: str, n: int = 50) -> str:
     return "\n".join(lines[-n:])
 
 
-# -------- failure_type 分类（findings.md §1.4）---------------------------------
+# -------- failure_type 分类 regex ---------------------------------------------
 
 _COMPILE_ERR_PATTERNS = [
     r"error: ", r"fatal error:", r"undefined reference",
@@ -77,9 +78,12 @@ def _match_any(patterns: list[str], text: str) -> bool:
     return any(re.search(p, text or "") for p in patterns)
 
 
-def classify_failure(status: dict, proc) -> dict:
+def classify_failure(status: dict, proc=None) -> dict:
     """只改 failure_type / failed_step / import_subtype / abort_subtype / exit_signal /
-    各阶段子状态。返回 dict 用于 status.update()。"""
+    各阶段子状态。返回 dict 用于 status.update()。
+
+    `proc` 保留为兼容 signature；分类仅依赖 status 内字段。
+    """
     stdout = status.get("stdout_tail", "")
     stderr = status.get("stderr_tail", "")
     combined = f"{stdout}\n{stderr}"
@@ -103,7 +107,7 @@ def classify_failure(status: dict, proc) -> dict:
         }
         return out
     if rc == 0:
-        # evaluate 退出 0 但未打出 PASS：谨慎作为 success（evaluate_ascendc.sh 的典型行为）
+        # verification_ascendc.py 退出 0 即视为 success
         out["failure_type"] = "success"
         return out
 
@@ -115,18 +119,20 @@ def classify_failure(status: dict, proc) -> dict:
         return out
 
     # (d) import_failed + 子类
-    if _match_any([r"ImportError", r"ModuleNotFoundError", r"OSError: cannot open shared object"], combined):
+    if _match_any(
+        [r"ImportError", r"ModuleNotFoundError", r"OSError: cannot open shared object"],
+        combined,
+    ):
         out["failure_type"] = "import_failed"
         out["failed_step"] = "import"
         if _match_any(_IMPORT_ENV_PATTERNS, combined):
             out["import_subtype"] = "import_env_side"
         else:
-            # 默认归为 kernel_side（只要不明显是环境库问题）
             out["import_subtype"] = "import_kernel_side"
         out["import"] = {"status": "failed", "traceback_path": status.get("log_path")}
         return out
 
-    # (e) runtime_error：明确 crash signal 且未触发 wrapper timeout
+    # (e) runtime_error：明确 crash signal
     if rc in _CRASH_SIGNALS:
         out["failure_type"] = "runtime_error"
         out["failed_step"] = "execute"
@@ -134,7 +140,7 @@ def classify_failure(status: dict, proc) -> dict:
         out["execute"] = {"status": "crashed", "crash_signal": _CRASH_SIGNALS[rc]}
         return out
 
-    # (f) precision_failed：verify 阶段正常退出但输出对比失败
+    # (f) precision_failed：verify 阶段正常退出但数值对比失败
     if _match_any(_PRECISION_PATTERNS, combined) and rc != 0:
         out["failure_type"] = "precision_failed"
         out["failed_step"] = "verify"
@@ -158,35 +164,33 @@ def classify_failure(status: dict, proc) -> dict:
     return out
 
 
-def run_once(phase: int, attempt: int, task_dir: Path, timeout_sec: int) -> dict:
-    """单次调用。不做 ssh/docker 重试（由 run() 包裹）。"""
-    status_dir, logs_dir = _ensure_dirs(task_dir)
-    started = _utcnow_iso()
-    log_path = logs_dir / f"phase{phase}_attempt{attempt}_{dt.datetime.utcnow():%Y%m%d_%H%M%S}.log"
-    timeout_marker = status_dir / "timeout_marker"
-    if timeout_marker.exists():
-        timeout_marker.unlink()
-
-    task_name = task_dir.name
-    cmd = ["bash", str(EVALUATE_SH), task_name]
-    env = os.environ.copy()
-    env["WORKDIR"] = str(REPO_ROOT)
-
+def build_status(
+    *,
+    phase: int,
+    attempt: int,
+    exit_code: int,
+    stdout_text: str,
+    stderr_text: str,
+    stdout_path: Path,
+    timeout_marker_present: bool = False,
+) -> dict:
+    """根据一次 verification 调用的原始结果构造完整 status dict。"""
+    now = _utcnow_iso()
     status: dict = {
         "schema_version": SCHEMA_VERSION,
         "phase": phase,
         "attempt": attempt,
-        "started_at": started,
-        "ended_at": None,
+        "started_at": now,
+        "ended_at": now,
         "duration_sec": None,
-        "exit_code": None,
+        "exit_code": exit_code,
         "exit_signal": None,
         "failure_type": None,
         "failed_step": None,
-        "log_path": str(log_path),
-        "stdout_tail": "",
-        "stderr_tail": "",
-        "timeout_marker_present": False,
+        "log_path": str(stdout_path),
+        "stdout_tail": _tail(stdout_text),
+        "stderr_tail": _tail(stderr_text),
+        "timeout_marker_present": timeout_marker_present,
         "import_subtype": None,
         "abort_subtype": None,
         "compile": {"status": "skipped", "error_summary": None},
@@ -197,72 +201,65 @@ def run_once(phase: int, attempt: int, task_dir: Path, timeout_sec: int) -> dict
             "passed_cases": None, "failed_cases": [],
         },
     }
-
-    proc = None
-    try:
-        proc = subprocess.run(
-            cmd, timeout=timeout_sec, env=env, capture_output=True, text=True,
-        )
-        status["exit_code"] = proc.returncode
-        status["stdout_tail"] = _tail(proc.stdout)
-        status["stderr_tail"] = _tail(proc.stderr)
-        log_path.write_text(
-            f"--- STDOUT ---\n{proc.stdout}\n--- STDERR ---\n{proc.stderr}\n"
-        )
-    except subprocess.TimeoutExpired as exc:
-        timeout_marker.write_text(
-            f"triggered_at={_utcnow_iso()} timeout_sec={timeout_sec}\n"
-        )
-        status["exit_code"] = 124
-        status["exit_signal"] = "SIGTERM_BY_WRAPPER"
-        status["stdout_tail"] = _tail(exc.stdout or "")
-        status["stderr_tail"] = _tail(exc.stderr or "")
-        log_path.write_text(
-            f"--- TIMEOUT triggered by eval_wrapper (timeout_sec={timeout_sec}) ---\n"
-            f"--- STDOUT ---\n{exc.stdout or ''}\n"
-            f"--- STDERR ---\n{exc.stderr or ''}\n"
-        )
-
-    status["timeout_marker_present"] = timeout_marker.exists()
-    status["ended_at"] = _utcnow_iso()
-    status["duration_sec"] = round(
-        (
-            dt.datetime.strptime(status["ended_at"], "%Y-%m-%dT%H:%M:%SZ")
-            - dt.datetime.strptime(status["started_at"], "%Y-%m-%dT%H:%M:%SZ")
-        ).total_seconds(),
-        2,
-    )
-
-    status.update(classify_failure(status, proc))
-
-    status_path = status_dir / f"phase{phase}_attempt{attempt}.json"
-    status_path.write_text(json.dumps(status, indent=2, ensure_ascii=False))
-    latest = status_dir / "latest.json"
-    latest.write_text(json.dumps(status, indent=2, ensure_ascii=False))
+    status.update(classify_failure(status))
     return status
 
 
-def run(phase: int, attempt: int, task_dir: Path, timeout_sec: int) -> dict:
-    """对外入口。对 ssh_disconnected / docker_unreachable 做内部 1 次重试。"""
-    result = run_once(phase, attempt, task_dir, timeout_sec)
-    if result.get("abort_subtype") in ("ssh_disconnected", "docker_unreachable"):
-        return run_once(phase, attempt, task_dir, timeout_sec)
-    return result
+def write_status(task_dir: Path, status: dict, phase: int, attempt: int) -> tuple[Path, Path]:
+    status_dir = task_dir / ".verify_status"
+    status_dir.mkdir(parents=True, exist_ok=True)
+    per_path = status_dir / f"phase{phase}_attempt{attempt}.json"
+    latest_path = status_dir / "latest.json"
+    payload = json.dumps(status, indent=2, ensure_ascii=False)
+    per_path.write_text(payload)
+    latest_path.write_text(payload)
+    return per_path, latest_path
 
 
-def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--phase", type=int, required=True, help="4 / 6 / 8")
-    p.add_argument("--attempt", type=int, default=0)
-    p.add_argument("--task-dir", type=Path, required=True)
-    p.add_argument("--timeout-sec", type=int, default=1800)
-    return p.parse_args()
+def _read_text_safe(path: Path) -> str:
+    if not path.exists():
+        return ""
+    return path.read_text(errors="replace")
 
 
 def main() -> int:
-    args = _parse_args()
-    status = run(args.phase, args.attempt, args.task_dir.resolve(), args.timeout_sec)
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--exit-code", type=int, required=True, help="verification_ascendc.py 的退出码")
+    ap.add_argument("--stdout-path", type=Path, required=True, help="verification stdout 日志文件")
+    ap.add_argument("--stderr-path", type=Path, required=True, help="verification stderr 日志文件")
+    ap.add_argument("--task-dir", type=Path, required=True, help="算子任务目录（含 model.py 等）")
+    ap.add_argument("--phase", type=int, required=True, help="4 / 6 / 8")
+    ap.add_argument("--attempt", type=int, default=0)
+    ap.add_argument(
+        "--timeout-marker",
+        action="store_true",
+        help="外层 timeout 命中时传入（对应 shell `timeout N python3 ...` 的 rc=124）",
+    )
+    ap.add_argument(
+        "--write-status",
+        action="store_true",
+        help="落盘 {task_dir}/.verify_status/phase{N}_attempt{M}.json + latest.json",
+    )
+    args = ap.parse_args()
+
+    stdout_text = _read_text_safe(args.stdout_path)
+    stderr_text = _read_text_safe(args.stderr_path)
+
+    status = build_status(
+        phase=args.phase,
+        attempt=args.attempt,
+        exit_code=args.exit_code,
+        stdout_text=stdout_text,
+        stderr_text=stderr_text,
+        stdout_path=args.stdout_path,
+        timeout_marker_present=args.timeout_marker,
+    )
+
+    if args.write_status:
+        write_status(args.task_dir.resolve(), status, args.phase, args.attempt)
+
     print(json.dumps(status, indent=2, ensure_ascii=False))
+
     ft = status.get("failure_type")
     if ft == "success":
         return 0

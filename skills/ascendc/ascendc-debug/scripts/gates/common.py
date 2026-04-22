@@ -4,11 +4,11 @@
   - 反作弊 hash 未破坏
   - AST 退化未引入
   - task_dir 目录结构完整
-  - eval_status.json 产出存在且 schema_version 正确
+  - verify_status.json 产出存在且 schema_version 正确
   - {op}.json.bak 未被破坏
   - audit_{attempt}.md 文件存在（section schema 由分支层各自定义）
 
-不检查 audit section 格式；不在 fix 步骤单独加 Gate——由下一轮 Gate-V 通过 eval_status 差分间接验证。
+不检查 audit section 格式；不在 fix 步骤单独加 Gate——由下一轮 Gate-V 通过 verify_status 差分间接验证。
 """
 from __future__ import annotations
 
@@ -108,8 +108,8 @@ def check_structure(task_dir: Path, op_name: str) -> dict:
     }
 
 
-def check_eval_status_present(task_dir: Path) -> dict:
-    latest = task_dir / ".eval_status" / "latest.json"
+def check_verify_status_present(task_dir: Path) -> dict:
+    latest = task_dir / ".verify_status" / "latest.json"
     ok = latest.exists()
     schema_ok = False
     if ok:
@@ -118,8 +118,8 @@ def check_eval_status_present(task_dir: Path) -> dict:
         except Exception:
             schema_ok = False
     return {
-        "eval_status_latest_present": ok,
-        "eval_status_schema_ok": schema_ok,
+        "verify_status_latest_present": ok,
+        "verify_status_schema_ok": schema_ok,
     }
 
 
@@ -143,9 +143,9 @@ _GATING_KEYS = {
     "has_kernel_dir",
     "has_model_new_ascendc",
     "json_bak_preserved_if_exists",
-    # eval_status (validate step)
-    "eval_status_latest_present",
-    "eval_status_schema_ok",
+    # verify_status (validate step)
+    "verify_status_latest_present",
+    "verify_status_schema_ok",
     # audit file (audit/fix/validate steps)
     "audit_file_present",
     "audit_file_nonempty",
@@ -158,7 +158,7 @@ def run_common(step: str, task_dir: Path, op_name: str, attempt: int) -> GateOut
     - forensics: 结构 / 反作弊 / AST
     - audit:     +audit 文件存在
     - fix:       +audit 文件存在（fix 不单独 Gate，此处复用 audit）
-    - validate:  +eval_status + audit 文件
+    - validate:  +verify_status + audit 文件
 
     只有 `_GATING_KEYS` 中的键参与 ok 判定；其它 (baseline_present / validator_present 等)
     为纯诊断信息。
@@ -168,7 +168,7 @@ def run_common(step: str, task_dir: Path, op_name: str, attempt: int) -> GateOut
     checks.update(check_ast_degrade(task_dir))
     checks.update(check_structure(task_dir, op_name))
     if step == "validate":
-        checks.update(check_eval_status_present(task_dir))
+        checks.update(check_verify_status_present(task_dir))
     if step in ("audit", "fix", "validate"):
         checks.update(check_audit_file_present(task_dir, attempt))
 

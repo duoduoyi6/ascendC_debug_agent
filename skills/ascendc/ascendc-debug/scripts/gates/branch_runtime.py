@@ -20,7 +20,7 @@ class RuntimeBranch:
 
     def run_gate_f(self, task_dir, attempt: int) -> GateOutcome:
         task_dir = Path(task_dir)
-        latest = task_dir / ".eval_status" / "latest.json"
+        latest = task_dir / ".verify_status" / "latest.json"
         checks = {"latest_present": latest.exists()}
         if latest.exists():
             try:
@@ -52,9 +52,9 @@ class RuntimeBranch:
 
     def run_gate_v(self, task_dir, attempt: int) -> GateOutcome:
         task_dir = Path(task_dir)
-        curr = task_dir / ".eval_status" / f"phase8_attempt{attempt}.json"
+        curr = task_dir / ".verify_status" / f"phase8_attempt{attempt}.json"
         prev = (
-            task_dir / ".eval_status" / f"phase8_attempt{attempt - 1}.json"
+            task_dir / ".verify_status" / f"phase8_attempt{attempt - 1}.json"
             if attempt > 0
             else None
         )

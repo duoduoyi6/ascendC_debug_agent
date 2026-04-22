@@ -22,12 +22,12 @@ AscendOpGenAgent/
     ├── scripts/                           # 共用脚本
     │   ├── precision_forensics.py         # 数值取证 (L0-L4 + L6 + L8 + available_files)
     │   ├── precision_gate.py              # Gate 入口路由器（派发到 gates/ 分支层）
-    │   ├── eval_status.py                 # eval_status.json loader / validator
+    │   ├── verify_status.py                 # verify_status.json loader / validator
     │   ├── precision_knowledge.py         # 知识库管理: load / search / dump
     │   ├── anticheat.py                   # 反作弊: wrapper hash + AST + C++ 源码扫描
     │   └── gates/                         # 2 层 Gate 包：通用层 + 分支层
     │       ├── __init__.py
-    │       ├── common.py                  # 通用层: 反作弊 / AST / baseline / eval_status / 目录完整性
+    │       ├── common.py                  # 通用层: 反作弊 / AST / baseline / verify_status / 目录完整性
     │       ├── branch_precision.py        # 1-P 分支: F/A/V 精度 Gate (抽自原 precision_gate.py)
     │       ├── branch_build.py            # 1-B 分支: 编译错误 Gate
     │       ├── branch_import.py           # 1-I 分支: import kernel_side 符号 Gate
@@ -49,7 +49,7 @@ AscendOpGenAgent/
 **上下游依赖**：
 - 上游：
   - 主 agent 产出 `{task_dir}/kernel/`、`model.py`、`model_new_ascendc.py`、`trace.md`（含 Phase 7 写入的 `final_status` JSON block）
-  - `utils/eval_wrapper.py` 产出 `{task_dir}/.eval_status/latest.json`（及 `phase{N}_attempt{M}.json` / `.eval_logs/phase{N}_attempt{M}.log`）
+  - `utils/verification_ascendc.py` + `utils/classify_verify_result.py` 产出 `{task_dir}/.verify_status/latest.json`（及 `phase{N}_attempt{M}.json` / `.verify_logs/phase{N}_attempt{M}.log`）
 - 下游：
   - 主 agent Phase 8 spawn 后处理读取 `{task_dir}/debug_trace.md` + `{task_dir}/debug_status.json`（本 skill 退出前强制产物）
   - `utils/verification_ascendc.py`（评测）、`utils/run_ascendc_debug.sh`（批量调度 + 反作弊）
@@ -58,10 +58,10 @@ AscendOpGenAgent/
 
 | 层 | 文件 | 职责 |
 |---|---|---|
-| 通用层 | `scripts/gates/common.py` | 所有分支共享的不变量：反作弊 hash / AST 退化 / baseline 存在 / 目录完整性 / `eval_status` 产出 / `.json.bak` 未被破坏 |
+| 通用层 | `scripts/gates/common.py` | 所有分支共享的不变量：反作弊 hash / AST 退化 / baseline 存在 / 目录完整性 / `verify_status` 产出 / `.json.bak` 未被破坏 |
 | 分支层 | `scripts/gates/branch_*.py` | 每类失败的专属 F/A/V 语义；audit section schema 由各分支自定义（通用层不强制统一 schema） |
 
-`precision_gate.py` 作为入口路由器：先跑通用层 → 通过后按 `eval_status.failure_type` 派发对应 `branch_*.py`。
+`precision_gate.py` 作为入口路由器：先跑通用层 → 通过后按 `verify_status.failure_type` 派发对应 `branch_*.py`。
 
 ## 双 Subagent 架构
 

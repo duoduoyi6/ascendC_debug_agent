@@ -18,10 +18,10 @@ subagent:
 ## What I do
 
 修复 AscendC 算子的 **build / import / runtime / timeout / precision** 五类失败。流程:
-1. 读取 `{task_dir}/.eval_status/latest.json` 确定 `failure_type`, 分流到对应 Step 1 分支（一次 session 锁定一条分支）
+1. 读取 `{task_dir}/.verify_status/latest.json` 确定 `failure_type`, 分流到对应 Step 1 分支（一次 session 锁定一条分支）
 2. Agent 结合上下文 + 代码 + 日志 / 数值证据 + 知识库做深度分析, 定位根因并制定修复计划
 3. Agent 修复代码（只能改 `{task_dir}/kernel/` 下文件）
-4. 重新编译 + 验证（通过 `utils/eval_wrapper.py --phase 8`）
+4. 重新编译 + 验证（通过 `utils/verification_ascendc.py` + `utils/classify_verify_result.py` (Phase 8 重跑)）
 5. 根据 Gate 循环控制信号决定继续或停止
 
 ## When to use me
@@ -35,17 +35,17 @@ subagent:
 - `{task_dir}/kernel/` 下至少一个 `.cpp` 文件（保证有 kernel 可修）
 - `{task_dir}/model_new_ascendc.py` 未 AST 退化（反作弊前置条件）
 - `{task_dir}/trace.md` 末尾含 `final_status` fenced JSON block（Phase 7 产出）
-- `{task_dir}/.eval_status/latest.json` 存在（`utils/eval_wrapper.py` 产出）
+- `{task_dir}/.verify_status/latest.json` 存在（`utils/verification_ascendc.py` + `utils/classify_verify_result.py` 产出）
 - `{task_dir}/{op_name}.json`（及可选 `.json.bak`）存在
 
 其中 `task_dir = {repo_root}/{task_name}`，`repo_root` 为 AscendOpGenAgent 仓库根目录。
 
 > **分支专属前提**（进入 Step 1-X 后由各分支自校验）：
 > - **1-P（precision_failed）**：`model.py` 参考实现、`kernel/pybind11.cpp` 编译通过且能运行
-> - **1-B（build_failed）**：`.eval_logs/phase{N}_attempt{M}.log` 含 compile error 块
+> - **1-B（build_failed）**：`.verify_logs/phase{N}_attempt{M}.log` 含 compile error 块
 > - **1-I（import_failed + import_kernel_side）**：import traceback 指向 pybind 符号 / ext module；`import_env_side` 不进入本 skill
 > - **1-R（runtime_error）**：execute 阶段有明确 crash signal (SIGSEGV/SIGABRT/SIGBUS/SIGFPE)
-> - **1-T（timeout）**：`.eval_status` 含 `timeout_marker_present == true`
+> - **1-T（timeout）**：`.verify_status` 含 `timeout_marker_present == true`
 
 ## Workflow
 
@@ -92,11 +92,11 @@ cp "{task_dir}/model_new_ascendc.py" \
 
 ---
 
-### Step 0.3: 读 final_status + eval_status，锁定 session_branch
+### Step 0.3: 读 final_status + verify_status，锁定 session_branch
 
 ```bash
-# 读结构化 eval_status（最后一次 evaluate 的 failure_type / failed_step / log 路径）
-python3 skills/ascendc/ascendc-debug/scripts/eval_status.py \
+# 读结构化 verify_status（最后一次 evaluate 的 failure_type / failed_step / log 路径）
+python3 skills/ascendc/ascendc-debug/scripts/verify_status.py \
     --task-dir {task_dir} | jq '.failure_type, .import_subtype, .timeout_marker_present'
 
 # 读 trace.md 末尾的 final_status JSON block（Phase 7 写入, 本 session 期间只读）
@@ -113,7 +113,7 @@ awk '/^```json/,/^```$/' "{task_dir}/trace.md" | jq '.debug_eligible, .failure_t
 
 **跨分支跳转禁止（v3 硬约束）**：
 
-- 若某轮修复后 `eval_status.failure_type` 变化（如 `build_failed` → `precision_failed`），视为"本分支 Gate-V 取得进展"
+- 若某轮修复后 `verify_status.failure_type` 变化（如 `build_failed` → `precision_failed`），视为"本分支 Gate-V 取得进展"
 - **不切换分支**，本次 session 结束；`debug_trace.md` / `debug_status.json` 标 `phase8_outcome: progressed_to_new_failure_type`
 - 主 agent 本版本**不自动二次 spawn**（留给人工判断）
 - 原因：跨分支会导致 audit schema、Gate 语义、`debug_trace.md` 模板同时漂移，风险远大于收益
@@ -156,8 +156,8 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_gate.py \
 ### Step 1-B: Build Error Analysis（build_failed 分支）
 
 **输入**:
-- `{task_dir}/.eval_status/latest.json` — 结构化状态 + `log_path` + `compile.error_summary`
-- `{task_dir}/.eval_logs/phase{N}_attempt{M}.log` — 原始 build log（compile 阶段 stderr 全文）
+- `{task_dir}/.verify_status/latest.json` — 结构化状态 + `log_path` + `compile.error_summary`
+- `{task_dir}/.verify_logs/phase{N}_attempt{M}.log` — 原始 build log（compile 阶段 stderr 全文）
 - `{task_dir}/kernel/*.cpp` / `*.h` — 当前 kernel 源码
 - `{task_dir}/trace.md` — Phase 1-7 上下文（Phase 4 ac_iterations 里记录了历次 build 尝试）
 
@@ -183,8 +183,8 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_gate.py \
 - `skills/ascendc/ascendc-translator/references/TileLang-AscendC-API-Mapping.md`（API 权威参考）
 - `skills/ascendc/ascendc-translator/references/AscendC_knowledge/api_reference/`（API 详细文档）
 
-**Step 4（共用）**: 修复后调 `utils/eval_wrapper.py --phase 8 --attempt {attempt} --task-dir {task_dir}` 重跑，然后走 `Gate-BUILD-V`：
-- `eval_status.failed_step` 从 `compile` 推进到 `import`/`execute`/`verify`/`null` = 进步（跨分支语义下仍算 `progressed_to_new_failure_type`，本 session 结束）
+**Step 4（共用）**: 修复后调 `utils/verification_ascendc.py` + `utils/classify_verify_result.py` (Phase 8 重跑) 重跑，然后走 `Gate-BUILD-V`：
+- `verify_status.failed_step` 从 `compile` 推进到 `import`/`execute`/`verify`/`null` = 进步（跨分支语义下仍算 `progressed_to_new_failure_type`，本 session 结束）
 - 仍卡在 `compile` 且 error 行未变 = 停滞
 - `compile` 阶段 passed 且 `failure_type != build_failed` = 本分支完成（不切分支，写 `debug_status.json` 后退出）
 
@@ -193,8 +193,8 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_gate.py \
 ### Step 1-I: Import Error Analysis（import_failed + import_kernel_side 分支）
 
 **输入**:
-- `{task_dir}/.eval_status/latest.json` — 结构化状态，确认 `import_subtype == import_kernel_side`（若是 `import_env_side` 应已被 Step 0.3 过滤）
-- `{task_dir}/.eval_status/import_traceback.log` 或 `.eval_logs/phase{N}_attempt{M}.log` — 原始 import traceback
+- `{task_dir}/.verify_status/latest.json` — 结构化状态，确认 `import_subtype == import_kernel_side`（若是 `import_env_side` 应已被 Step 0.3 过滤）
+- `{task_dir}/.verify_status/import_traceback.log` 或 `.verify_logs/phase{N}_attempt{M}.log` — 原始 import traceback
 - `{task_dir}/kernel/pybind11.cpp` — pybind 注册入口（`PYBIND11_MODULE` 名、导出符号）
 - `{task_dir}/kernel/*_kernel.h` / `*.cpp` — 被 pybind 引用的 kernel 符号
 - `{task_dir}/model_new_ascendc.py` — import 的 ext module 名（只读！不可改）
@@ -219,8 +219,8 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_gate.py \
 - `skills/ascendc/ascendc-debug/references/`（若有环境变量 / pybind 相关条目）
 - `skills/ascendc/ascendc-translator/references/TileLang-AscendC-API-Mapping.md`（`extern "C"` 导出规范）
 
-**Step 4（共用）**: 修复后调 `utils/eval_wrapper.py --phase 8 --attempt {attempt} --task-dir {task_dir}` 重跑，然后走 `Gate-IMPORT-V`：
-- `eval_status.import.status == passed` = 本分支完成
+**Step 4（共用）**: 修复后调 `utils/verification_ascendc.py` + `utils/classify_verify_result.py` (Phase 8 重跑) 重跑，然后走 `Gate-IMPORT-V`：
+- `verify_status.import.status == passed` = 本分支完成
 - 仍卡在 `import` 且 traceback 未变 = 停滞
 - `import` 通过但 `failure_type` 变为 `build_failed` / `runtime_error` / `precision_failed` = 进步但跨分支，本 session 结束
 
@@ -229,8 +229,8 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_gate.py \
 ### Step 1-R: Runtime Error Analysis（runtime_error 分支）
 
 **输入**:
-- `{task_dir}/.eval_status/latest.json` — 结构化状态 + `execute.crash_signal`（SIGSEGV / SIGABRT / SIGBUS / SIGFPE）
-- `{task_dir}/.eval_logs/phase{N}_attempt{M}.log` — stderr / stack trace / core dump 信息
+- `{task_dir}/.verify_status/latest.json` — 结构化状态 + `execute.crash_signal`（SIGSEGV / SIGABRT / SIGBUS / SIGFPE）
+- `{task_dir}/.verify_logs/phase{N}_attempt{M}.log` — stderr / stack trace / core dump 信息
 - `{task_dir}/kernel/*.cpp` / `*.h` — kernel 源码
 - `{task_dir}/trace.md` — 上下文
 
@@ -253,8 +253,8 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_gate.py \
 - `skills/ascendc/ascendc-translator/references/AscendCVerification.md`（runtime 语义与验证）
 - `skills/ascendc/ascendc-translator/references/dsl2Ascendc_compute_vector.md`（对齐与 DataCopyPad）
 
-**Step 4（共用）**: 修复后调 `utils/eval_wrapper.py --phase 8 --attempt {attempt} --task-dir {task_dir}` 重跑，然后走 `Gate-RUNTIME-V`：
-- `eval_status.failure_type != runtime_error` 或 crash 位置 / signal 变化 = 进步（若仍是 runtime_error 但位置变则视为 `progressed`）
+**Step 4（共用）**: 修复后调 `utils/verification_ascendc.py` + `utils/classify_verify_result.py` (Phase 8 重跑) 重跑，然后走 `Gate-RUNTIME-V`：
+- `verify_status.failure_type != runtime_error` 或 crash 位置 / signal 变化 = 进步（若仍是 runtime_error 但位置变则视为 `progressed`）
 - `failure_type` 变为 `precision_failed` = 进步但跨分支，本 session 结束
 
 ---
@@ -262,8 +262,8 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_gate.py \
 ### Step 1-T: Timeout Analysis（timeout 分支）
 
 **输入**:
-- `{task_dir}/.eval_status/latest.json` — 结构化状态；必须满足 `failure_type == timeout` 且 `timeout_marker_present == true`（否则视为 `execution_aborted`，不应进本分支）
-- `{task_dir}/.eval_logs/phase{N}_attempt{M}.log` — 超时前的 stdout/stderr 尾部（最后一条日志提示死锁 / 死循环位置）
+- `{task_dir}/.verify_status/latest.json` — 结构化状态；必须满足 `failure_type == timeout` 且 `timeout_marker_present == true`（否则视为 `execution_aborted`，不应进本分支）
+- `{task_dir}/.verify_logs/phase{N}_attempt{M}.log` — 超时前的 stdout/stderr 尾部（最后一条日志提示死锁 / 死循环位置）
 - `{task_dir}/kernel/*.cpp` / `*.h` — kernel 源码（重点看 `SyncAll` / `WaitFlag` / `SetFlag` / `for` 循环边界）
 - `{task_dir}/kernel/{op_name}_tiling.h` + `kernel/pybind11.cpp` — tiling 配置（block_dim / tile_size）
 - `{task_dir}/trace.md` — 上下文
@@ -286,8 +286,8 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_gate.py \
 - `skills/ascendc/ascendc-translator/references/dsl2Ascendc_host.md`（tiling / workspace 分配）
 - `skills/ascendc/ascendc-translator/references/AscendCVerification.md`（runtime 约束）
 
-**Step 4（共用）**: 修复后调 `utils/eval_wrapper.py --phase 8 --attempt {attempt} --task-dir {task_dir}` 重跑，然后走 `Gate-TIMEOUT-V`：
-- `eval_status.duration_sec < timeout_threshold` 且 `failure_type != timeout` = 本分支完成（无论对错 — 精度对错由后续判断，但 timeout 语义已解除）
+**Step 4（共用）**: 修复后调 `utils/verification_ascendc.py` + `utils/classify_verify_result.py` (Phase 8 重跑) 重跑，然后走 `Gate-TIMEOUT-V`：
+- `verify_status.duration_sec < timeout_threshold` 且 `failure_type != timeout` = 本分支完成（无论对错 — 精度对错由后续判断，但 timeout 语义已解除）
 - 仍超时且 duration 基本不变 = 停滞
 - 不再超时但转 `runtime_error` / `precision_failed` = 进步但跨分支，本 session 结束
 
@@ -758,10 +758,10 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_gate.py \
 ### Step 4: 重新编译 + 精度验证
 
 ```bash
-python3 utils/eval_wrapper.py --phase 8 --attempt {attempt} --task-dir {task_dir}
+python3 utils/verification_ascendc.py {task_dir} >$STDOUT 2>$STDERR; rc=$?; python3 utils/classify_verify_result.py --exit-code $rc --stdout-path $STDOUT --stderr-path $STDERR --task-dir {task_dir} --phase 8 --attempt {attempt} --write-status
 ```
 
-> 产出 `{task_dir}/.eval_status/phase8_attempt{attempt}.json`（结构化 failure 数据，所有分支共用）。
+> 产出 `{task_dir}/.verify_status/phase8_attempt{attempt}.json`（结构化 failure 数据，所有分支共用）。
 
 **失败分类处理**（根据 stdout 判断）：
 
@@ -880,13 +880,13 @@ cp "{task_dir}/model_new_ascendc.py" \
 - task_dir: {task_dir}
 - session_branch: <1-P / 1-B / 1-I / 1-R / 1-T>
 - 上游 trace.md.final_status 的完整 JSON 快照（含 ac_iterations 历史）
-- 上游 .eval_status/latest.json 完整快照
+- 上游 .verify_status/latest.json 完整快照
 - 进入时 kernel/ 基线快照路径（`precision_tuning/history/baseline/code_snapshot`）
 
 ## 2. 迭代历史（强制，每轮一节）
 
 ### Attempt 0
-- 进入时 eval_status 关键字段: failure_type, failed_step, duration_sec, exit_code
+- 进入时 verify_status 关键字段: failure_type, failed_step, duration_sec, exit_code
 - 诊断摘要: 引用 audit_0.md（或对应分支 audit 文件）的摘要 section
 - 修复代码改动: 修改文件列表 + 函数 / 行号级 diff 摘要（不贴全文）
 - Gate-通用: PASS / FAIL + 未通过项
@@ -896,14 +896,14 @@ cp "{task_dir}/model_new_ascendc.py" \
   - 1-I: import.status 变化
   - 1-R: crash signal / crash 位置变化
   - 1-T: duration_sec 变化
-- 本轮退出 eval_status 快照
+- 本轮退出 verify_status 快照
 - outcome: passed / improved / stagnant / regressed
 
 ### Attempt 1 ... N（同上）
 
 ## 3. 最终 Verdict（强制）
 - session_outcome: success / failed / stopped_by_gate / stopped_by_loop_limit / progressed_to_new_failure_type / timeout / skipped_env_issue / skipped_unsupported_type
-- 退出时 eval_status 快照
+- 退出时 verify_status 快照
 - 若 success: 确认全量 `.json.bak` 恢复后 verify 通过
 - 若 failed / stopped_*: 明确原因
 - 若 progressed_to_new_failure_type: 新 failure_type 是什么（主 agent 读取后自行决定是否二次 spawn）
@@ -912,7 +912,7 @@ cp "{task_dir}/model_new_ascendc.py" \
 - 各轮 audit 文件相对 {task_dir} 路径
 - tuning_directions.json（精度分支）或对应分支的方向记录文件
 - history/baseline/code_snapshot/ 和各轮 attempt_N/code_snapshot/
-- .eval_status/phase8_attempt_*.json
+- .verify_status/phase8_attempt_*.json
 - debug_status.json 路径
 
 ## 附录 A: 走偏点（可选但推荐）
@@ -925,7 +925,7 @@ cp "{task_dir}/model_new_ascendc.py" \
 - 命中的 knowledge entries
 
 ## 附录 C: 耗时细分（可选）
-- 总 wall clock（eval_wrapper 各轮 JSON 的 started_at/ended_at 差值之和 + subagent 整体运行时间）
+- 总 wall clock（classify_verify_result 各轮 JSON 的 started_at/ended_at 差值之和 + subagent 整体运行时间）
 - 若能区分 Step 级耗时则列出，不能则写"未精细记录"
 ```
 
@@ -946,8 +946,8 @@ cp "{task_dir}/model_new_ascendc.py" \
   "ended_at": "<ISO>",
   "attempts_used": <int>,
   "entry_failure_type": "<进入时的 final_status.failure_type>",
-  "final_failure_type": "<从最后一次 .eval_status/phase8_attempt_{N}.json 读取>",
-  "final_eval_status_path": "{task_dir}/.eval_status/phase8_attempt_{N}.json",
+  "final_failure_type": "<从最后一次 .verify_status/phase8_attempt_{N}.json 读取>",
+  "final_verify_status_path": "{task_dir}/.verify_status/phase8_attempt_{N}.json",
   "notes": "<一句话说明，例：首轮 COMPILE_ERROR 已定位为 template_arg_fix，attempt 1 Gate-V 推进至 import>"
 }
 ```
@@ -957,14 +957,14 @@ cp "{task_dir}/model_new_ascendc.py" \
 - `phase8_outcome` 必须是上列 8 种之一；其他值视为未知结局，由主 agent 兜底
 - `session_branch` 必须与 Step 0.3 锁定的分支一致
 - `started_at` / `ended_at` 用 ISO 8601（带 UTC 时区）
-- `final_failure_type` 从**最后一次**本 session 内触发的 `utils/eval_wrapper.py` 产出读取；若一次都没跑（例如 `skipped_*`），与 `entry_failure_type` 一致
-- `final_eval_status_path` 也指向最后一次本 session 内的 phase8_attempt_N.json；未跑时为 `null`
+- `final_failure_type` 从**最后一次**本 session 内触发的 `utils/verification_ascendc.py` + `utils/classify_verify_result.py` 产出读取；若一次都没跑（例如 `skipped_*`），与 `entry_failure_type` 一致
+- `final_verify_status_path` 也指向最后一次本 session 内的 phase8_attempt_N.json；未跑时为 `null`
 
 #### 7.3 硬约束重申
 
 - ⛔ **禁止 subagent append `trace.md`**（findings §7.3）—— `trace.md` 在 Phase 7 写完后**全程只读**；所有 Phase 8 叙事 / verdict 都落到 `debug_trace.md` + `debug_status.json`
 - ⛔ **禁止 subagent 修改 `utils/` / `CMakeLists.txt` / `setup.py` / `agents/` / `skills/`** —— 只能改 `{task_dir}/kernel/` 下文件，`{task_dir}/precision_tuning/` 下写 skill 产物
-- ⛔ **禁止 subagent 删除或重写 `{task_dir}/trace.md`、`{task_dir}/.eval_status/latest.json`、`{task_dir}/{op_name}.json.bak`**（上游 artefact，只读）
+- ⛔ **禁止 subagent 删除或重写 `{task_dir}/trace.md`、`{task_dir}/.verify_status/latest.json`、`{task_dir}/{op_name}.json.bak`**（上游 artefact，只读）
 - 写完 `debug_trace.md` + `debug_status.json` 后，再进入 Step 5（成功）或 Step 6（失败）的**报告输出**部分；Step 5 / 6 里的"归档当前轮 / 更新 current_best / 全量验证"等动作在写 Step 7 产物前完成即可（Step 7 是退出前的最后一步，只负责 debug_trace / debug_status 两份产物）
 
 ---

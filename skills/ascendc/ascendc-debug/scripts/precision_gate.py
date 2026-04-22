@@ -3,8 +3,8 @@
 precision_gate.py — AscendC debug Gate 2 层路由入口
 
 架构（v3，findings.md §3.3 ①）:
-  - 通用层 (gates.common): 反作弊 / AST / 结构 / eval_status / audit 文件
-  - 分支层 (gates.branch_*): 按 .eval_status/latest.json 的 failure_type 派发
+  - 通用层 (gates.common): 反作弊 / AST / 结构 / verify_status / audit 文件
+  - 分支层 (gates.branch_*): 按 .verify_status/latest.json 的 failure_type 派发
       * precision_failed → PrecisionBranch
       * build_failed     → BuildBranch
       * import_failed    → ImportBranch (kernel_side only)
@@ -14,7 +14,7 @@ precision_gate.py — AscendC debug Gate 2 层路由入口
 路由顺序:
   1. 跑 gates.common.run_common(step, task_dir, op_name, attempt)
      - 失败直接返回（不再进分支层）
-  2. 读 eval_status.latest.json 取 failure_type
+  2. 读 verify_status.latest.json 取 failure_type
      - 不存在或缺失 → 默认 precision_failed (向后兼容)
   3. 分支派发到 run_gate_f/a/v(task_dir, attempt)
      - fix step 不单独 Gate (findings §3.3)，实际复用 audit branch method
@@ -30,7 +30,7 @@ from pathlib import Path
 _SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = _SCRIPT_DIR.parent.parent.parent.parent   # AscendOpGenAgent/
 
-# 让 `from gates import ...` / `from eval_status import ...` 能工作，不管调用方 PYTHONPATH
+# 让 `from gates import ...` / `from verify_status import ...` 能工作，不管调用方 PYTHONPATH
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
@@ -42,10 +42,10 @@ from gates.branch_runtime import RuntimeBranch  # noqa: E402
 from gates.branch_timeout import TimeoutBranch  # noqa: E402
 
 try:
-    from eval_status import load_latest_status  # type: ignore  # noqa: E402
-except ImportError:  # pragma: no cover — fallback when eval_status 尚未落盘
+    from verify_status import load_latest_status  # type: ignore  # noqa: E402
+except ImportError:  # pragma: no cover — fallback when verify_status 尚未落盘
     def load_latest_status(task_dir):  # type: ignore
-        raise FileNotFoundError("eval_status not importable")
+        raise FileNotFoundError("verify_status not importable")
 
 
 # 路由表: failure_type -> Branch class. 默认 PrecisionBranch 以向后兼容。
@@ -67,7 +67,7 @@ def _select_branch(failure_type, op_name: str):
 
 
 def _load_failure_type(task_dir: Path):
-    """从 .eval_status/latest.json 取 failure_type；失败返回 None (默认精度分支)。"""
+    """从 .verify_status/latest.json 取 failure_type；失败返回 None (默认精度分支)。"""
     try:
         status = load_latest_status(task_dir)
         return status.get("failure_type")

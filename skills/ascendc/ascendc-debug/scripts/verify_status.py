@@ -1,12 +1,12 @@
-"""eval_status.py — eval_wrapper 产物的读取 / 校验 helper.
+"""verify_status.py — classify_verify_result 产物的读取 / 校验 helper.
 
 对外 API:
-    load_eval_status(task_dir: Path, phase: int, attempt: int) -> dict
+    load_verify_status(task_dir: Path, phase: int, attempt: int) -> dict
     load_latest_status(task_dir: Path) -> dict
     summarize_for_trace(status: dict) -> dict
 
 由 Gate 路由器、trace-recorder、subagent Step 0.3 共用，确保对
-`.eval_status/phase{N}_attempt{M}.json` 与 `latest.json` 的读取行为一致。
+`.verify_status/phase{N}_attempt{M}.json` 与 `latest.json` 的读取行为一致。
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ REQUIRED_KEYS = {
 def _validate(status: dict) -> dict:
     missing = REQUIRED_KEYS - set(status.keys())
     if missing:
-        raise ValueError(f"eval_status missing keys: {sorted(missing)}")
+        raise ValueError(f"verify_status missing keys: {sorted(missing)}")
     if status["schema_version"] != SCHEMA_VERSION:
         raise ValueError(
             f"unexpected schema_version {status['schema_version']}, "
@@ -40,10 +40,10 @@ def _validate(status: dict) -> dict:
 
 
 def _status_dir(task_dir: Path) -> Path:
-    return task_dir / ".eval_status"
+    return task_dir / ".verify_status"
 
 
-def load_eval_status(task_dir: Path, phase: int, attempt: int) -> dict:
+def load_verify_status(task_dir: Path, phase: int, attempt: int) -> dict:
     path = _status_dir(task_dir) / f"phase{phase}_attempt{attempt}.json"
     if not path.exists():
         raise FileNotFoundError(str(path))
@@ -86,7 +86,7 @@ def main() -> int:
     status = (
         load_latest_status(args.task_dir)
         if args.phase is None
-        else load_eval_status(args.task_dir, args.phase, args.attempt)
+        else load_verify_status(args.task_dir, args.phase, args.attempt)
     )
     if args.summarize:
         status = summarize_for_trace(status)

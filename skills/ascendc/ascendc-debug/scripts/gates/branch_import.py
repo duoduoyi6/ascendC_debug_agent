@@ -38,7 +38,7 @@ class ImportBranch:
 
     def run_gate_f(self, task_dir, attempt: int) -> GateOutcome:
         task_dir = Path(task_dir)
-        latest = task_dir / ".eval_status" / "latest.json"
+        latest = task_dir / ".verify_status" / "latest.json"
         checks = {"latest_present": latest.exists()}
         if latest.exists():
             try:
@@ -77,7 +77,7 @@ class ImportBranch:
 
     def run_gate_v(self, task_dir, attempt: int) -> GateOutcome:
         task_dir = Path(task_dir)
-        curr = task_dir / ".eval_status" / f"phase8_attempt{attempt}.json"
+        curr = task_dir / ".verify_status" / f"phase8_attempt{attempt}.json"
         checks = {"curr_present": curr.exists()}
         loop_signal = "CONTINUE"
         if curr.exists():
