@@ -17,29 +17,35 @@ subagent:
 
 ## What I do
 
-修复精度测试失败的 AscendC 算子。流程:
-1. Python 脚本收集数值取证数据 (确定性, 不可绕过)
-2. Agent 结合取证数据 + 代码 + 知识库做深度分析, 定位根因并制定修复计划
-3. Agent 修复代码
-4. 重新编译 + 验证
-5. 根据 Gate 的循环控制信号决定继续或停止
+修复 AscendC 算子的 **build / import / runtime / timeout / precision** 五类失败。流程:
+1. 读取 `{task_dir}/.eval_status/latest.json` 确定 `failure_type`, 分流到对应 Step 1 分支（一次 session 锁定一条分支）
+2. Agent 结合上下文 + 代码 + 日志 / 数值证据 + 知识库做深度分析, 定位根因并制定修复计划
+3. Agent 修复代码（只能改 `{task_dir}/kernel/` 下文件）
+4. 重新编译 + 验证（通过 `utils/eval_wrapper.py --phase 8`）
+5. 根据 Gate 循环控制信号决定继续或停止
 
 ## When to use me
 
-当 `evaluate_ascendc.sh` 报告 Numerical 失败时（非 Build/Import 失败）。
-前提: `{task_dir}/kernel/pybind11.cpp` 已存在且编译通过，运行但精度不通过。
+当主 agent Phase 7 `trace-recorder` 判定 `debug_eligible == true`（含 `failure_type` 白名单判断）时。
+主 agent Phase 8 会在此条件下 spawn 本 subagent；不满足条件的任务（`success` / `degraded` / `no_kernel` /
+`tilelang_only_failed` / `execution_aborted` / `import_failed` 的 `import_env_side` 子类）**不应**进入本 skill。
 
-## Prerequisites
+## Prerequisites（通用，所有分支共享）
 
-- `{task_dir}/model.py` — 参考实现（含 Model, get_input_groups/get_inputs, get_init_inputs）
-- `{task_dir}/model_new_ascendc.py` — AscendC wrapper（含 ModelNew）
-- `{task_dir}/kernel/pybind11.cpp` — host launch + pybind
-- `{task_dir}/kernel/{op_name}_tiling.h` — TilingData 定义
-- `{task_dir}/kernel/*.cpp` + `*_kernel.h` — 至少一个非 pybind kernel 文件
-- `{task_dir}/{op_name}.json` — 测试用例（JSON Lines）
-- `evaluate_ascendc.sh` 已报告 Numerical 失败（非 Build/Import 失败）
+- `{task_dir}/kernel/` 下至少一个 `.cpp` 文件（保证有 kernel 可修）
+- `{task_dir}/model_new_ascendc.py` 未 AST 退化（反作弊前置条件）
+- `{task_dir}/trace.md` 末尾含 `final_status` fenced JSON block（Phase 7 产出）
+- `{task_dir}/.eval_status/latest.json` 存在（`utils/eval_wrapper.py` 产出）
+- `{task_dir}/{op_name}.json`（及可选 `.json.bak`）存在
 
 其中 `task_dir = {repo_root}/{task_name}`，`repo_root` 为 AscendOpGenAgent 仓库根目录。
+
+> **分支专属前提**（进入 Step 1-X 后由各分支自校验）：
+> - **1-P（precision_failed）**：`model.py` 参考实现、`kernel/pybind11.cpp` 编译通过且能运行
+> - **1-B（build_failed）**：`.eval_logs/phase{N}_attempt{M}.log` 含 compile error 块
+> - **1-I（import_failed + import_kernel_side）**：import traceback 指向 pybind 符号 / ext module；`import_env_side` 不进入本 skill
+> - **1-R（runtime_error）**：execute 阶段有明确 crash signal (SIGSEGV/SIGABRT/SIGBUS/SIGFPE)
+> - **1-T（timeout）**：`.eval_status` 含 `timeout_marker_present == true`
 
 ## Workflow
 
