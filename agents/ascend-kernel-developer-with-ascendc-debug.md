@@ -553,6 +553,93 @@ trace-recorder 判定优先级（findings §5.3）：
 
 ---
 
+## Phase 8: AscendC Debug Subagent（条件性 spawn）
+
+### 8.1 读取 final_status
+
+从 `{output_dir}/trace.md` 末尾解析 `final_status` fenced JSON block 的 `debug_eligible` 字段。
+
+```bash
+awk '/^```json/,/^```$/' "{output_dir}/trace.md" \
+  | awk 'NR>1 && !/^```/' \
+  | jq '{debug_eligible, failure_type, import_subtype, debug_eligible_reason}'
+```
+
+### 8.2 Spawn 决策
+
+**只在 `debug_eligible == true` 时 spawn**。白名单 failure_type（由 trace-recorder 的 `debug_eligible` 规则编码）：
+- `precision_failed`
+- `build_failed`
+- `import_failed && import_subtype == import_kernel_side`
+- `runtime_error`
+- `timeout`
+
+**不 spawn** 场景：
+- `success` / `degraded` / `no_kernel` / `tilelang_only_failed`
+- `execution_aborted`（环境/harness 问题，subagent 修不了）
+- `import_failed && import_subtype == import_env_side`（环境库/`LD_LIBRARY_PATH`，不在 `kernel/` scope 内）
+
+### 8.3 Spawn 调用
+
+- `subagent_type`: `precision-tuning-discovery`
+- 传入参数：
+  - `task_name` / `task_dir`（绝对路径 = `{output_dir}`）
+  - `npu` ID
+  - `failure_type`（冗余确认，subagent 自己也会从 `.eval_status/latest.json` 再读一遍）
+- `timeout`: `5400` 秒（1.5h，与 SKILL.md frontmatter `subagent.timeout` 一致）
+
+### 8.4 Spawn 后处理
+
+**关键原则**：`trace.md` 在 Phase 7 写完后**全程只读**，主 agent 绝不 append。所有 Phase 8 相关信息统一落到 subagent 自己的产物。
+
+**正常退出**（subagent 返回 0 且两个产物都存在）:
+- 校验 `{output_dir}/debug_trace.md` + `{output_dir}/debug_status.json` 均存在且非空
+- 输出一行：`Phase 8 结束，详见 debug_trace.md / debug_status.json`
+
+**超时 / 异常 / 缺产物**（subagent 超时、非零退出、或任一产物缺失）:
+- 主 agent 兜底写 `{output_dir}/debug_status.json`：
+
+```json
+{
+  "schema_version": 1,
+  "phase8_outcome": "timeout | crashed | missing_artifacts",
+  "started_at": "<ISO>",
+  "ended_at": "<ISO>",
+  "crash_reason": "subagent timeout after 5400s | subagent exit code N | debug_trace.md missing",
+  "final_failure_type": "<继承 Phase 7 final_status.failure_type>",
+  "notes": "主 agent 兜底产出，subagent 未完成"
+}
+```
+
+- **不 append `trace.md`**，不重跑 evaluate
+- 任务以 `final_status.failure_type`（来自 Phase 7）+ `debug_status.phase8_outcome` 作为最终状态
+
+### 8.5 不 spawn 场景
+
+主 agent 自己写一个 `{output_dir}/debug_status.json`：
+
+```json
+{
+  "schema_version": 1,
+  "phase8_outcome": "skipped",
+  "skip_reason": "<= final_status.debug_eligible_reason 的语义反面，例如 'failure_type=success' / 'import_subtype=import_env_side' / 'has_kernel=false'>",
+  "final_failure_type": "<= final_status.failure_type>"
+}
+```
+
+任务以 `final_status.failure_type` 作为最终状态。
+
+### 8.6 下游自动化消费约定
+
+任何自动化消费（benchmark 报告、ideapool 统计）的最终状态读取顺序：
+
+1. 优先读 `{output_dir}/debug_status.json`（如存在）
+2. `debug_status.phase8_outcome` ∈ `{success, failed, stopped_by_gate, stopped_by_loop_limit, progressed_to_new_failure_type, timeout, crashed, skipped, missing_artifacts}`
+3. 若只有 `trace.md.final_status`（Phase 8 没跑/没落盘）→ 用 final_status
+4. `final_status` 是 Phase 7 时刻快照，`debug_status` 才是任务最终 verdict
+
+---
+
 ## 任务目录结构
 
 ```
