@@ -120,3 +120,19 @@ For any change to git-tracked files:
 - Edit git-tracked files directly on the remote server
 - Overwrite git-tracked files via scp/base64 (bypasses version control)
 - Commit on remote then sync back (causes divergence — rebase locally first)
+
+## Local-only tooling
+
+### `utils/pack_codex_sessions.sh` (gitignored)
+
+跨远端多 docker 容器按项目 (`cwd`) 过滤并归档 Codex CLI session（`/root/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`，第一行 `session_meta.payload.cwd` 用于过滤）。
+
+```bash
+bash utils/pack_codex_sessions.sh \
+    --project /home/c00959374/AscendOpGenAgent \
+    --containers cjm_cann1,cjm_cann2,cjm_cann3,cjm_cann4,cjm_cann5,cjm_cann6 \
+    --ssh-host npu_server \
+    --output projects_c00959374_$(date +%Y%m%d).tar.gz
+```
+
+产物（`projects_*_*.tar.gz`）也在 `.gitignore`。归档结构：`merged/<container>/YYYY/MM/DD/rollout-*.jsonl`。
