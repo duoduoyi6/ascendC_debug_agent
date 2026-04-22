@@ -510,21 +510,46 @@ python3 utils/eval_wrapper.py --phase 6 --attempt 0 --task-dir {output_dir}
 
 ---
 
-## Phase 7: Trace 记录
+## Phase 7: Trace 记录 + `final_status` 产出
 
 无论前面阶段成功或失败，都调用 `trace-recorder` skill 生成结构化执行记录。
 
+### 7.1 前置：写入 Phase 4 迭代历史
+
+调 `trace-recorder` 前，把 `ac_history_attempts`（Phase 4 维护的内存列表）序列化到磁盘：
+
+```bash
+cat > {output_dir}/.phase4_history.json <<'EOF'
+[
+  {"attempt": 0, "verifier_error": "...", "conductor_suggestion": "...",
+   "eval_status_path": "{output_dir}/.eval_status/phase4_attempt0.json",
+   "ended_at": "2026-04-22T10:15:58Z"},
+  ...
+]
+EOF
+```
+
+`trace-recorder` 会读此文件并将其内嵌为 `final_status.ac_iterations` 字段（findings §2.3–§2.4, §5）。本版本**不再**写独立的 `ac_history.json`。
+
+### 7.2 调用 trace-recorder skill
+
 **传入**：`output_dir` 目录路径、各阶段执行结果信息
 
-**产出**：`{output_dir}/trace.md`
+**产出**：
+- `{output_dir}/trace.md` — 原有人类可读记录
+- `{output_dir}/trace.md` 末尾追加 fenced `final_status` JSON block（`schema_version=2`，含 `failure_type / import_subtype / abort_subtype / has_kernel / has_degradation / last_evaluate_phase / last_evaluate_status_path / ac_iterations / debug_eligible / debug_eligible_reason` 等字段，详见 trace-recorder SKILL.md "新增步骤：产出 final_status JSON block")
 
-包含内容：
-- 各阶段的执行结果（成功/失败）
-- 评测脚本的输出
-- Agent 的迭代过程
-- 遇到的错误信息
-- 走偏点分析
-- 若 TileLang 未验证或因框架 bug 跳过验证，必须明确记录为“跳过”及原因
+trace-recorder 判定优先级（findings §5.3）：
+1. `kernel/` 目录为空 → `no_kernel` + `debug_eligible=false`
+2. `model_new_ascendc.py` AST 退化 → `degraded` + `debug_eligible=false`
+3. Phase 3 失败且未进到 Phase 4 → `tilelang_only_failed` + `debug_eligible=false`
+4. `.eval_status/latest.json.failure_type == execution_aborted` → 照搬 + `debug_eligible=false`
+5. 否则照搬 `.eval_status/latest.json.failure_type`
+6. `debug_eligible` 白名单：`precision_failed / build_failed / import_failed(kernel_side) / runtime_error / timeout`
+
+### 7.3 `trace.md` 后续不可修改
+
+**Phase 7 写完之后**，`trace.md` **全程只读**。Phase 8 的所有信息（成功/失败/timeout/crash/skipped）都落到 subagent 自己产出的 `debug_trace.md` + `debug_status.json`（findings §2.4, §7.3, §8.4）。
 
 ---
 
