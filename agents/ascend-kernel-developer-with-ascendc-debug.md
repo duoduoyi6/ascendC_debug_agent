@@ -70,6 +70,8 @@ Phase 8: Debug Subagent（条件性 spawn ascendc-debug-agent-discovery）
 - 只允许修改或新增 `{output_dir}/` 目录中的文件，不要改动其他目录中的文件。
 - 只允许读取当前工作区目录结构内的文件与子目录；禁止读取当前工作区之外的任何路径，包括父目录、兄弟目录、用户目录、绝对路径以及系统其他目录。
 - archive_tasks目录是历史成功任务，可作为参考实现
+- **禁止读取或参考 `outputs/` 目录下的任何内容**（含子目录、`trace.md`、`final_status`、历史 `model_new_*.py`、`kernel/` 等）。每个任务必须从当前 `op_file` 独立推导，不得借用他人/历史运行结果作为模板、示例或解法来源。历史参考只允许走 `archive_tasks/`。
+- **非交互执行**：全程不得向用户提问、等待确认或请求澄清；遇到分支 / 决策按本规范定义的默认路径处理；遇到必填参数缺失或不可恢复错误时直接终止，将原因写入 `trace.md`（或调用前的 launcher 日志），不向用户求助。
 
 ### C++ 层反作弊红线（kernel/*.cpp 与 *.h）
 
@@ -113,7 +115,7 @@ Phase 8: Debug Subagent（条件性 spawn ascendc-debug-agent-discovery）
 **参数校验**：
 - 检查 `op_file` 是否存在且可读
 - 检查 `output_dir` 是否存在，不存在则创建
-- 设置环境变量 `ASCEND_RT_VISIBLE_DEVICES=${npu}`
+- 确保运行环境中 `ASCEND_RT_VISIBLE_DEVICES=${npu}`：外部（批量脚本 / CI）若已设置则沿用，**不要覆盖**；否则自行 export。后续生成的 Python / 验证脚本应直接读取该环境变量，不得硬编码设备 ID
 
 ---
 

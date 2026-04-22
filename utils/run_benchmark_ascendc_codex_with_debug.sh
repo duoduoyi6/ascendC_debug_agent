@@ -27,32 +27,12 @@ EFFORT="high"               # thinking effort: minimal / low / medium / high
 TIMEOUT_SEC="7200"          # 单任务超时（秒），默认 2 小时
 WORKDIR_IN_CONTAINER="/home/c00959374/AscendOpGenAgent"
 TILELANG_ENV_SH="/home/c00959374/tilelang/tilelang-ascend/set_env.sh"   # 设 TL_ROOT / PYTHONPATH / ACL_OP_INIT_MODE
-PROMPT_TEMPLATE='严格按照 /home/c00959374/AscendOpGenAgent/agents/ascend-kernel-developer-with-ascendc-debug.md 中定义的 ascend-kernel-developer-with-ascendc-debug agent 规范和 Phase 0-8 流程执行。
+PROMPT_TEMPLATE='按 /home/c00959374/AscendOpGenAgent/agents/ascend-kernel-developer-with-ascendc-debug.md 规范执行 AscendC 算子生成任务。
 
 任务参数:
 - npu: __NPU__
-- 算子描述文件 (op_file): __FILE__
-- 输出目录 (output_dir): __TARGET__
-
-执行要求:
-1. 首先 Read 并完整理解 agent 规范文件: /home/c00959374/AscendOpGenAgent/agents/ascend-kernel-developer-with-ascendc-debug.md
-2. 按该规范中定义的 Phase 0-8 逐阶段执行；在需要 skill 时 Read 对应目录 /home/c00959374/AscendOpGenAgent/skills/ascendc/<skill-name>/ 下的 SKILL.md 或 README 文件获取该 skill 的具体 step 与脚本；Phase 8 若需 spawn 则按规范调用 ascendc-debug-agent-discovery subagent
-3. 硬约束：只允许修改或新增 __TARGET__ 目录下的文件，禁止改动其他目录内的任何文件
-4. 【参考资料硬约束】禁止读取或参考 /home/c00959374/AscendOpGenAgent/outputs/ 目录（含其任何子目录/文件）下的任何历史运行结果；本次任务必须从 op_file 独立推导，不得借用 outputs/ 下既有实现、trace 或 final 报告作为模板、示例或解法来源
-5. Phase 1 先将 __FILE__ 复制到 __TARGET__/ 作为工作基准
-6. NPU 设备已通过环境变量 ASCEND_RT_VISIBLE_DEVICES=__NPU__ 暴露，生成的 Python / 验证脚本应直接使用该环境变量，不要自行覆盖
-7. 产物至少包括: __TARGET__/model_new_tilelang.py 和 __TARGET__/model_new_ascendc.py，以及 agent 规范中列出的各 Phase 输出
-8. 【反作弊硬约束】核心计算必须在 AscendC kernel 内完成，严禁以下任何"绕过 kernel"行为：
-   (a) Python wrapper (model_new_ascendc.py) 的 forward() 中调用 torch.* / F.* 计算算子，或用 tensor 计算方法 (x.sum/x.matmul/x.cumsum 等)；
-   (b) kernel/*.cpp 或 *.h 中调用 at::<算子>(...) 或 torch::<算子>(...) 这类 libtorch 计算 API；
-   (c) kernel/ 中使用 tensor 计算方法 (如 x.cumsum() / x.histc() / .sum() / .matmul()) 绕过 AscendC 实现；
-   (d) #include <ATen/ops/*.h> 引入 ATen 算子头文件；
-   (e) 仅写一个"空壳 __global__ __aicore__ 函数"但 pybind 层直接返回 at::xxx/x.xxx() 结果；
-   只允许在 pybind11.cpp 里用 at::empty / at::empty_like / at::zeros 这类 allocator 和 TensorOptions 构造 (at::device(...)/at::dtype(...))，
-   且必须通过 <<<...>>> 或 aclrtLaunchKernel / *_do() stub launcher 真正触发 AscendC kernel 计算。
-   生成结束后 bench 会自动调用 anticheat.py verify 做 AST + C++ 源码双重扫描，命中即在报告标 🚨 CHEAT (不重跑, 但会记录违规点)。
-9. 全程不要向用户询问或等待交互；遇到分支/决策均按 agent 规范定义的默认路径处理
-10. 结束时在 __TARGET__/ 输出一份简短的 trace/final 报告（Phase 7 trace-recorder 产物，以及 Phase 8 若有 spawn 的 debug 报告），说明各阶段成功/失败与最终产物清单'
+- op_file: __FILE__
+- output_dir: __TARGET__/'
 
 ANTICHEAT_SCRIPT="skills/ascendc/ascendc-debug/scripts/anticheat.py"
 
