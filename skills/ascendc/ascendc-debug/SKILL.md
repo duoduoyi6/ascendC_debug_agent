@@ -129,8 +129,6 @@ awk '/^```json/,/^```$/' "{task_dir}/trace.md" | jq '.debug_eligible, .failure_t
 | `1-T` | `timeout` | Step 1-T |
 | — | 其他（`success` / `degraded` / `no_kernel` / `tilelang_only_failed` / `execution_aborted` / `import_env_side`） | 写 `debug_status.json` 标 `skipped_unsupported_type`，退出 |
 
-> **硬约束重申**：`trace.md` 在 Phase 7 写完后**全程只读**。本 skill 所有产出（`debug_trace.md` / `debug_status.json` / `.eval_status/phase8_*` / `precision_tuning/*`）都写到 `{task_dir}` 下独立文件，**禁止 append `trace.md`**（findings §7.3）。
-
 ---
 
 ### Step 1-P: 精度取证（precision_failed 分支）
@@ -760,8 +758,10 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_gate.py \
 ### Step 4: 重新编译 + 精度验证
 
 ```bash
-bash skills/ascendc/ascendc-translator/references/evaluate_ascendc.sh {task_name}
+python3 utils/eval_wrapper.py --phase 8 --attempt {attempt} --task-dir {task_dir}
 ```
+
+> 产出 `{task_dir}/.eval_status/phase8_attempt{attempt}.json`（结构化 failure 数据，所有分支共用）。
 
 **失败分类处理**（根据 stdout 判断）：
 
