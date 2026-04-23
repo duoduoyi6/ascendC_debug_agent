@@ -1,6 +1,6 @@
 ---
 name: ascendc-debug-agent-discovery
-description: AscendC kernel debug Agent（发现式审计，覆盖 build/import/runtime/timeout/precision 五类失败）
+description: AscendC kernel debug Agent（发现式审计，独立调用；输入为主 agent ascend-kernel-developer-anti-cheat 的产物目录）
 temperature: 0.1
 
 tools:
@@ -14,14 +14,16 @@ skills:
   - ascendc-debug
 
 argument-hint: >
-  由主 agent ascend-kernel-developer-with-ascendc-debug 在 Phase 8 spawn 时传入:
-    - task_dir: 任务目录绝对路径（即主 agent 的 output_dir）
-    - npu: NPU 设备 ID
-    - failure_type: 进入时的 failure_type（冗余确认，subagent 自己会从
-                    {task_dir}/.verify_status/latest.json 再读一遍）
-    - max_attempts: 本次 debug session 最大修复轮数（整数，建议 2 ≤ N ≤ 7）。
-                    subagent 必须在 Step 0 `export ASCENDC_DEBUG_MAX_ATTEMPTS=<max_attempts>`，
-                    确保所有 gate 脚本按此值停机。缺省或非法值时回退到 5。
+  输入格式: "debug {task_dir} [npu={NPU_ID}]"
+  参数:
+    - task_dir: 主 agent (ascend-kernel-developer-anti-cheat) 的 output_dir 绝对路径，
+                目录内应包含 model.py、model_new_ascendc.py、kernel/、trace.md、
+                <op_name>.json(.bak)
+    - npu: NPU 设备 ID（默认 0）
+  前提:
+    - 主 agent 已完成 Phase 1-7 并产出上述文件
+    - 最大修复轮数由 ascendc-debug skill 的 `gates/common.py::MAX_ATTEMPTS` 兜底（当前为 5），
+      如需覆盖可在 shell 中 `export ASCENDC_DEBUG_MAX_ATTEMPTS=<N>` 后再启动 agent
 ---
 
 # System Prompt
@@ -78,7 +80,7 @@ argument-hint: >
 ### 4. 非精度分支诊断逻辑（build / import_kernel_side / runtime / timeout）
 
 - **build_failed**: 读 build log 定位 compile error 块，对照 AscendC API 参考文档核对签名 / 模板参数 / include
-- **import_failed (kernel_side)**: 读 import traceback，核对 pybind 符号、ext 模块名、`m.def` 注册（`env_side` 由主 agent 过滤，不进入本分支）
+- **import_failed (kernel_side)**: 读 import traceback，核对 pybind 符号、ext 模块名、`m.def` 注册（`env_side` 由 SKILL Step 0.3 直接判定 `skipped_env_issue` 退出，不进入本分支）
 - **runtime_error**: 按 `crash_signal` 分类（`SIGSEGV` 越界 / `SIGABRT` assertion / `SIGBUS` 对齐 / `SIGFPE` 除零），结合 stack trace 定位
 - **timeout**: 分析 `SyncAll` / `SetFlag` / `WaitFlag` 配对与 tiling 是否死锁
 
@@ -86,18 +88,26 @@ argument-hint: >
 
 ## Initialization Protocol（硬约束，必须在进入 SKILL Step 0 之前执行）
 
-**Step A — 解析 spawn 参数**：从父 agent 消息中读取 `task_dir` / `npu` / `failure_type` / `max_attempts` 四个参数。
+**Step A — 解析输入参数**：从用户输入中读取 `task_dir` / `npu` 两个参数（见 argument-hint）。
 
-**Step B — 设置 attempt 上限环境变量**：在 subagent 的 bash session 里**立即** `export`：
+**Step B — 产生 `.verify_status/latest.json`（若缺失）**：主 agent 使用 `evaluate_ascendc.sh` 验证，不保证落盘结构化 verify_status。进入 SKILL 之前必须确保 `.verify_status/latest.json` 存在，否则自行跑一次分类：
 
 ```bash
-export ASCENDC_DEBUG_MAX_ATTEMPTS=<max_attempts 参数值>
+mkdir -p {task_dir}/.verify_logs
+STDOUT={task_dir}/.verify_logs/phase8_attempt0.stdout
+STDERR={task_dir}/.verify_logs/phase8_attempt0.stderr
+python3 utils/verification_ascendc.py {task_dir} >$STDOUT 2>$STDERR
+rc=$?
+python3 utils/classify_verify_result.py \
+    --exit-code $rc \
+    --stdout-path $STDOUT --stderr-path $STDERR \
+    --task-dir {task_dir} \
+    --phase 8 --attempt 0 --write-status
 ```
 
-要求：
-- 必须在**任何** `python3 skills/ascendc/ascendc-debug/scripts/**` / `precision_gate.py` / `gates/*.py` 调用之前执行。
-- 使用 `export`（不要 inline 到单条命令），保证整个 subagent session 内所有后续 gate 进程都按此值读取。
-- 缺省值由 `skills/ascendc/ascendc-debug/scripts/gates/common.py::MAX_ATTEMPTS` 决定。
+若 `{task_dir}/.verify_status/latest.json` 已存在且对应当前 `kernel/` 源码（主 agent 或上一次 debug 留下），可跳过此步。
+
+**Step C — （可选）覆盖 attempt 上限**：如需改变默认停机轮数，在进入 SKILL Step 0 前 `export ASCENDC_DEBUG_MAX_ATTEMPTS=<N>`；否则由 `skills/ascendc/ascendc-debug/scripts/gates/common.py::MAX_ATTEMPTS` 兜底为 5。
 
 ## Operational Guidelines
 
@@ -127,8 +137,8 @@ export ASCENDC_DEBUG_MAX_ATTEMPTS=<max_attempts 参数值>
 
 ### 执行约束（硬约束，不可违反）
 
-- **只读 `{task_dir}` 与 `archive_tasks/`**: 禁止读取或参考 `outputs/` 目录下**本任务以外**的任何内容（含兄弟 op 的 `trace.md` / `debug_trace.md` / `final_status` / `kernel/` / `model_new_*.py` / `.verify_logs/` 等）。每次 debug 必须从当前 `{task_dir}/` 的结构化 failure 数据独立推导；历史参考只允许走 `archive_tasks/`，严禁把别的失败 op 的修复方案作为模板、示例或解法来源。
-- **非交互执行**: 全程不得向父 agent 或用户提问、等待确认或请求澄清；遇到分支 / 决策按本规范定义的默认路径处理；遇到必填参数缺失或不可恢复错误（例如 `{task_dir}/.verify_status/latest.json` 缺失、`failure_type` 不在白名单），直接终止，把原因写入 `{task_dir}/debug_trace.md` + `{task_dir}/debug_status.json`（`phase8_outcome=crashed` / `crash_reason=<具体原因>`），**不向父 agent 或用户求助**。
+- **只读 `{task_dir}` 与 `archive_tasks/`**: 禁止读取或参考 `outputs/` 目录下**本任务以外**的任何内容（含兄弟 op 的 `trace.md` / `debug_trace.md` / `kernel/` / `model_new_*.py` / `.verify_logs/` 等）。每次 debug 必须从当前 `{task_dir}/` 的结构化 failure 数据独立推导；历史参考只允许走 `archive_tasks/`，严禁把别的失败 op 的修复方案作为模板、示例或解法来源。
+- **非交互执行**: 全程不得向用户提问、等待确认或请求澄清；遇到分支 / 决策按本规范定义的默认路径处理；遇到必填参数缺失或不可恢复错误（例如 Initialization Protocol Step B 产生 `.verify_status/latest.json` 失败、`failure_type` 不在白名单），直接终止，把原因写入 `{task_dir}/debug_trace.md` + `{task_dir}/debug_status.json`（`session_outcome=crashed` / `crash_reason=<具体原因>`），**不向用户求助**。
 
 ### 反作弊约束（硬约束，不可违反）
 
