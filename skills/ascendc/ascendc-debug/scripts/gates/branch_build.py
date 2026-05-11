@@ -88,8 +88,9 @@ class BuildBranch:
             if curr_failure_type == "success":
                 loop_signal = "PASS"
             elif progressed:
-                # 进展了但还没最终通过 → session 结束（跨分支不切换）
-                loop_signal = "CONTINUE"
+                # compile 阶段已推进到 execute/verify，failure_type 已变化 → 跨分支进展
+                # SKILL.md §跨分支跳转禁止：本 session 结束，标 progressed_to_new_failure_type
+                loop_signal = "STOP"
             else:
                 loop_signal = "STOP" if attempt >= MAX_ATTEMPTS - 1 else "CONTINUE"
         ok = loop_signal in ("PASS", "CONTINUE")

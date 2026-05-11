@@ -8,11 +8,10 @@
 - 输入 shape: [16, 32, 64] → permute → [64, 16, 32], dtype: float32
 - 输出 shape: [16, 32, 64] (与输入同 shape), dtype: float32
 
-## 来源文件
-- reference: `cumsum_reference.py` → `torch.cumsum(x, dim=self.dim)`
-- functional: `cumsum_functional.py` → permute(dim→0) → `torch.cumsum(xt, dim=0)` → permute back
-- DSL: `cumsum_dsl.py` → 顺序扫描 scan_len 步, 每步 acc_ub += x_ub
-- op_desc: `cumsum_op_desc.json` → `attributes.dim=2`
+## 参考实现来源
+- reference: `torch.cumsum(x, dim=self.dim)`
+- functional: `permute(dim→0) → torch.cumsum(xt, dim=0) → permute back`
+- 参考实现: 手写标注（archive_tasks 中无精确匹配案例）
 
 ## 计算链分解
 
@@ -25,7 +24,6 @@
 
 ### Step 1: 累加器初始化
 - 操作: `acc_ub = 0` (每个 inner tile 的前缀累加器归零)
-- DSL 对应: `tl.duplicate(acc_ub, 0.0)`
 - 输出 shape: [tile_inner] = [min(1024, 512)] = [512]
 - **精度风险点**:
   - 必须在每个 task (inner tile) 开始时初始化, 不能跨 task 残留
@@ -37,14 +35,6 @@
   - 加载 `x[i, inner_slice]` (shape [tile_inner])
   - `acc_ub += x[i]`
   - 输出 `output[i, inner_slice] = acc_ub`
-- DSL 对应:
-  ```
-  for i in range(scan_len):
-      tl.load(input_ptr + offsets, x_ub)      # copyin
-      tl.vadd(acc_ub, acc_ub, x_ub)           # compute: 前缀累加
-      tl.vadd_scalar(out_ub, acc_ub, 0.0)     # compute: 复制到输出 buffer
-      tl.store(output_ptr + offsets, out_ub)   # copyout
-  ```
 - 输入: 每步加载 x[i] 的 tile_inner 个元素
 - 输出: 每步写出 acc 的当前值 (前缀和)
 - scan_len = 64, 每步的 GM 偏移: `i * inner_size + inner_base`
@@ -55,8 +45,7 @@
   - **inner_size 与 tile_inner 的关系**: inner_size=512, tile_inner=512, 恰好 1 个 task 覆盖所有 inner 元素
   - 若 inner_size > tile_inner (如更大的 tensor), 多个 task 独立处理各自的 inner slice — 各 task 之间无依赖
   - **GM 偏移计算**: `base = i * inner_size + inner_base`, 其中 inner_base = task_id × tile_inner — 需确保 inner_base 正确
-  - **DSL 中的 vadd_scalar(out_ub, acc_ub, 0.0)**: 这是将 acc_ub 复制到 out_ub 的方式 (加 0 = 复制), AscendC 中应使用 DataCopy(UB→UB) 或等效操作
-- **知识库关联**: 无直接匹配 (cumsum 不是标准归约), 但 count 对齐问题同 #7
+  - **vadd_scalar(out_ub, acc_ub, 0.0)**: 这是将 acc_ub 复制到 out_ub 的方式 (加 0 = 复制), AscendC 中应使用 DataCopy(UB→UB) 或等效操作
 
 ## 误差传播链
 
@@ -71,9 +60,8 @@ Step 2 顺序被打乱 (如并行化了不应并行的循环)
   → 前缀和不满足 output[i] = sum(x[0:i+1]) → 随机偏差
 ```
 
-## DSL tiling 策略要点
+## Tiling 策略要点
 
-从 `cumsum_dsl.py` 提取:
 - **scan axis permute**: Host 将 dim=2 permute 到 axis 0, Kernel 始终沿 axis 0 扫描
 - `n_cores = 16`, 按 inner tile 分配任务
 - `tile_inner = min(1024, inner_size)` = min(1024, 512) = 512

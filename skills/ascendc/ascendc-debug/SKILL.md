@@ -276,7 +276,10 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_gate.py \
 2. 对照 `skills/ascendc/ascendc-translator/references/dsl2Ascendc_cross_core_sync.md` 分析：
    - `SyncAll` 是否遗漏或多余（多余的 SyncAll 在部分核未到达时死锁）
    - `SetFlag` / `WaitFlag` 配对是否一致
-   - Tiling 参数（`block_dim`、`tile_size`、归约轴切分）是否导致循环不收敛
+   - `CrossCoreSetFlag` / `CrossCoreWaitFlag` 配对是否一致（AIC↔AIV 跨核点对点同步，配对错误是死锁高频根因）
+   - `gmWorkspace` 是否在 host 侧初始化为 0（软同步依赖初始值，未清零导致行为未定义）
+   - `block_dim` 是否超过实际参与计算的核数（超出时框架插入异常同步，kernel 挂死）
+   - Tiling 参数（`tile_size`、归约轴切分）是否导致循环不收敛
 3. 写 `{task_dir}/precision_tuning/precision_audit_{attempt}.md` 含（Gate-TIMEOUT-A 必填）：
    - `[SYNC_POINT_ANALYSIS]` — 枚举 kernel 中所有同步点（`SyncAll` / `SetFlag` / `WaitFlag`）及其配对关系，标出疑似死锁点
    - `[ROOT_CAUSE]` — 根因（同步缺失 / 同步多余 / 死循环 / tiling 死锁）
@@ -494,13 +497,12 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_knowledge.py search \
    - normalization / rmsnorm / layernorm → `archive_tasks/rms_norm/kernel/`（含 vector_tile.h）
    - matmul / gemm / linear → `archive_tasks/matmul_leakyrelu/kernel/` 或 `archive_tasks/quant_matmul/kernel/`
    - gather / scatter / index → `archive_tasks/gather_elements_v2/kernel/`
-   - concat / memory layout → `archive_tasks/concat_dv2/kernel/`
-   - **attention / softmax** → 无有效 AscendC 案例，跳过案例读取，仅读 API 文档
-   - **纯 elementwise / activation** → 无纯向量案例，仅读 `dsl2Ascendc_compute_vector.md`
+   - attention / softmax → `archive_tasks/flash_attention/`（有 TileLang 设计 model_new_tilelang.py，无 AscendC kernel/；读取设计理解计算结构，AscendC 约束依赖 dsl2Ascendc_compute_cv.md）
+   - 纯 elementwise / padding / activation → `archive_tasks/circular_pad/kernel/`
    - 无精确匹配 → 选最近似案例，在 [REFERENCE_IMPL_SPEC] 中标注"参考案例非精确匹配"
 
 2. **必须读取**: `skills/ascendc/ascendc-translator/references/dsl2Ascendc.md`
-   （替代 error_correction_examples.md，含禁用 API 模式和常见错误）
+   （含禁用 API 模式和常见错误）
 
 3. **必须读取**: `skills/ascendc/ascendc-translator/references/dsl2Ascendc_compute_vector.md`
    （含 DataCopyPad 触发条件和非对齐处理）
@@ -528,13 +530,13 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_knowledge.py search \
     - ReduceSum: <count 对齐要求 (64的倍数); work_buf 是否需要 Duplicate(0.0f, count) 初始化>
     - SyncAll: <是否需要, 插入位置 (跨核写GM后/读GM前)>
 
-  非对齐处理规范 (来自 non_aligned_example):
+  非对齐处理规范 (来自 dsl2Ascendc_compute_vector.md):
     - 触发条件: count × sizeof(dtype) 不是 32 的倍数
     - GM→UB: DataCopyPad(dst, src, {1, count*sizeof(T), 0, 0}, {false, 0, 0, 0})
     - UB→GM: DataCopyPad(dst, src, {1, count*sizeof(T), 0, 0})
     - 本算子 tileLength 的对齐状况: <tileLength × sizeof(dtype) = ? 字节, 是否32字节对齐>
 
-  error_correction 禁用模式 (来自 error_correction_examples.md):
+  error_correction 禁用模式 (来自 dsl2Ascendc.md §常见陷阱速查表):
     - 禁止 float↔uint 强制类型转换 (改用 float n = (float)int_val)
     - 禁止标量上下文调用向量 Log API (改用 AscendC::Log(tmp,tmp,1); tmp.GetValue(0))
     - 禁止向量上下文调用标量 AscendC::Sqrt (改用 sqrt(val))
@@ -565,8 +567,8 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_knowledge.py search \
   2. ReduceMax/ReduceSum work_buf 是否按规范初始化 (Duplicate 到 -INF 或 0)
   3. DataCopy 对齐是否满足规范 (count × sizeof(dtype) 不是 32 倍数时是否换用 DataCopyPad)
   4. SyncAll 同步点是否与规范一致 (跨核场景是否遗漏)
-  5. error_correction_examples 中列出的禁用模式是否在代码中出现
-- 遇到不确定的 API 名称时，查阅 `tl_asc_routing.md` 确认（如 Max vs Vmax、Subs 是否存在、负无穷常量写法等）
+  5. dsl2Ascendc.md 中列出的禁用模式是否在代码中出现
+- 遇到不确定的 API 名称时，查阅 `TileLang-AscendC-API-Mapping.md` 确认（如 Max vs Vmax、Subs 是否存在、负无穷常量写法等）
 
 ```
 [KERNEL_STEP_TRACE]

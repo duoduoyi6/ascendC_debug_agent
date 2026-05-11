@@ -79,10 +79,12 @@ _NPU_RUNTIME_PATTERNS = [
     r"aicore exception",
     r"The instruction configuration of MTE is illegal",
     r"MTE (error|illegal)",
-    r"ACL stream synchronize failed,\s*error code:\s*\d+",
-    r"rt(Device|Stream)Synchronize[A-Za-z]*\s*execution failed",
+    r"Stream Synchronize failed,\s*stream_id=\d+,\s*retCode=0x\w+",
+    r"Fail to synchronize forbbiden stream_id=\d+,\s*retCode=0x\w+",
+    r"ACL stream synchronize failed",
     r"Kernel task happen error",
-    r"E[EZ]9999.*Inner Error",
+    r"module_name=E[EZ]9999",
+    r"E[EZ]9999",
     r"The aicore execution is abnormal",
 ]
 

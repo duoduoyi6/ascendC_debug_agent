@@ -191,6 +191,7 @@ class _LegacyPrecisionChecker:
         }
 
         correctness_passed = False
+        match_rate = None
         if checks["result_exists"]:
             try:
                 with open(result_path) as f:
@@ -198,10 +199,18 @@ class _LegacyPrecisionChecker:
                 checks["result_parseable"] = True
                 correctness_passed = r.get("correctness_passed", False)
                 checks["precision_passed"] = correctness_passed
+                mr_str = r.get("match_rate")
+                if mr_str is not None:
+                    try:
+                        match_rate = float(mr_str)
+                    except (ValueError, TypeError):
+                        pass
             except (json.JSONDecodeError, KeyError):
                 pass
 
-        loop_signal, loop_reason, stop_reason_code = self._compute_loop_signal(correctness_passed)
+        loop_signal, loop_reason, stop_reason_code = self._compute_loop_signal(
+            correctness_passed, match_rate
+        )
 
         gate_result = self._result("GATE-V", checks)
         gate_result["loop_signal"] = loop_signal
@@ -259,9 +268,17 @@ class _LegacyPrecisionChecker:
     # 循环控制
     # ================================================================
 
-    def _compute_loop_signal(self, passed: bool) -> tuple:
+    def _compute_loop_signal(self, passed: bool, match_rate: float = None) -> tuple:
         if passed:
             return "PASS", "精度验证通过", "precision_passed"
+
+        # match_rate ≥ 99% 但 evaluate 返回 FAIL：量化截断噪声或 float16 精度损失，无可自动修复点
+        if match_rate is not None and match_rate >= 99.0:
+            return (
+                "STOP",
+                f"精度接近通过 (match_rate={match_rate:.2f}%)，疑似量化截断噪声或 float16 精度损失，建议人工确认",
+                "nearly_success",
+            )
 
         if self.attempt + 1 >= MAX_ATTEMPTS:
             return "STOP", f"已达最大轮次 ({MAX_ATTEMPTS})", "max_attempts_reached"
@@ -509,6 +526,7 @@ class _LegacyPrecisionChecker:
         terminal_codes = {
             "max_attempts_reached", "stagnant_same_direction",
             "stagnant_new_direction", "harmful_regression", "prerequisite_failure",
+            "nearly_success",
         }
         if stop_reason_code == "precision_passed":
             data["final_status"] = "success"
@@ -520,6 +538,8 @@ class _LegacyPrecisionChecker:
             for entry in data["entries"]:
                 if entry.get("attempt") == self.attempt:
                     entry["contributed"] = True
+        elif stop_reason_code == "nearly_success":
+            data["final_status"] = "nearly_success"
         elif stop_reason_code in terminal_codes:
             data["final_status"] = "failed"
 

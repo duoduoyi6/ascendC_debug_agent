@@ -15,7 +15,32 @@ from .common import GateOutcome, MAX_ATTEMPTS
 
 
 REQUIRED_SECTIONS = ("[SYNC_POINT_ANALYSIS]", "[ROOT_CAUSE]", "[FIX_PLAN]")
-TIMEOUT_FIX_KEYWORDS = {"sync", "SyncAll", "tiling", "barrier", "pipe"}
+
+
+def _extract_section(content: str, section_name: str) -> str | None:
+    """提取 [SECTION_NAME] 到下一个 [ 标记之间的文本。"""
+    marker = f"[{section_name}]"
+    start = content.find(marker)
+    if start == -1:
+        return None
+    start += len(marker)
+    end_marker = content.find("\n[", start)
+    end_audit = content.find("=== END AUDIT ===", start)
+    candidates = [pos for pos in [end_marker, end_audit] if pos != -1]
+    end = min(candidates) if candidates else len(content)
+    text = content[start:end].strip()
+    return text if text else None
+
+
+# 官方文档依据：
+#   SyncAll Constraints §4 — blockDim > 实际核数导致框架插入异常同步，kernel 挂死
+#   SyncAll Constraints §1 — 软同步 gmWorkspace 未初始化为 0 导致行为未定义
+#   AscendCSync.md — CrossCoreSetFlag/WaitFlag 是 AIC↔AIV 跨核点对点同步，配对错误是死锁高频根因
+TIMEOUT_FIX_KEYWORDS = {
+    "sync", "SyncAll", "tiling", "barrier", "pipe",
+    "CrossCoreSetFlag", "CrossCoreWaitFlag",
+    "gmWorkspace", "blockDim",
+}
 
 
 class TimeoutBranch:
@@ -45,8 +70,11 @@ class TimeoutBranch:
                 content = ""
             for sec in REQUIRED_SECTIONS:
                 checks[f"has_{sec.strip('[]').lower()}"] = sec in content
+            # 只在 [FIX_PLAN] section 内搜索关键词，避免 [SYNC_POINT_ANALYSIS] 中
+            # 必然出现的 SyncAll 导致检查形同虚设
+            fix_plan_text = _extract_section(content, "FIX_PLAN")
             checks["fix_plan_mentions_sync_or_tiling"] = any(
-                k in content for k in TIMEOUT_FIX_KEYWORDS
+                k in (fix_plan_text or "") for k in TIMEOUT_FIX_KEYWORDS
             )
         ok = all(v for v in checks.values() if isinstance(v, bool))
         return GateOutcome("GATE-TIMEOUT-A", ok, checks)

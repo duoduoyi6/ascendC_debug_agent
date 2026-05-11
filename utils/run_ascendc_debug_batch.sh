@@ -233,6 +233,7 @@ except Exception:
 
         # 从 debug_status.json 读 session_outcome（debug agent 产物）
         local session_outcome="unknown"
+        local attempts_used=0
         if [[ -f "$task_dir/debug_status.json" ]]; then
             session_outcome=$(python3 -c "
 import json, sys
@@ -242,18 +243,109 @@ try:
 except Exception:
     print('unknown')
 " 2>/dev/null || echo "unknown")
+            attempts_used=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$task_dir/debug_status.json'))
+    print(d.get('attempts_used', 0))
+except Exception:
+    print(0)
+" 2>/dev/null || echo "0")
         fi
+
+        # 跨分支自动重入：检测到 progressed_to_new_failure_type 时重新触发 codex exec
+        local total_attempts_used=0
+        local reentry_count=0
+        if [[ "$session_outcome" == "progressed_to_new_failure_type" ]]; then
+            if [[ "$attempts_used" =~ ^[0-9]+$ ]]; then
+                total_attempts_used=$attempts_used
+            else
+                total_attempts_used=1
+            fi
+        fi
+
+        while [[ "$session_outcome" == "progressed_to_new_failure_type" ]]; do
+            # 检查全局 attempt 配额
+            if [[ $total_attempts_used -ge $MAX_ATTEMPTS ]]; then
+                session_outcome="stopped_by_global_attempt_limit"
+                break
+            fi
+
+            reentry_count=$((reentry_count + 1))
+            local remaining=$((MAX_ATTEMPTS - total_attempts_used))
+            echo "[${container}@npu${npu}] ↗ ${op_name} progressed_to_new_failure_type, reentry #${reentry_count} (total_attempts=${total_attempts_used}, remaining=${remaining})"
+
+            local reentry_prompt="${PROMPT_TEMPLATE//__TASK_DIR__/$task_dir}"
+            reentry_prompt="${reentry_prompt//__NPU__/$npu}"
+            reentry_prompt="${reentry_prompt//__MAX_ATTEMPTS__/$remaining}"
+
+            set +e
+            timeout --signal=TERM --kill-after=30 "$TIMEOUT_SEC" \
+                docker exec \
+                    -e "ASCEND_RT_VISIBLE_DEVICES=$npu" \
+                    -e "ASCENDC_DEBUG_MAX_ATTEMPTS=$remaining" \
+                    -e "CODEX_PROMPT=$reentry_prompt" \
+                    "$container" bash -lc "
+                        set -e
+                        [ -f '$TILELANG_ENV_SH' ] && source '$TILELANG_ENV_SH'
+                        cd '$WORKDIR_IN_CONTAINER'
+                        codex exec \
+                            --dangerously-bypass-approvals-and-sandbox \
+                            --skip-git-repo-check \
+                            -c model_reasoning_effort='$EFFORT' \
+                            ${MODEL:+-m '$MODEL'} \
+                            --output-last-message '$task_dir/_codex_last.txt' \
+                            -- \"\$CODEX_PROMPT\"
+                    " >> "$wlog" 2>&1
+            local reentry_status=$?
+            set -e
+
+            # 重新读取 debug_status.json
+            local new_attempts_used=0
+            if [[ -f "$task_dir/debug_status.json" ]]; then
+                session_outcome=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$task_dir/debug_status.json'))
+    print(d.get('session_outcome', 'unknown'))
+except Exception:
+    print('unknown')
+" 2>/dev/null || echo "unknown")
+                new_attempts_used=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$task_dir/debug_status.json'))
+    print(d.get('attempts_used', 0))
+except Exception:
+    print(0)
+" 2>/dev/null || echo "0")
+            else
+                session_outcome="unknown"
+                new_attempts_used=0
+            fi
+
+            if [[ "$new_attempts_used" =~ ^[0-9]+$ ]]; then
+                total_attempts_used=$((total_attempts_used + new_attempts_used))
+            else
+                total_attempts_used=$((total_attempts_used + 1))
+            fi
+
+            local reentry_end=$(date +%s)
+            elapsed=$((elapsed + reentry_end - end))
+            end=$reentry_end
+            status=$reentry_status
+        done
 
         local icon
         if [[ $status -eq 0 ]]; then
             case "$session_outcome" in
                 success)                       icon="✅ $session_outcome${cheat_mark}" ;;
-                progressed_to_new_failure_type) icon="↗ $session_outcome${cheat_mark}" ;;
+                stopped_by_global_attempt_limit) icon="⛔ $session_outcome${cheat_mark}" ;;
                 skipped_*)                     icon="⊘ $session_outcome${cheat_mark}" ;;
                 failed|stopped_*|crashed|timeout) icon="❌ $session_outcome${cheat_mark}" ;;
                 *)                             icon="⚠ $session_outcome${cheat_mark}" ;;
             esac
-            echo "[${container}@npu${npu}] ✅ ${op_name} session_outcome=${session_outcome} (${elapsed}s)"
+            echo "[${container}@npu${npu}] ✅ ${op_name} session_outcome=${session_outcome} (${elapsed}s, reentries=${reentry_count})"
         elif [[ $status -eq 124 ]]; then
             icon="⏱ 超时(codex)${cheat_mark}"
             echo "[${container}@npu${npu}] ⏱ ${op_name} CODEX_TIMEOUT (${elapsed}s)"
@@ -288,7 +380,7 @@ for p in "${pids[@]}"; do wait "$p" || true; done
 
 # ── 汇总 ──
 SUCCESS=$(grep -c "✅ success" "$REPORT" || echo 0)
-PROGRESSED=$(grep -c "↗ progressed" "$REPORT" || echo 0)
+STOPPED_GLOBAL=$(grep -c "⛔ stopped_by_global_attempt_limit" "$REPORT" || echo 0)
 SKIPPED=$(grep -c "⊘ skipped" "$REPORT" || echo 0)
 TIMEOUT_CNT=$(grep -c "⏱ 超时" "$REPORT" || echo 0)
 FAIL=$(grep -c "❌ " "$REPORT" || echo 0)
@@ -300,7 +392,7 @@ CHEAT=$(grep -c "🚨 CHEAT" "$REPORT" || echo 0)
     echo
     echo "- 总数: $TOTAL"
     echo "- success: $SUCCESS"
-    echo "- progressed_to_new_failure_type: $PROGRESSED"
+    echo "- stopped_by_global_attempt_limit: $STOPPED_GLOBAL"
     echo "- skipped_*: $SKIPPED"
     echo "- codex timeout: $TIMEOUT_CNT"
     echo "- failed / crashed / stopped_* / codex_rc!=0: $FAIL"
@@ -309,7 +401,7 @@ CHEAT=$(grep -c "🚨 CHEAT" "$REPORT" || echo 0)
 } >> "$REPORT"
 
 echo "================================================================"
-echo "完成: ✅$SUCCESS  ↗$PROGRESSED  ⊘$SKIPPED  ⏱$TIMEOUT_CNT  ❌$FAIL  🚨$CHEAT  /  共 $TOTAL"
+echo "完成: ✅$SUCCESS  ⛔$STOPPED_GLOBAL  ⊘$SKIPPED  ⏱$TIMEOUT_CNT  ❌$FAIL  🚨$CHEAT  /  共 $TOTAL"
 echo "报告: $REPORT"
 echo "每 worker 日志: $OUTPUT_DIR/worker_<container>.log"
 echo "================================================================"

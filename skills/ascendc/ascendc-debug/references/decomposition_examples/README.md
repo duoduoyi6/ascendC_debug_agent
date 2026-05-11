@@ -5,6 +5,17 @@
 在 ascendc-debug Step 2 的 Sub-step 2.2 中, Agent 需要将算子的参考实现分解为逐步计算链。
 这些示例展示了"正确的分解方式"——每步的粒度、标注内容、精度风险点的分析方法。
 
+## 职责分工
+
+本目录只包含：数学计算链、op 特有精度风险点、误差传播链、与 AscendC Kernel 的对照要点。
+
+AscendC 通用实现约束（DataCopyPad 触发条件、TBuf/TQue 分配规则、work_buf 初始化、SyncAll 插入位置）
+不在本目录重复记录，统一参见 `skills/ascendc/ascendc-translator/references/`：
+- `dsl2Ascendc.md`（常见陷阱速查表）
+- `dsl2Ascendc_compute_vector.md`（DataCopyPad / TQue/TBuf 规范）
+- `dsl2Ascendc_cross_core_sync.md`（跨核同步）
+- `TileLang-AscendC-API-Mapping.md`（API 映射权威参考）
+
 ## 使用方法
 
 1. 根据当前算子的 op_name 或 op_type, 查找最相似的分解示例
@@ -16,12 +27,13 @@
 遇到未覆盖的算子时, 先判断其计算模式, 再参考最接近的示例:
 
 | 模式 | 特征 | 参考示例 | 关键审计点 |
-|------|------|---------|-----------|
-| 单行归约 | 每行独立归约, 单核完成, 多步串联 | softmax.md, layer_norm.md | padding 值、count 对齐、归约维完整性 |
+|------|------|---------|-----------| 
+| 单行归约 | 每行独立归约, 单核完成, 多步串联 | softmax.md, layer_norm.md, rms_norm.md | padding 值、count 对齐、归约维完整性 |
 | 跨核归约 | 多核局部归约 → Core 0 全局汇总 | mse_loss.md | workspace 同步、Phase 2 正确性、分母计算 |
 | 分块累加 | 多维分块, 累加器初始化 + 逐块累加 | matmul.md | 累加器初始化、分块边界、精度累积 |
 | 滑窗累加 | 固定窗口遍历 + 均值/最值 | average_pooling2d.md | 有效面积计算、边界/padding 处理 |
 | 前缀累加 | 顺序依赖的累加, 无法并行 | cumsum.md | 跨 tile 累加器传递、顺序正确性 |
+| 多阶段 C/V 融合 | Cube/Vector 交替流水, 跨核同步 | flash_attention.md | cross-core 同步、online softmax 修正因子、workspace 环形缓冲 |
 | 逐元素 | 无归约, 每个元素独立处理 | (无需详细分解) | padding/对齐、类型转换 |
 
 ## 分解粒度标准
@@ -32,8 +44,7 @@
 - **输出 shape**: 该步产出的张量形状
 - **数值范围预期**: 基于输入范围推断的合理输出范围
 - **精度风险点**: 该步可能引入精度误差的原因
-- **DSL 对应**: DSL 文件中的对应代码行 (如有 DSL 文件)
-- **知识库关联**: 对应的知识库条目编号 (如有匹配)
+- **参考实现** (可选): `archive_tasks/<task>/model_new_tilelang.py` 中的对应代码行
 
 步骤拆分规则:
 - 归约操作 (Reduce*) **必须**独立成步
@@ -48,8 +59,10 @@
 |------|------|---------|--------|
 | softmax.md | Softmax | 单行归约 | 5 步 |
 | layer_norm.md | LayerNorm | 单行归约 (3-pass tiled) | 7 步 |
+| rms_norm.md | RMSNorm | 单行归约 (单 pass) | 5 步 |
 | reduce_sum.md | ReduceSum | 单步归约 + 跨步访存 | 2 步 |
 | mse_loss.md | MSELoss | 跨核两阶段归约 | 6 步 (Phase 1: 4 步, Phase 2: 2 步) |
 | matmul.md | MatMul | 分块累加 | 4 步 |
 | average_pooling2d.md | AvgPool2d | 滑窗累加 | 3 步 |
 | cumsum.md | CumSum | 前缀累加 | 2 步 |
+| flash_attention.md | FlashAttention | 多阶段 C/V 融合 | 5 阶段 |
