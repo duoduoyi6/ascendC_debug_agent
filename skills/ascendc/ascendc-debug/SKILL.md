@@ -158,144 +158,29 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_gate.py \
 
 ### Step 1-B: Build Error Analysis（build_failed 分支）
 
-**输入**:
-- `{task_dir}/.verify_status/latest.json` — 结构化状态 + `log_path` + `compile.error_summary`
-- `{task_dir}/.verify_logs/phase{N}_attempt{M}.log` — 原始 build log（compile 阶段 stderr 全文）
-- `{task_dir}/kernel/*.cpp` / `*.h` — 当前 kernel 源码
-- `{task_dir}/trace.md` — Phase 1-7 上下文（Phase 4 ac_iterations 里记录了历次 build 尝试）
-
-**Agent 任务**:
-1. 读 build log，提取 compile error / fatal error / undefined reference / template instantiation error 块（每块最多 10 行，按 stderr 顺序）
-2. 对照 `skills/ascendc/ascendc-translator/references/dsl2Ascendc_compute_*.md`、`dsl2Ascendc_host.md`、`TileLang-AscendC-API-Mapping.md` 找 API 用法差异（签名、模板参数、include 依赖）
-3. 写 `{task_dir}/precision_tuning/precision_audit_{attempt}.md` 含（Gate-BUILD-A 必填）：
-   - `[COMPILE_ERROR_CITATION]` — 原文摘录 error 块 + 对应 `kernel/*.cpp` 行号（引用不少于 1 处 error）
-   - `[ROOT_CAUSE]` — 根因（签名不匹配 / 模板参数错 / include 缺失 / pipe-queue 协议违反 等）
-   - `[FIX_PLAN]` — 文件 / 函数 / 行号级修改列表
-   - `[FIX_TYPE]` — 必须 ∈ `{api_usage_fix, template_arg_fix, include_fix, signature_align_fix, pipe_queue_fix, tilingdata_field_fix}`；不在白名单的类型 Gate-A 直接 reject
-4. 修改 `{task_dir}/kernel/*.cpp` / `*.h`（**绝对不动** `utils/build_ascendc.py` / `CMakeLists.txt` / `setup.py` / `utils/` 下任何文件）
-5. 通过 Gate-通用 + Gate-BUILD-A 验证：
-   ```bash
-   python3 skills/ascendc/ascendc-debug/scripts/precision_gate.py \
-       --step audit --op-name {op_name} --task-name {task_name} --attempt {attempt}
-   ```
-
-**推荐参考资料**:
-- `skills/ascendc/ascendc-translator/references/dsl2Ascendc_compute_vector.md`（向量 API）
-- `skills/ascendc/ascendc-translator/references/dsl2Ascendc_compute_scalar.md`（标量 API）
-- `skills/ascendc/ascendc-translator/references/dsl2Ascendc_host.md`（host 侧 tiling / workspace）
-- `skills/ascendc/ascendc-translator/references/TileLang-AscendC-API-Mapping.md`（API 权威参考）
-- `skills/ascendc/ascendc-translator/references/AscendC_knowledge/api_reference/`（API 详细文档）
-
-**Step 4（共用）**: 修复后调 `utils/verification_ascendc.py` + `utils/classify_verify_result.py` 重跑，然后走 `Gate-BUILD-V`：
-- `verify_status.failed_step` 从 `compile` 推进到 `import`/`execute`/`verify`/`null` = 进步（跨分支语义下仍算 `progressed_to_new_failure_type`，本 session 结束）
-- 仍卡在 `compile` 且 error 行未变 = 停滞
-- `compile` 阶段 passed 且 `failure_type != build_failed` = 本分支完成（不切分支，写 `debug_status.json` 后退出）
+> 详细分析步骤见 `skills/ascendc/ascendc-debug/references/branch-build.md`，
+> 进入此分支时必须 **Read 该文件**后再开始分析。
 
 ---
 
 ### Step 1-I: Import Error Analysis（import_failed + import_kernel_side 分支）
 
-**输入**:
-- `{task_dir}/.verify_status/latest.json` — 结构化状态，确认 `import_subtype == import_kernel_side`（若是 `import_env_side` 应已被 Step 0.3 过滤）
-- `{task_dir}/.verify_status/import_traceback.log` 或 `.verify_logs/phase{N}_attempt{M}.log` — 原始 import traceback
-- `{task_dir}/kernel/pybind11.cpp` — pybind 注册入口（`PYBIND11_MODULE` 名、导出符号）
-- `{task_dir}/kernel/*_kernel.h` / `*.cpp` — 被 pybind 引用的 kernel 符号
-- `{task_dir}/model_new_ascendc.py` — import 的 ext module 名（只读！不可改）
-- `{task_dir}/trace.md` — 上下文
-
-**Agent 任务**:
-1. 读 traceback，定位缺失的符号 / 模块名 / pybind 入口
-2. 对照 `skills/ascendc/ascendc-translator/references/dsl2Ascendc_host.md`（pybind 章节）核对：
-   - `PYBIND11_MODULE` 的第一个参数（模块名）是否与 `model_new_ascendc.py` 中 `import` 的名字一致
-   - kernel ext 的 `.so` 文件命名与 import 名是否匹配
-   - 导出的函数符号是否与 `pybind11.cpp` 中 `m.def(...)` 注册的名字一致
-3. 写 `{task_dir}/precision_tuning/precision_audit_{attempt}.md` 含（Gate-IMPORT-A 必填）：
-   - `[IMPORT_TRACEBACK_CITATION]` — 原文摘录 traceback（至少 `ImportError` / `ModuleNotFoundError` / `OSError: cannot open shared object` 的关键行）
-   - `[ROOT_CAUSE]` — 根因（pybind 模块名不一致 / kernel ext 名称错 / 符号未导出）
-   - `[FIX_PLAN]` — 修改点（限定 `pybind11.cpp` 的 `PYBIND11_MODULE` / `m.def` 注册行，或 kernel 侧 `extern "C"` / 导出符号名）
-   - `[FIX_TYPE]` — 必须 ∈ `{pybind_symbol_fix, kernel_ext_name_fix, kernel_export_fix}`；**明确拒绝** `ld_path_fix` / `abi_fix` / `toolkit_env_fix` / `cmakelists_fix` / `setup_py_fix` / `build_ascendc_fix`（这些属于 env_side，不在本 subagent 的 scope）
-4. 修改 `{task_dir}/kernel/pybind11.cpp` 或 kernel 符号导出处（**不动** `model_new_ascendc.py`、`utils/build_ascendc.py`、`CMakeLists.txt`、`setup.py`）
-5. 通过 Gate-通用 + Gate-IMPORT-A 验证（命令同 Step 1-B）
-
-**推荐参考资料**:
-- `skills/ascendc/ascendc-translator/references/dsl2Ascendc_host.md`（pybind 绑定规范）
-- `skills/ascendc/ascendc-debug/references/`（若有环境变量 / pybind 相关条目）
-- `skills/ascendc/ascendc-translator/references/TileLang-AscendC-API-Mapping.md`（`extern "C"` 导出规范）
-
-**Step 4（共用）**: 修复后调 `utils/verification_ascendc.py` + `utils/classify_verify_result.py` 重跑，然后走 `Gate-IMPORT-V`：
-- `verify_status.import.status == passed` = 本分支完成
-- 仍卡在 `import` 且 traceback 未变 = 停滞
-- `import` 通过但 `failure_type` 变为 `build_failed` / `runtime_error` / `precision_failed` = 进步但跨分支，本 session 结束
+> 详细分析步骤见 `skills/ascendc/ascendc-debug/references/branch-import.md`，
+> 进入此分支时必须 **Read 该文件**后再开始分析。
 
 ---
 
 ### Step 1-R: Runtime Error Analysis（runtime_error 分支）
 
-**输入**:
-- `{task_dir}/.verify_status/latest.json` — 结构化状态 + `execute.crash_signal`（SIGSEGV / SIGABRT / SIGBUS / SIGFPE）
-- `{task_dir}/.verify_logs/phase{N}_attempt{M}.log` — stderr / stack trace / core dump 信息
-- `{task_dir}/kernel/*.cpp` / `*.h` — kernel 源码
-- `{task_dir}/trace.md` — 上下文
-
-**Agent 任务**:
-1. 读 stderr / stack trace，提取 crash 位置（函数名 / 行号 / 同步点）；若 log 中只有 signal 编号没有 stack trace，结合 `crash_signal` 类型定位可能原因：
-   - `SIGSEGV` → 越界访存（UB / GM 访存越界、Tensor 未分配就读取、TQue 协议违反）
-   - `SIGABRT` → assertion 失败 / 运行时检查失败（AscendC runtime 内部 check）
-   - `SIGBUS` → 内存对齐错（未满足 32/64/128 字节对齐）
-   - `SIGFPE` → 除零 / 浮点异常（tiling 参数为 0、分母未保护）
-2. 对照 `skills/ascendc/ascendc-translator/references/dsl2Ascendc_cross_core_sync.md`、`AscendCVerification.md`、`dsl2Ascendc_compute_*.md` 找 API 约束 / 同步点 / 对齐要求
-3. 写 `{task_dir}/precision_tuning/precision_audit_{attempt}.md` 含（Gate-RUNTIME-A 必填）：
-   - `[RUNTIME_ERROR_CITATION]` — 原文摘录 stderr / stack trace（含 crash_signal、函数名、行号）
-   - `[ROOT_CAUSE]` — 根因（越界 / 对齐 / 同步缺失 / TQue 协议违反 / 除零）
-   - `[FIX_PLAN]` — 文件 / 函数 / 行号级修改列表
-4. 修改 `{task_dir}/kernel/*.cpp` / `*.h`
-5. 通过 Gate-通用 + Gate-RUNTIME-A 验证
-
-**推荐参考资料**:
-- `skills/ascendc/ascendc-translator/references/dsl2Ascendc_cross_core_sync.md`（跨核同步 / SyncAll）
-- `skills/ascendc/ascendc-translator/references/AscendCVerification.md`（runtime 语义与验证）
-- `skills/ascendc/ascendc-translator/references/dsl2Ascendc_compute_vector.md`（对齐与 DataCopyPad）
-
-**Step 4（共用）**: 修复后调 `utils/verification_ascendc.py` + `utils/classify_verify_result.py` 重跑，然后走 `Gate-RUNTIME-V`：
-- `verify_status.failure_type != runtime_error` 或 crash 位置 / signal 变化 = 进步（若仍是 runtime_error 但位置变则视为 `progressed`）
-- `failure_type` 变为 `precision_failed` = 进步但跨分支，本 session 结束
+> 详细分析步骤见 `skills/ascendc/ascendc-debug/references/branch-runtime.md`，
+> 进入此分支时必须 **Read 该文件**后再开始分析。
 
 ---
 
 ### Step 1-T: Timeout Analysis（timeout 分支）
 
-**输入**:
-- `{task_dir}/.verify_status/latest.json` — 结构化状态；必须满足 `failure_type == timeout` 且 `timeout_marker_present == true`（否则视为 `execution_aborted`，不应进本分支）
-- `{task_dir}/.verify_logs/phase{N}_attempt{M}.log` — 超时前的 stdout/stderr 尾部（最后一条日志提示死锁 / 死循环位置）
-- `{task_dir}/kernel/*.cpp` / `*.h` — kernel 源码（重点看 `SyncAll` / `WaitFlag` / `SetFlag` / `for` 循环边界）
-- `{task_dir}/kernel/{op_name}_tiling.h` + `kernel/pybind11.cpp` — tiling 配置（block_dim / tile_size）
-- `{task_dir}/trace.md` — 上下文
-
-**Agent 任务**:
-1. 读 log 尾部，定位超时时 kernel 执行到哪一步（若能判断）；结合 `duration_sec` 与预期耗时量级判断是死锁（duration ≈ timeout 阈值且无输出推进）还是性能降级
-2. 对照 `skills/ascendc/ascendc-translator/references/dsl2Ascendc_cross_core_sync.md` 分析：
-   - `SyncAll` 是否遗漏或多余（多余的 SyncAll 在部分核未到达时死锁）
-   - `SetFlag` / `WaitFlag` 配对是否一致
-   - `CrossCoreSetFlag` / `CrossCoreWaitFlag` 配对是否一致（AIC↔AIV 跨核点对点同步，配对错误是死锁高频根因）
-   - `gmWorkspace` 是否在 host 侧初始化为 0（软同步依赖初始值，未清零导致行为未定义）
-   - `block_dim` 是否超过实际参与计算的核数（超出时框架插入异常同步，kernel 挂死）
-   - Tiling 参数（`tile_size`、归约轴切分）是否导致循环不收敛
-3. 写 `{task_dir}/precision_tuning/precision_audit_{attempt}.md` 含（Gate-TIMEOUT-A 必填）：
-   - `[SYNC_POINT_ANALYSIS]` — 枚举 kernel 中所有同步点（`SyncAll` / `SetFlag` / `WaitFlag`）及其配对关系，标出疑似死锁点
-   - `[ROOT_CAUSE]` — 根因（同步缺失 / 同步多余 / 死循环 / tiling 死锁）
-   - `[FIX_PLAN]` — 文件 / 函数 / 行号级修改列表
-4. 修改 `{task_dir}/kernel/*.cpp` / `*.h`（**不动** tiling host 逻辑若超出 `kernel/pybind11.cpp` 的 TilingFunc）
-5. 通过 Gate-通用 + Gate-TIMEOUT-A 验证
-
-**推荐参考资料**:
-- `skills/ascendc/ascendc-translator/references/dsl2Ascendc_cross_core_sync.md`（同步原语与死锁反模式）
-- `skills/ascendc/ascendc-translator/references/dsl2Ascendc_host.md`（tiling / workspace 分配）
-- `skills/ascendc/ascendc-translator/references/AscendCVerification.md`（runtime 约束）
-
-**Step 4（共用）**: 修复后调 `utils/verification_ascendc.py` + `utils/classify_verify_result.py` 重跑，然后走 `Gate-TIMEOUT-V`：
-- `verify_status.duration_sec < timeout_threshold` 且 `failure_type != timeout` = 本分支完成（无论对错 — 精度对错由后续判断，但 timeout 语义已解除）
-- 仍超时且 duration 基本不变 = 停滞
-- 不再超时但转 `runtime_error` / `precision_failed` = 进步但跨分支，本 session 结束
+> 详细分析步骤见 `skills/ascendc/ascendc-debug/references/branch-timeout.md`，
+> 进入此分支时必须 **Read 该文件**后再开始分析。
 
 ---
 
@@ -362,6 +247,10 @@ cat "{task_dir}/precision_tuning/round_summary_{N}.json"
     - mean_abs_diff: <来自取证 outputs[0].basic_stats.mean_abs_diff>
     - error_distribution: <来自取证 outputs[0].error_distribution, 特别关注 sign_analysis.bias_direction>
     - worst 元素位置: <来自取证 outputs[0].worst_elements, 列出 top 3>
+    - 首错下标初步反推（若 tileLength 可从 pybind11.cpp 读取时填写）:
+      - worst element 线性下标: <outputs[0].worst_elements[0].index 线性值>
+      - 对应 tile 编号: <线性下标 ÷ tileLength（整除）>
+      - 周期性初判: <错误间隔是否等于 tileLength（偏移问题）/ 向量宽度（计算问题）/ 核边界（多核问题）>
     - 尾块分析: <来自取证 outputs[0].tail_analysis, 标注各 tile_size 下的 tail/body mismatch rate>
     - 维度分析: <来自取证 outputs[0].dimension_analysis, 标注各维度的 mismatch_rate 范围>
   L6 内存布局:
@@ -388,6 +277,17 @@ cat "{task_dir}/precision_tuning/round_summary_{N}.json"
   我对取证 hint 的初步判断:
     - 取证给出的 hint 是否合理? <结合数值证据判断, 不要在此步做代码分析>
     - 是否有数值异常未被 hint 覆盖? <如 sign_analysis 显示偏向但 hint 未提及>
+  多 case 聚合（来自 outputs[0].case_aggregate + 顶层字段，必须填写）:
+    - num_test_cases: <来自取证 num_test_cases，即 NPUKernelBench 该算子的 case 总数>
+    - pass_case_count / fail_case_count: <来自 outputs[0].case_aggregate>
+    - mismatch_ratio 跨 case 范围: min=<> / max=<> / mean=<>
+    - all_cases_same_pattern: <true/false>
+      → true: 所有 case 根因一致，Sub-step 2.5 用 representative_case_idx 单组实验即可
+      → false: 不同 case 失败原因不同，Sub-step 2.5 需按 dtype 分组实验（见 2.5 多 case 前置判断）
+    - shape_conditional: <true/false>
+      → true: mismatch 与 last_dim 显著相关（相关系数>0.7），实验 D 优先，提示 tail/tiling 类问题
+    - representative_case_idx: <来自 outputs[0].representative_case_idx，即 mismatch_ratio 最高的 case 编号>
+    - representative case 的 input_dtype / shape: <从 outputs[0].per_case 中找 case_idx == representative_case_idx 的条目，读取其 input_dtype 字段；shape 从 L6_memory_layout.inputs[0].shape 读取>
 ```
 
 **可选段（仅当 attempt == 0 且 `{task_dir}/trace.md` 存在时写入）**:
@@ -431,6 +331,21 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_knowledge.py search \
 
 记住检索到的 `matched_entries` 和 `checklists`, 后续分析时参考。
 如果输出 `fallback_to_full_load: true`, 说明无精确匹配, 已返回全量条目。
+
+**取证 hint 快速跳转表**（按 `primary_hint` 确定 Sub-step 2.3 重点方向，以及 Sub-step 2.5 对应实验）：
+
+| `primary_hint` | 疑似根因 | Sub-step 2.3 重点检查 | Sub-step 2.5 优先实验 |
+|---|---|---|---|
+| `tail_spike` | TailTile / TailPadding | `curTileLength` vs `tileLength` 在向量 API 的用法；尾块 Duplicate 初始化 | 实验 D-baseline（确认算法基础）→ D-boundary（定位触发 last_dim 边界） |
+| `uniform_offset` | FP16Upcast 或 GMOffset | Cast 升精度路径；GM 偏移公式（元素 vs 字节） | 实验 C（全1/arange 输入） |
+| `nan_inf_contamination` | 除零 / Exp 溢出 / Log 负数 | Div/Reciprocal 防零；Ln 正数约束；Exp 范围钳制 | 实验 C + Sub-step 2.6 插桩 |
+| `scattered` | 未知（低置信度）| 全面检查 REFERENCE_IMPL_SPEC 5 个维度 | 实验 A→B→C→D 全流程 |
+| `boundary_concentration` | MulticoreTiling | 核间 GM 区间覆盖公式；formerNum × formerLength 完整性 | 实验 A（单核隔离） |
+| `magnitude_correlated` | FP16Upcast 或 ReduceOverwrite | Cast 路径；ReduceSum/Max 后是否复用 src（参见知识库 ReduceOverwrite 条目） | 实验 C（全1输入） |
+| `dimension_concentration` | Layout / GMOffset | DataCopy stride 计算；多维 offset 公式 | 实验 A（多核场景）或实验 C |
+| `all_wrong` | 多种可能（优先级：GM 偏移 > Cast > TQue 流程）| TBuf→GM 路径；CopyOut 是否真正执行 | 实验 C（全1输入） |
+
+> ⚠️ 映射表仅用于**优先化分析方向**，不替代 Sub-step 2.3 的全面检查。置信度 LOW 时即使 hint 明确，也要执行 Sub-step 2.5 对应实验。
 
 ---
 
@@ -513,35 +428,8 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_knowledge.py search \
 
 **Phase A 产出**: `[REFERENCE_IMPL_SPEC]` section (写入 precision_audit_{attempt}.md, Gate-A 必填)
 
-从上述参考文件中提取并填写如下规范:
-
-```
-[REFERENCE_IMPL_SPEC]
-  参考实现来源: <lowering example 文件路径>
-
-  TQue/TBuf 分配规范 (来自参考实现):
-    - inQueue (TQue<VECIN>): <用途, DataCopy GM→UB 的目标 buffer>
-    - outQueue (TQue<VECOUT>): <用途, DataCopy UB→GM 的源 buffer, 必须经 EnQue/DeQue>
-    - TBuf (VECCALC): <用途, 中间计算 buffer, 不可直接作为 DataCopy src/dst>
-    - TBuf→GM 正确路径: TBuf计算结果 → outQueue.AllocTensor → 写入outLocal → EnQue → DeQue → DataCopy
-
-  关键 API 规范 (来自参考实现):
-    - ReduceMax: <调用签名; work_buf 是否需要 Duplicate(-3.402823466e+38f, count) 初始化>
-    - ReduceSum: <count 对齐要求 (64的倍数); work_buf 是否需要 Duplicate(0.0f, count) 初始化>
-    - SyncAll: <是否需要, 插入位置 (跨核写GM后/读GM前)>
-
-  非对齐处理规范 (来自 dsl2Ascendc_compute_vector.md):
-    - 触发条件: count × sizeof(dtype) 不是 32 的倍数
-    - GM→UB: DataCopyPad(dst, src, {1, count*sizeof(T), 0, 0}, {false, 0, 0, 0})
-    - UB→GM: DataCopyPad(dst, src, {1, count*sizeof(T), 0, 0})
-    - 本算子 tileLength 的对齐状况: <tileLength × sizeof(dtype) = ? 字节, 是否32字节对齐>
-
-  error_correction 禁用模式 (来自 dsl2Ascendc.md §常见陷阱速查表):
-    - 禁止 float↔uint 强制类型转换 (改用 float n = (float)int_val)
-    - 禁止标量上下文调用向量 Log API (改用 AscendC::Log(tmp,tmp,1); tmp.GetValue(0))
-    - 禁止向量上下文调用标量 AscendC::Sqrt (改用 sqrt(val))
-    - 本算子代码中是否出现上述模式: <逐一检查>
-```
+> 填写前必须 **Read** `skills/ascendc/ascendc-debug/references/phase-a-checklist.md`，
+> 其中包含 `[REFERENCE_IMPL_SPEC]` 和 `[KERNEL_STEP_TRACE]` 的完整格式模板。
 
 ---
 
@@ -570,71 +458,7 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_knowledge.py search \
   5. dsl2Ascendc.md 中列出的禁用模式是否在代码中出现
 - 遇到不确定的 API 名称时，查阅 `TileLang-AscendC-API-Mapping.md` 确认（如 Max vs Vmax、Subs 是否存在、负无穷常量写法等）
 
-```
-[KERNEL_STEP_TRACE]
-  Kernel 计算步骤 (从 Compute() 函数提取):
-    K-Step 1: <AscendC API 名称>
-      - 代码位置: <kernel 文件名>.cpp 第 <line> 行
-      - 参数: count=<value>, src=<buffer>, dst=<buffer>
-      - 对应计算链: Step <N> (<operation_name>)
-      - 匹配状态: ✅ 匹配 / ⚠️ 参数偏差: <描述> / ❌ 缺失或多余
-
-    K-Step 2: ...
-    ...
-
-  Host tiling 参数:
-    - TilingData 结构体字段: <从 _tiling.h 中列出所有字段名和类型>
-    - tileLength = <值> (来源: pybind11.cpp TilingFunc 第 <line> 行)
-    - 其他 TilingData 字段: <列出 field=value>
-    - 归约维度完整性: tileLength <>=<> 归约轴长度 <length> → 完整 / 被切分
-
-  跨核通信验证: (仅跨核归约模式)
-    - workspace buffer: GM 中是否分配, 大小是否 = n_cores
-    - 各核写入: DataCopy 后是否有同步
-    - Core 0 读取: 是否在所有核完成后才读取
-    - 全局归约: ReduceSum 的 count 是否正确 (= n_cores, 而非 tile_size)
-    - 最终除法: 分母是否 = total_elems
-
-  算子类型专项检查 (根据 L8 op_type 选择对应项):
-
-    [Pooling 类] DataCopy 维度一致性:
-      - 输入内存布局: <NCDHW / NCHW / NHWC, 来自 L6>
-      - tileC 含义: <沿 C 维度的 tile 大小>
-      - DataCopy count=tileC 读取的是: <C 维度 tileC 个通道 还是 W 维度 tileC 个元素?>
-      - C 维度在内存中的 stride: <C_stride = D*H*W (NCDHW) / H*W (NCHW)>
-      - ⚠️ 检查: tileC 个连续地址是否真的对应 tileC 个通道? 若 C_stride > 1, 连续地址实为沿 W/空间维读取
-      - input base offset 公式: <写出 b/c0/d/h/w 各维度的 offset 计算, 标出 c0 的系数是否为 C_stride>
-      - output base offset 公式: <写出 b/c0/od/oh/ow 各维度的 offset 计算, 标出 c0 的系数>
-      - ⚠️ 检查: outBase 中 c0 的系数是否为 outD*outH*outW (正确) 而非 1 (错误)
-
-    [Reduction / Normalization 类] 工作 Buffer 初始化:
-      - ReduceMax work buffer: <调用前是否 Duplicate(work, -INF, count) 初始化?>
-      - ReduceSum work buffer: <调用前是否 Duplicate(work, 0, count) 初始化?>
-      - ⚠️ 检查: work buffer 是否从上一步骤残留了非零数据 (如 ReduceMax work buffer 含有上一步 maxVal 残留)
-      - 负无穷写法: <代码中使用 -3.402823466e+38f / (float)(-INFINITY) / -65504.0f (float16 错误!)>
-
-    [MatMul / 分块累加类] 累加器初始化:
-      - 累加器 (acc buffer) 初始化位置: <在外层循环前 Duplicate(0) / 未初始化>
-      - ⚠️ 检查: 多个 tile 间累加器是否在每个输出位置开始时被正确重置
-
-    [TQue / TBuf 数据流] 同步验证 (所有算子类型必填):
-      - inQueue 流程: AllocTensor → DataCopy(GM→UB) → EnQue → DeQue → (计算) → FreeTensor ✅/❌
-      - outQueue 流程: AllocTensor → (计算写入) → EnQue → DeQue → DataCopy(UB→GM) → FreeTensor ✅/❌
-      - TBuf 用途: <VECCALC 中间计算, 不参与 DMA 传输>
-      - ⚠️ 严重: TBuf.Get() 直接作为 DataCopy dst 写 GM = 绕过 outQueue 同步 = 数据未写出 = 输出全零
-      - ⚠️ 检查: CopyOut 函数中 maxLocal/accLocal 等 TBuf 变量是否直接用于 DataCopy(outputGm[], ...)
-
-  步骤对齐结论:
-    - 全部匹配: 是 / 否
-    - 缺失步骤: <列出, 或 "无">
-    - 参数偏差: <列出, 或 "无">
-    - 新增/多余步骤: <列出, 或 "无">
-
-  L7 代码位置映射 (手动):
-    - worst element index=<index> → 对应 kernel 中的 <函数/代码块>
-    - 该元素位于 main block / tail block?
-    - 对应的 K-Step: <编号>
-```
+> `[KERNEL_STEP_TRACE]` 的完整格式模板在 `references/phase-a-checklist.md` 中（Phase A 时已 Read），直接使用其格式填写。
 
 ---
 
@@ -734,9 +558,289 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_gate.py \
     --step audit --op-name {op_name} --task-name {task_name} --attempt {attempt}
 ```
 
-⛔ **Gate-A 未通过 → 补全缺失的 section, 不计入轮次。Gate-A 现在检查 7 个必填 section: FORENSICS_SUMMARY, COMPUTATION_DECOMPOSITION, REFERENCE_IMPL_SPEC, KERNEL_STEP_TRACE, ROOT_CAUSE, FIX_PLAN, TARGET_FILES。**
+⛔ **Gate-A 未通过 → 补全缺失的 section, 不计入轮次。Gate-A 现在检查 8 个必填 section: FORENSICS_SUMMARY, COMPUTATION_DECOMPOSITION, REFERENCE_IMPL_SPEC, KERNEL_STEP_TRACE, ROOT_CAUSE, FIX_PLAN, TARGET_FILES, EXPERIMENT_RESULTS。注意：EXPERIMENT_RESULTS 若跳过实验，需写入跳过理由（满足4条跳过条件的举证），同样视为通过。**
 
 > Gate-A 通过后，脚本自动提取 sections 小文件并写入 `round_summary_{attempt}.json` 初始字段（diagnostics + index）。**Agent 无需手动写 round_summary。**
+
+---
+
+### Sub-step 2.5: 实验隔离（以"运行"为默认，跳过需要明确举证）
+
+**触发规则**（优先运行实验，跳过有严格门槛）：
+
+以下 4 条**同时满足**时方可跳过实验：
+1. `[ROOT_CAUSE]` 置信度 = HIGH
+2. 证据链三元组完整：①数值证据（引用 forensics 具体字段值）②代码证据（引用具体行号+变量名）③逻辑推导（解释为何该代码问题产生观察到的 diff 模式）
+3. `attempt > 0` 且 `tuning_directions.json` 中上一轮 `improvement_ratio > 0.2`
+4. 当前 `primary_hint` 与上一轮一致（问题性质未变）
+
+**条件 3 对 attempt == 0 永不成立，因此首轮必须执行实验，无论代码分析多"有把握"。**
+
+缺任意一条 → 必须执行实验。
+
+#### 多 case 前置判断（在生成调试脚本前执行，基于 [FORENSICS_SUMMARY] 中的多 case 聚合数据）
+
+查阅 `[FORENSICS_SUMMARY]` 末尾的"多 case 聚合"字段，按下表决定实验组织策略：
+
+| all_cases_same_pattern | shape_conditional | 实验策略 |
+|---|---|---|
+| true | any | **单组实验**：用 `representative_case_idx` 运行 C+D-baseline+D-boundary，结论适用所有 case |
+| false | true | **按 dtype 分组，优先 D-boundary**：float32 / float16 / bfloat16 各取一个失败 case，D-baseline 必须先跑确认算法基础，再测 last_dim 对齐 vs 非对齐 |
+| false | false | **按 dtype 分组，优先实验 C**：各取一个失败 case 运行全1对照，在 `[EXPERIMENT_RESULTS]` 中分组汇报结论 |
+
+**分组边界约束**：最多选 3 组（每种 dtype 各一个代表 case），不对所有 case 逐一运行。**直接读取 `outputs[0].case_aggregate.dtype_representative_cases`**——该字段已按 input_dtype 预计算各分组的最高 mismatch_ratio 代表 case 编号，格式如 `{"torch.float16": 12, "torch.float32": 5, "torch.bfloat16": 20}`，无需手动遍历 per_case。
+
+#### 实验分层（按执行成本）
+
+| 实验 | 需要重编译 | 默认执行条件 |
+|------|-----------|------------|
+| **C：固定/规律输入** | ❌ 否 | **每次必做**（通过调试脚本，成本极低） |
+| **D-baseline：1D 退化** | ❌ 否 | **每次必做**（消除多维复杂性，验证算法在最简 1D 场景的正确性） |
+| **D-boundary：last_dim 边界** | ❌ 否 | **每次必做**（D-baseline 通过后定位 tail-tile 触发的 last_dim 边界） |
+| **A：block_dim → 1** | ✅ 是 | `primary_hint` ∈ {`boundary_concentration`, `scattered`}，或 C/D 结论不明确 |
+| **B：PipeBarrier\<PIPE_ALL\>** | ✅ 是 | `primary_hint` = `scattered`，或实验 A 单核通过后追加 |
+
+#### 实验执行前：生成调试脚本
+
+```bash
+# 1. 复制模板到 task_dir（替换三个占位符）
+cp skills/ascendc/ascendc-debug/scripts/debug_precision_template.py \
+   {task_dir}/debug_{op_name}_precision.py
+# 将文件内 {{OP_NAME}} → {op_name}，{{TASK_DIR}} → {task_name}，
+# {{CASE_INDEX}} → {representative_case_idx}（来自 [FORENSICS_SUMMARY] 多 case 聚合字段）
+# 分组实验时，从 outputs[0].case_aggregate.dtype_representative_cases 读取各 dtype 代表编号，
+# 每组分别替换 CASE_INDEX 为对应代表 case 编号后重新运行
+
+# 2. 运行（本地/SSH/Docker 自动检测）
+bash skills/ascendc/ascendc-debug/references/run_precision_debug.sh {task_name} {op_name}
+```
+
+> 实验 C/D 通过修改调试脚本的输入直接运行，无需重编译。
+> 实验 A/B 需先修改 `kernel/` 文件再重编译，用 `bash skills/ascendc/ascendc-debug/references/run_precision_debug.sh` 运行。
+
+#### 实验 A：block_dim → 1（多核隔离）
+
+在 `{task_dir}/kernel/pybind11.cpp` TilingFunc 中临时硬编码 `blockDim = 1`，重编译后运行调试脚本。
+
+| 结果 | 结论 | 下一步 |
+|------|------|--------|
+| 单核过、多核挂 | 核间问题（GM 区间重叠 / tiling 映射 / 核间同步） | 查 pybind11.cpp tiling 公式；加载 `bug_examples/multicore-tiling-overlap.md` |
+| 单核也挂 | 非多核问题 | 实验 B |
+
+#### 实验 B：PipeBarrier\<PIPE_ALL\>（同步隔离）
+
+将 kernel Process 中所有阶段之间临时插入 `AscendC::PipeBarrier<PIPE_ALL>()`（CopyIn/Compute/CopyOut 之间各加一个），重编译后运行。
+
+| 结果 | 结论 | 下一步 |
+|------|------|--------|
+| 全屏障后过 | 核内同步不足 → 逐步恢复细粒度同步定位 | 查 EnQue/DeQue 配对；加载 `bug_examples/async-sync-missing.md` |
+| 仍失败 | 非同步问题 | 实验 C |
+
+> ⚠️ `PIPE_ALL` 仅用于实验，**绝不可作为最终修复方案**。
+
+#### 实验 C：固定/规律输入（地址隔离）
+
+分别用全 1、等差序列（arange）、随机输入测试（调试脚本自动完成）。
+
+| 结果 | 结论 | 下一步 |
+|------|------|--------|
+| 全 1 过、等差/随机挂 | 地址/偏移/stride 错误（常数输入掩盖偏移问题） | 查 GM 偏移公式；加载 `bug_examples/gm-offset-error.md` |
+| 全都挂 | 计算逻辑或全局 tiling 错误 | 查 Cast 路径或 TQue 流程；加载 `bug_examples/fp16-no-upcast.md` |
+| 全都过 | 特定数值范围触发精度问题 | 查边界值/极值（Exp 溢出、Ln 负数等） |
+
+#### 实验 D：shape 缩减隔离（含两个子实验，顺序执行）
+
+**D-baseline：1D 退化（算法基础验证）**
+
+将输入压缩为 1D 小张量（size=32 和 64），消除所有多维 layout 复杂性，验证算法在最简单 tile 场景下是否正确。
+
+| 结果 | 结论 | 下一步 |
+|------|------|--------|
+| 1D 也失败 | 算法本身有误，与 shape/维度/tiling 无关 | 查计算逻辑根因（Cast 路径 / TQue 流程 / 公式错误） |
+| 1D 通过 | 算法基础正确，问题由多维 layout 或 tail-tile 引入 | 进入 D-boundary |
+
+**D-boundary：last_dim 边界（tail-tile 触发定位）**
+
+保留所有维度不变，仅修改 `last_dim` 为 tile 整数倍（对齐）和 tile-1（非对齐）。调试脚本自动生成候选序列（基于常见 tile_size 32/64/128/256），无需手动构造。
+
+示例：原始 shape `[128, 257]` → 脚本自动测试 `[128, 256]`（tile=32/64/128/256 的最大对齐值）和 `[128, 255]`（非对齐）。若 orig_last 较大（如 1025），则各 tile_size 可产生不同的对齐候选（1024, 1023, 896, 895 等）。
+
+若 `shape_conditional=true`，**必须**读取 `outputs[0].tail_analysis`，找出 `tail_mismatch_rate` 最高的 `tile_size`（如 96），确认该 tile_size 在调试脚本自动生成的 candidates 中已覆盖（脚本只枚举 32/64/128/256）。若该 tile_size 不在枚举列表中，在调试脚本的 candidates 列表中手动追加 `aligned = ((orig_last - 1) // tile_size) * tile_size`（严格小于 orig_last 的最大对齐值）和 `aligned - 1`（非对齐值）。
+
+| 结果 | 结论 | 下一步 |
+|------|------|--------|
+| 对齐 last_dim 通过、非对齐挂 | 尾 tile 处理错误 | 查 `curTileLength` vs `tileLength`；加载 `bug_examples/tail-tile-misalign.md` |
+| 小 last_dim 通过、大挂 | 多核/tiling 边界 | 配合实验 A 确认 |
+| 全部失败 | 与 last_dim 无关（但 D-baseline 已排除算法错误） | 查多维 layout（DataCopy stride / GMOffset 多维 offset） |
+
+#### 首错下标 + tiling 反推
+
+```
+首错线性下标 first_idx（来自调试脚本输出或 forensics worst_elements）
+  → 对应 tile 编号  = first_idx ÷ tileLength（整除）
+  → 对应核编号     = tile编号 ÷ （每核 tile 数）
+  → 该核 GM 起始偏移 = 核编号 × formerLength
+  → 预期搬运字节数   = curTileLength × sizeof(T)
+
+错误周期判断：
+  周期 = tileLength       → 搬运/偏移问题（优先实验 C）
+  周期 = 向量操作宽度(8/16/32) → 计算流程问题（优先 Sub-step 2.6 插桩）
+  与核边界对齐            → 多核 tiling 问题（优先实验 A）
+```
+
+#### 典型案例按需加载
+
+仅在误差特征匹配时加载对应案例，**不要一次性全部加载**：
+
+| 实验结论 / 误差现象 | 案例文件 |
+|---|---|
+| FP16 挂 FP32 过，全部偏差 | [`references/bug_examples/fp16-no-upcast.md`](references/bug_examples/fp16-no-upcast.md) |
+| 实验 C：全1过随机挂；周期 = tileLength | [`references/bug_examples/gm-offset-error.md`](references/bug_examples/gm-offset-error.md) |
+| 实验 D-boundary：非整除 last_dim 挂、D-baseline 通过，仅尾部错 | [`references/bug_examples/tail-tile-misalign.md`](references/bug_examples/tail-tile-misalign.md) |
+| 实验 A：单核过多核挂 | [`references/bug_examples/multicore-tiling-overlap.md`](references/bug_examples/multicore-tiling-overlap.md) |
+| 实验 B：PIPE_ALL 后稳定；多次运行结果不同 | [`references/bug_examples/async-sync-missing.md`](references/bug_examples/async-sync-missing.md) |
+
+#### [EXPERIMENT_RESULTS] 产出规范
+
+将实验结论写入 `{task_dir}/precision_tuning/precision_audit_{attempt}.md` 的 `[EXPERIMENT_RESULTS]` section，并据此更新 `[ROOT_CAUSE]` 的置信度与证据链：
+
+```
+[EXPERIMENT_RESULTS]
+  执行的实验: <C / C+D-baseline+D-boundary / A+C+D / 全流程 / 跳过（说明理由）>
+
+  实验 C 结论: <全1过+随机挂=地址问题 / 全挂=计算问题 / 全过=数值范围触发>
+  实验 D-baseline 结论: <1D-32/64 通过=算法基础正确，问题由多维/tiling引入 / 失败=算法本身有误（与shape无关）>
+  实验 D-boundary 结论: <对齐过非对齐挂=尾tile / 小last_dim过大挂=多核边界 / 全失败=与last_dim无关（查多维layout）>
+  实验 A 结论: <如执行: 单核过多核挂=核间 / 单核也挂=非多核>
+  实验 B 结论: <如执行: 屏障后过=同步不足 / 仍失败=非同步>
+
+  首错反推: first_idx=<N> → tile=<M> → 核=<K>，与实验结论<一致/矛盾>
+
+  实验后置信度更新: <LOW→MEDIUM / MEDIUM→HIGH / 仍 LOW>
+  更新后疑似根因: <与初始 [ROOT_CAUSE] 一致 / 修正为 ...>
+
+  （若跳过实验，逐条核对跳过条件）
+  跳过条件核查:
+    ① 置信度 HIGH: <是/否>
+    ② 证据三元组完整: <是/否，缺少哪项>
+    ③ attempt>0 且上轮 improvement_ratio>0.2: <是/否>
+    ④ primary_hint 与上轮一致: <是/否>
+    → 全部满足: 跳过有效 / 存在不满足项: 不应跳过
+```
+
+⚠️ **[EXPERIMENT_RESULTS] section 的存在由 Gate-A 强制校验**——无论执行还是跳过，此 section 必须写入 precision_audit_{attempt}.md。
+
+**反模式（NEVER）**：
+- NEVER 将 `PipeBarrier<PIPE_ALL>` 保留在最终修复代码中
+- NEVER 同时改变多个变量（如同时单核 + 固定输入）——无法定位原因
+- NEVER 跳过调试脚本生成直接靠肉眼判断实验结果
+
+---
+
+### Sub-step 2.6: 插桩定位（实验缩小范围后仍无法定位精确行时启用）
+
+#### 触发条件（满足任一即启用）
+
+1. Sub-step 2.5 实验后 `[ROOT_CAUSE]` 置信度仍为 MEDIUM（根因假设未被确认）
+2. 实验已将问题缩小到某个计算阶段，但无法确定哪一行/哪一个 API 调用出错
+3. `primary_hint = nan_inf_contamination`（数值溢出类问题必须插桩追踪传播路径）
+
+**不触发条件**：实验后 `[ROOT_CAUSE]` 已为 HIGH 且修复位置已精确定位到代码行 → 直接进入 Step 3。
+
+---
+
+#### 核心规则（5 条，违反任一则插桩结果不可信）
+
+| # | 规则 | 说明 |
+|---|---|---|
+| R1 | **仅在 GetBlockIdx()==0 的核打印** | 多核并发 printf 输出乱序，只看 core-0 输出 |
+| R2 | **在 DeQue 之后立即读取** | DeQue 前 UB 内容未定义，读取是 UB 脏数据 |
+| R3 | **FP16/BF16 转 float 后再 printf** | 直接 printf half 结果未定义；先 `(float)val` |
+| R4 | **添加阶段标记字符串** | `printf("[phase=CopyIn tile=%d] val=%.6f\n", i, v)` — 区分阶段和循环轮次 |
+| R5 | **DumpTensor 用小 dumpSize** | 只 dump 首 16~32 个元素，避免输出淹没日志 |
+
+---
+
+#### 工具选择表
+
+| 场景 | 推荐工具 | 理由 |
+|---|---|---|
+| 标量/单元素验证（循环下标、偏移量、长度变量） | `printf` | 轻量，不影响 TBuf 布局 |
+| 向量中间结果（UB tensor 前 N 个元素） | `DumpTensor` | 直接输出 LocalTensor 内容，无需手写循环 |
+| NaN/Inf 传播追踪 | `printf` + 每步 `IsNan`/`IsInf` 判断 | 确认哪一步产生 NaN |
+| GM 偏移验证 | `printf` 打印 `blockIdx * tileLength` 和 `progress * tileLength` | 验证地址计算公式 |
+
+---
+
+#### 插桩策略（逐步缩小）
+
+**原则**：二分法——先在计算中点插桩，根据中点结果决定向前还是向后缩进，直到定位到单个 API。
+
+```cpp
+// 步骤1: 在 Compute() 入口确认输入正确（DeQue 后立即）
+__aicore__ inline void Compute(int32_t progress) {
+    auto xLocal = inQueueX_.DeQue<T>();
+    // [插桩-P1] 验证输入
+    if (GetBlockIdx() == 0 && progress == 0) {
+        printf("[P1-input tile=0] x[0]=%.6f x[1]=%.6f len=%d\n",
+               (float)xLocal.GetValue(0), (float)xLocal.GetValue(1), tileLength_);
+    }
+
+    // ... 中间计算 ...
+
+    // [插桩-P2] 在某中间结果后验证
+    if (GetBlockIdx() == 0 && progress == 0) {
+        // 例：确认 Mul 结果
+        printf("[P2-after-Mul] out[0]=%.6f\n", (float)tmpBuf_.GetValue(0));
+    }
+
+    // [插桩-P3] 在 EnQue 前验证最终输出
+    if (GetBlockIdx() == 0 && progress == 0) {
+        printf("[P3-before-EnQue] result[0]=%.6f\n", (float)outLocal.GetValue(0));
+    }
+    outQueueY_.EnQue(outLocal);
+}
+```
+
+**二分缩进流程**：
+1. P1 值错 → 问题在 CopyIn（GM 偏移 / DMA 长度），退出 Compute 检查
+2. P1 正确、P2 错 → 问题在 P1→P2 之间的 API（缩进该区间）
+3. P2 正确、P3 错 → 问题在 P2→P3 之间的 API（缩进该区间）
+4. P3 正确但输出错 → 问题在 CopyOut（GM 偏移 / 长度），检查 CopyOut
+
+**NaN 追踪专用模式**（`primary_hint = nan_inf_contamination`）：
+```cpp
+// 在每个关键 API 后插入 NaN 检测
+auto v0 = outLocal.GetValue(0);
+if (GetBlockIdx() == 0 && (v0 != v0 || v0 > 1e30f || v0 < -1e30f)) {
+    printf("[NaN-detected after <API_NAME> tile=%d] val=%.6e\n", progress, (float)v0);
+}
+```
+
+---
+
+#### [INSTRUMENTATION_FINDINGS] 产出规范
+
+将插桩结论写入 `{task_dir}/precision_tuning/precision_audit_{attempt}.md` 的 `[INSTRUMENTATION_FINDINGS]` section：
+
+```
+[INSTRUMENTATION_FINDINGS]
+插桩阶段: <P1/P2/P3/...>
+首次异常出现位置: <API 调用名称 + Compute() 第几行>
+异常值: <printf 输出的具体数值>
+预期值: <对应的 reference 值或理论值>
+结论: <缩小后的根因假设，更新 ROOT_CAUSE 置信度>
+```
+
+> Gate-A 不强制 [INSTRUMENTATION_FINDINGS]，但若已执行插桩，必须写入此 section。写入后 `_write_audit_index()` 会自动索引到 `history/attempt_N/sections/instrumentation_findings.txt`。
+
+---
+
+**反模式（NEVER）**：
+- NEVER 在多核（blockDim>1）下不加 `GetBlockIdx()==0` 过滤就打印——输出乱序导致结论错误
+- NEVER 在 DeQue 之前读取 LocalTensor——UB 内容未定义
+- NEVER 同时插多于 3 个插桩点——信号过多反而难定位，用二分法逐步缩进
+- NEVER 将插桩代码保留在提交的修复版本中——插桩完成后必须清除所有 printf/DumpTensor
 
 ---
 
@@ -827,302 +931,13 @@ Gate-V 输出包含 **loop_signal**, 你**必须遵守**:
 
 ---
 
-### 归档当前轮次 (CONTINUE 时执行)
+### 归档 / Step 5 成功 / Step 6 失败 / Step 7 退出产物
 
-**每次归档时，比较当前轮 match_rate 与历史最佳，决定是否更新最佳代码。**
-
-```bash
-# 1. 保存本轮取证报告和审计报告
-mkdir -p "{task_dir}/precision_tuning/history/attempt_{attempt}"
-cp "{task_dir}/precision_tuning/forensics_report_{attempt}.json" \
-   "{task_dir}/precision_tuning/history/attempt_{attempt}/forensics_report.json"
-cp "{task_dir}/precision_tuning/precision_audit_{attempt}.md" \
-   "{task_dir}/precision_tuning/history/attempt_{attempt}/precision_audit.md"
-
-# 2. 更新最佳代码
-current_mr=$(python3 -c "import json; r=json.load(open('{task_dir}/precision_tuning/validation_result_attempt_{attempt}.json')); print(r.get('match_rate', '0'))")
-best_mr=0
-if [ -f "{task_dir}/precision_tuning/history/current_best/match_rate.txt" ]; then
-    best_mr=$(cat "{task_dir}/precision_tuning/history/current_best/match_rate.txt")
-fi
-
-is_better=$(python3 -c "print('yes' if float('$current_mr') >= float('$best_mr') else 'no')")
-if [ "$is_better" = "yes" ]; then
-    mkdir -p "{task_dir}/precision_tuning/history/current_best/code_snapshot"
-    cp -r "{task_dir}/kernel/" \
-       "{task_dir}/precision_tuning/history/current_best/code_snapshot/kernel/"
-    cp "{task_dir}/model_new_ascendc.py" \
-       "{task_dir}/precision_tuning/history/current_best/code_snapshot/model_new_ascendc.py"
-    echo "$current_mr" > "{task_dir}/precision_tuning/history/current_best/match_rate.txt"
-    echo "精度改善: $best_mr → $current_mr，已更新最佳代码"
-fi
-
-# 3. 保存下一轮的起始快照
-mkdir -p "{task_dir}/precision_tuning/history/attempt_{next_attempt}/code_snapshot"
-cp -r "{task_dir}/kernel/" \
-   "{task_dir}/precision_tuning/history/attempt_{next_attempt}/code_snapshot/kernel/"
-cp "{task_dir}/model_new_ascendc.py" \
-   "{task_dir}/precision_tuning/history/attempt_{next_attempt}/code_snapshot/model_new_ascendc.py"
-```
-
-然后 `attempt += 1`, 回到 Step 1。
-
----
-
-### Step 7: 退出前强制产物（所有分支 / 所有结局共用）
-
-> **本 Step 是 Step 5 / Step 6 的共同前置**：无论 session 以 `success` / `failed` / `stopped_by_gate` / `stopped_by_loop_limit` / `progressed_to_new_failure_type` / `timeout` / `skipped_env_issue` / `skipped_unsupported_type` 中哪种结局退出，**必须**在退出前产出以下两份文件。任一缺失将导致本次 debug 叙事丢失、下游无法判定结果。
-
-#### 7.1 `{task_dir}/debug_trace.md`（详细叙事，4 节强制 + 可选附录）
-
-**原则**：详细程度对标 `trace.md`，但只强制**有可靠数据源的 section**（findings §3.2.6）。
-
-```markdown
-# AscendC Debug Trace
-
-## 1. 调用入口快照（强制）
-- 调用时间: <ISO timestamp>
-- task_dir: {task_dir}
-- session_branch: <1-P / 1-B / 1-I / 1-R / 1-T>
-- 入口 `.verify_status/latest.json` 完整快照（由主 agent 产出或本 agent Initialization Protocol Step B 生成）
-- 主 agent `{task_dir}/trace.md` 摘要（可选：引用最后一次 AscendC 失败的错误 tail）
-- 进入时 kernel/ 基线快照路径（`precision_tuning/history/baseline/code_snapshot`）
-
-## 2. 迭代历史（强制，每轮一节）
-
-### Attempt 0
-- 进入时 verify_status 关键字段: failure_type, failed_step, duration_sec, exit_code
-- 诊断摘要: 引用 audit_0.md（或对应分支 audit 文件）的摘要 section
-- 修复代码改动: 修改文件列表 + 函数 / 行号级 diff 摘要（不贴全文）
-- Gate-通用: PASS / FAIL + 未通过项
-- Gate-分支 (F/A/V): PASS / FAIL + 关键数值
-  - 1-P: mismatch_ratio / max_abs_diff 变化
-  - 1-B: failed_step 推进情况
-  - 1-I: import.status 变化
-  - 1-R: crash signal / crash 位置变化
-  - 1-T: duration_sec 变化
-- 本轮退出 verify_status 快照
-- outcome: passed / improved / stagnant / regressed
-
-### Attempt 1 ... N（同上）
-
-## 3. 最终 Verdict（强制）
-- session_outcome: success / failed / stopped_by_gate / stopped_by_loop_limit / progressed_to_new_failure_type / timeout / skipped_env_issue / skipped_unsupported_type
-- 退出时 verify_status 快照
-- 若 success: 确认全量 `.json.bak` 恢复后 verify 通过
-- 若 failed / stopped_*: 明确原因
-- 若 progressed_to_new_failure_type: 新 failure_type 是什么（需用户独立再触发本 agent 才能进入新分支）
-
-## 4. 产物清单（强制）
-- 各轮 audit 文件相对 {task_dir} 路径
-- tuning_directions.json（精度分支）或对应分支的方向记录文件
-- history/baseline/code_snapshot/ 和各轮 attempt_N/code_snapshot/
-- .verify_status/phase8_attempt_*.json
-- debug_status.json 路径
-
-## 附录 A: 走偏点（可选但推荐）
-- 尝试失败的修复方向摘要（对应 tuning_directions.json outcome ∈ {stagnant, regressed}）
-- 平台 / API 限制 workaround
-- 反作弊触发记录
-
-## 附录 B: 知识库检索记录（仅精度分支 + 其他分支若有）
-- search 调用次数 + 主要关键词
-- 命中的 knowledge entries
-
-## 附录 C: 耗时细分（可选）
-- 总 wall clock（classify_verify_result 各轮 JSON 的 started_at/ended_at 差值之和 + session 整体运行时间）
-- 若能区分 Step 级耗时则列出，不能则写"未精细记录"
-```
-
-**强制要求**（findings §3.2.6）：
-- 只强制 4 节（入口快照 / 迭代历史 / Verdict / 产物清单），其余为附录
-- 第 2 节每一轮都不可省略（含 attempt 0 到最后一轮）
-- 第 4 节产物清单必须是 `{task_dir}` 下的**相对路径**
-- 中文为主，代码 / 路径 / 识别符用英文；Markdown 层级严格 `## 1. ... ## 2. ...`；JSON 快照用 fenced code block 内嵌
-
-#### 7.2 `{task_dir}/debug_status.json`（机器可读 verdict）
-
-```json
-{
-  "schema_version": 1,
-  "session_outcome": "success | failed | stopped_by_gate | stopped_by_loop_limit | progressed_to_new_failure_type | timeout | skipped_env_issue | skipped_unsupported_type",
-  "session_branch": "1-P | 1-B | 1-I | 1-R | 1-T",
-  "started_at": "<ISO>",
-  "ended_at": "<ISO>",
-  "attempts_used": <int>,
-  "entry_failure_type": "<进入时的 final_status.failure_type>",
-  "final_failure_type": "<从最后一次 .verify_status/phase8_attempt_{N}.json 读取>",
-  "final_verify_status_path": "{task_dir}/.verify_status/phase8_attempt_{N}.json",
-  "notes": "<一句话说明，例：首轮 COMPILE_ERROR 已定位为 template_arg_fix，attempt 1 Gate-V 推进至 import>"
-}
-```
-
-**字段约束**：
-- `schema_version = 1`（本版本固定）
-- `session_outcome` 必须是上列 8 种之一；其他值视为未知结局，下游消费者应视同 `crashed`
-- `session_branch` 必须与 Step 0.3 锁定的分支一致
-- `started_at` / `ended_at` 用 ISO 8601（带 UTC 时区）
-- `final_failure_type` 从**最后一次**本 session 内触发的 `utils/verification_ascendc.py` + `utils/classify_verify_result.py` 产出读取；若一次都没跑（例如 `skipped_*`），与 `entry_failure_type` 一致
-- `final_verify_status_path` 也指向最后一次本 session 内的 phase8_attempt_N.json；未跑时为 `null`
-
-#### 7.3 硬约束重申
-
-- ⛔ **禁止 append 或重写 `{task_dir}/trace.md`** —— 主 agent 产物，本 skill 全程只读；所有 debug 叙事 / verdict 都落到 `debug_trace.md` + `debug_status.json`
-- ⛔ **禁止修改 `utils/` / `CMakeLists.txt` / `setup.py` / `agents/` / `skills/`** —— 只能改 `{task_dir}/kernel/` 下文件，`{task_dir}/precision_tuning/` 下写 skill 产物
-- ⛔ **禁止删除或重写 `{task_dir}/.verify_status/latest.json`、`{task_dir}/{op_name}.json.bak`** —— 上游 artefact / 全量用例备份，只读
-- 写完 `debug_trace.md` + `debug_status.json` 后，再进入 Step 5（成功）或 Step 6（失败）的**报告输出**部分；Step 5 / 6 里的"归档当前轮 / 更新 current_best / 全量验证"等动作在写 Step 7 产物前完成即可（Step 7 是退出前的最后一步，只负责 debug_trace / debug_status 两份产物）
-
----
-
-### Step 5: 成功收尾
-
-精度通过后:
-
-**5.0 全量用例验证（若存在 `.json.bak`，则为强制步骤）**
-
-若 `{task_dir}/{op_name}.json.bak` 存在，说明当前 `{op_name}.json` 为精简用例；此时必须先恢复全量用例，再做一次最终验证：
-
-```bash
-if [ -f "{task_dir}/{op_name}.json.bak" ]; then
-    cp "{task_dir}/{op_name}.json.bak" "{task_dir}/{op_name}.json"
-    bash skills/ascendc/ascendc-translator/references/evaluate_ascendc.sh {task_name}
-fi
-```
-
-处理规则：
-- 若 `.json.bak` 不存在：跳过本步骤，直接进入 5.1
-- 若全量验证通过：继续进入 5.1
-- 若全量验证失败：**不得**宣布成功；仅允许继续修改 `{task_dir}/kernel/` 下文件，并重新执行全量验证
-- 全量验证失败后的补救次数最多 3 次（含首次全量验证）；超过次数仍失败，则转 Step 6 失败报告
-- 若做过全量验证，最终成功报告中的 `final_match_rate` / `final_max_diff` 应以全量验证结果为准，而不是精简验证结果
-
-建议额外保存全量验证结果：
-
-```json
-{task_dir}/precision_tuning/full_validation_result_attempt_{attempt}.json
-{
-  "attempt": <N>,
-  "used_full_cases": true,
-  "correctness_passed": true/false,
-  "evaluate_stdout": "<全量 evaluate_ascendc.sh 完整输出>",
-  "match_rate": "<从 stdout 提取>",
-  "max_diff": "<从 stdout 提取>"
-}
-```
-
-**5.1 归档当前轮次 + 更新 current_best（最终 PASS 时必须执行）:**
-```bash
-# 归档本轮取证报告和审计报告
-mkdir -p "{task_dir}/precision_tuning/history/attempt_{attempt}"
-cp "{task_dir}/precision_tuning/forensics_report_{attempt}.json" \
-   "{task_dir}/precision_tuning/history/attempt_{attempt}/forensics_report.json"
-cp "{task_dir}/precision_tuning/precision_audit_{attempt}.md" \
-   "{task_dir}/precision_tuning/history/attempt_{attempt}/precision_audit.md"
-
-# 更新 current_best 为最终通过的代码
-mkdir -p "{task_dir}/precision_tuning/history/current_best/code_snapshot"
-cp -r "{task_dir}/kernel/" \
-   "{task_dir}/precision_tuning/history/current_best/code_snapshot/kernel/"
-cp "{task_dir}/model_new_ascendc.py" \
-   "{task_dir}/precision_tuning/history/current_best/code_snapshot/model_new_ascendc.py"
-echo "100.0" > "{task_dir}/precision_tuning/history/current_best/match_rate.txt"
-echo "精度通过，current_best 已更新为 100.0"
-```
-
-**5.2 生成候选知识库条目 (Agent 执行):**
-
-基于 [ROOT_CAUSE] 和 [FIX_PLAN]，生成一条知识库候选条目，写入：
-`{task_dir}/precision_tuning/candidate_kb_entry.json`
-
-格式要求:
-```json
-{
-  "title": "<标准化中文标题，含英文关键词，如：LayerNorm 尾块 Padding 污染精度>",
-  "feature": "<错误特征签名，泛化表达，不要写死具体 shape 或 tile size，如：tail_spike 模式，尾块 mismatch 率显著高于主体>",
-  "reason": "<深层原因，50-200字，描述为什么会出现此问题>",
-  "fix": "<通用修复指南，50-200字，描述应该如何修复，不要包含具体行号>",
-  "type": "<FIX_PRECISION_XXX 枚举值，与 [FIX_PLAN] 中的修复类型一致>"
-}
-```
-
-注意:
-- `title` 必须含英文关键词（供 RAG 检索），格式为"中文描述 (English Keywords)"
-- `feature` 要泛化，不要写 `last_dim=37` 或 `tile_size=128` 这种具体值
-- `fix` 要通用，不要引用具体代码行号或变量名
-- `type` 必须从以下枚举中选择：FIX_PRECISION_PADDING / FIX_PRECISION_TAIL / FIX_PRECISION_REDUCTION / FIX_PRECISION_TYPECAST / FIX_PRECISION_LAYOUT / FIX_PRECISION_SYNC / FIX_PRECISION_OVERFLOW / FIX_PRECISION_LOGIC / FIX_PRECISION_OTHER
-
-**5.3 写入知识库 (Python 执行):**
-```bash
-python3 skills/ascendc/ascendc-debug/scripts/precision_knowledge.py dump \
-    --kb-path skills/ascendc/ascendc-debug/references/precision_knowledge_base.json \
-    --task-name {task_name} \
-    --op-name {op_name}
-```
-
-**5.4 保存成功代码快照:**
-```bash
-# 将最终通过代码保存到 history/success/（永久保留，不覆盖）
-mkdir -p "{task_dir}/precision_tuning/history/success/code_snapshot"
-cp -r "{task_dir}/kernel/" \
-   "{task_dir}/precision_tuning/history/success/code_snapshot/kernel/"
-cp "{task_dir}/model_new_ascendc.py" \
-   "{task_dir}/precision_tuning/history/success/code_snapshot/model_new_ascendc.py"
-echo "成功代码已保存到 history/success/code_snapshot/"
-```
-
-> **从最佳代码恢复（如需重新调优）：**
-> ```bash
-> cp -r "{task_dir}/precision_tuning/history/current_best/code_snapshot/kernel/" \
->    "{task_dir}/kernel/"
-> cp "{task_dir}/precision_tuning/history/current_best/code_snapshot/model_new_ascendc.py" \
->    "{task_dir}/model_new_ascendc.py"
-> ```
-
-**5.5 输出成功报告:**
-```
-[PRECISION_TUNING_RESULT]
-  status: SUCCESS
-  attempts: <总轮次>
-  final_match_rate: <最终 match rate，若跑过全量则取全量结果>
-  final_max_diff: <最终 max diff，若跑过全量则取全量结果>
-  root_cause_summary: <一句话总结根因>
-  fix_summary: <一句话总结修复内容>
-```
-
----
-
-### Step 6: 失败报告
-
-如果 Gate-V 返回 STOP:
-
-输出失败报告, 包含所有轮次的历史:
-```
-[PRECISION_TUNING_RESULT]
-  status: FAILED
-  attempts: <总轮次>
-  loop_stop_reason: <Gate 给出的停止原因>
-  history:
-    attempt 0: hint=<pattern>, mismatch=<ratio>, fix=<一句话>
-    attempt 1: hint=<pattern>, mismatch=<ratio>, fix=<一句话>
-    ...
-  remaining_issue: <当前仍存在的问题描述>
-  suggestion: <给人工分析的建议>
-```
-
-> **注意:** 失败时 `history/current_best/` 中保存了精度最好的代码。如需以此为基础重新调优，恢复方法：
-> ```bash
-> cp -r "{task_dir}/precision_tuning/history/current_best/code_snapshot/kernel/" \
->    "{task_dir}/kernel/"
-> cp "{task_dir}/precision_tuning/history/current_best/code_snapshot/model_new_ascendc.py" \
->    "{task_dir}/model_new_ascendc.py"
-> ```
-> 如需恢复到最初基线：
-> ```bash
-> cp -r "{task_dir}/precision_tuning/history/baseline/code_snapshot/kernel/" \
->    "{task_dir}/kernel/"
-> cp "{task_dir}/precision_tuning/history/baseline/code_snapshot/model_new_ascendc.py" \
->    "{task_dir}/model_new_ascendc.py"
-> ```
+> 完整协议见 `skills/ascendc/ascendc-debug/references/exit-protocols.md`，Gate-V 返回后必须 **Read 该文件**：
+> - **CONTINUE** → 执行「归档当前轮次」后 `attempt += 1`，回到 Step 1
+> - **PASS** → 执行 Step 5 成功收尾
+> - **STOP**（非 PASS）→ 执行 Step 6 失败报告
+> - **所有结局**退出前必须执行 Step 7，产出 `debug_trace.md` + `debug_status.json`
 
 ---
 

@@ -63,6 +63,13 @@
     "type": "FIX_PRECISION_LOGIC"
   },
   {
+    "title": "ReduceSum/ReduceMax 就地改写源 Tensor 导致后续步骤数据污染 (ReduceOverwrite)",
+    "feature": "pattern=magnitude_correlated 或 scattered; Reduce 之后引用同一 src tensor 的计算步骤出现系统性偏差; 常见于 Softmax（x - max 步骤）、LayerNorm（x - mean 步骤）、任何需要保留原始数据的归约场景",
+    "reason": "AscendC ReduceSum/ReduceMax 内部实现会就地修改 src tensor（src 与 dst 使用相同寄存器时），若后续逻辑仍引用 src 数据，读到的是已被归约改写后的值，导致计算结果系统性错误",
+    "fix": "在调用 ReduceSum/ReduceMax 之前，先用 Adds(backup, src, 0.0f, count) 将 src 完整复制备份到独立 TBuf；后续所有引用原始 src 数据的步骤改为引用 backup，而非 src",
+    "type": "FIX_PRECISION_REDUCTION"
+  },
+  {
     "title": "[CHECKLIST] Reduction 类算子精度检查清单",
     "feature": "op_type=reduction, 适用于 ReduceSum/ReduceMax/ReduceMean/Softmax/LayerNorm 等",
     "reason": "归约类算子最常见的精度问题来自: float16 累加损失、count 对齐、padding identity 值、tiling 边界处理。",

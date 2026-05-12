@@ -134,6 +134,7 @@ class _LegacyPrecisionChecker:
             "has_root_cause": False,
             "has_fix_plan": False,
             "has_target_files": False,
+            "has_experiment_results": False,
             "has_direction_assessment": True,
         }
         content = None
@@ -147,7 +148,8 @@ class _LegacyPrecisionChecker:
                              ("KERNEL_STEP_TRACE", "has_kernel_step_trace"),
                              ("ROOT_CAUSE", "has_root_cause"),
                              ("FIX_PLAN", "has_fix_plan"),
-                             ("TARGET_FILES", "has_target_files")]:
+                             ("TARGET_FILES", "has_target_files"),
+                             ("EXPERIMENT_RESULTS", "has_experiment_results")]:
                 checks[key] = f"[{tag}]" in content
             checks["has_direction_assessment"] = (
                 self.attempt == 0 or "[DIRECTION_ASSESSMENT]" in content
@@ -717,6 +719,8 @@ class _LegacyPrecisionChecker:
             ("fix_plan",                 "FIX_PLAN"),
             ("target_files",             "TARGET_FILES"),
             ("direction_assessment",     "DIRECTION_ASSESSMENT"),
+            ("experiment_results",       "EXPERIMENT_RESULTS"),
+            ("instrumentation_findings", "INSTRUMENTATION_FINDINGS"),
         ]
 
         sections_index = {}
