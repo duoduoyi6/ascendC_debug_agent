@@ -7,7 +7,20 @@ skills/ascendc/ascendc-debug/
 ├── STRUCTURE.md                       # 本文件：目录结构示意图
 │
 ├── references/                        # 静态参考资料
-│   ├── precision_knowledge_base.json  # 精度问题知识库（问题模式 + 算子 CHECKLIST）
+│   ├── precision_knowledge_base.json  # 精度问题知识库（23 条目 + 算子 CHECKLIST）
+│   ├── branch-build.md                # Step 1-B 编译错误分析（SKILL.md 外置）
+│   ├── branch-import.md               # Step 1-I import 错误分析（SKILL.md 外置）
+│   ├── branch-runtime.md              # Step 1-R 运行时错误分析（SKILL.md 外置）
+│   ├── branch-timeout.md              # Step 1-T 超时分析（SKILL.md 外置）
+│   ├── exit-protocols.md              # 归档 / Step 5/6/7 退出产物协议（SKILL.md 外置）
+│   ├── phase-a-checklist.md           # Phase A/C 格式模板（SKILL.md 外置）
+│   ├── run_precision_debug.sh         # 精度调试脚本运行入口
+│   ├── bug_examples/                  # 精度缺陷诊断案例库（5 个）
+│   │   ├── fp16-no-upcast.md
+│   │   ├── gm-offset-error.md
+│   │   ├── tail-tile-misalign.md
+│   │   ├── multicore-tiling-overlap.md
+│   │   └── async-sync-missing.md
 │   │
 │   └── decomposition_examples/        # 算子计算分解示例（Sub-step 2.2 参考）
 │       ├── README.md                  # 示例格式说明与模式分类索引
@@ -47,7 +60,7 @@ skills/ascendc/ascendc-debug/
 
 | 分支 | 必填 audit section |
 |---|---|
-| `branch_precision.py` | `[FORENSICS_SUMMARY]` + `[REFERENCE_IMPL_SPEC]` + `[ROOT_CAUSE]` + `[FIX_PLAN]`（兼容旧精度路径 9 section 方案） |
+| `branch_precision.py` | `[FORENSICS_SUMMARY]` + `[COMPUTATION_DECOMPOSITION]` + `[REFERENCE_IMPL_SPEC]` + `[KERNEL_STEP_TRACE]` + `[ROOT_CAUSE]` + `[FIX_PLAN]` + `[TARGET_FILES]` + `[EXPERIMENT_RESULTS]`（8 个必填；`[INSTRUMENTATION_FINDINGS]` 选填）|
 | `branch_build.py` | `[COMPILE_ERROR_CITATION]` + `[ROOT_CAUSE]` + `[FIX_PLAN]` + `[FIX_TYPE]` ∈ whitelist |
 | `branch_import.py` | `[IMPORT_TRACEBACK_CITATION]` + `[ROOT_CAUSE]` + `[FIX_PLAN]` + `[FIX_TYPE]` ∈ kernel-side whitelist（显式拒绝 env-side） |
 | `branch_runtime.py` | `[RUNTIME_ERROR_CITATION]` + `[ROOT_CAUSE]` + `[FIX_PLAN]` |
@@ -60,7 +73,7 @@ skills/ascendc/ascendc-debug/
 | Subagent | 文件位置 | 审计策略 | 特点 |
 |----------|----------|----------|------|
 | **发现式** | `agents/ascendc-debug-agent-discovery.md` | 发现式审计 | 直接运用 AscendC 领域知识推理根因，不强制预读参考示例，依赖 Agent 自身知识储备快速诊断 |
-| **构建式** | `agents/ascendc-debug-agent.md` | 构建式审计 | 严格遵循 Phase A→B→C：先建规范（强制读取 lowering 示例），再看代码，最后结构化对照 |
+| **构建式** | `agents/ascendc-debug-agent-constructive.md` | 构建式审计 | 严格遵循 Phase A→B→C：先建规范（强制读取 lowering 示例），再看代码，最后结构化对照 |
 
 ### 共用组件
 
@@ -75,7 +88,10 @@ skills/ascendc/ascendc-debug/
 | `gates/branch_*.py` | 分支层：precision / build / import / runtime / timeout 各自的 F/A/V 语义 |
 | `precision_knowledge.py` | 知识库 RAG 检索与管理 |
 | `anticheat.py` | 反作弊检测：snapshot / verify / restore，覆盖 Python wrapper 改动与 C++ kernel 偷调 ATen 的场景 |
+| `debug_precision_template.py` | 精度调试分析脚本模板（误差分布 + 固定输入实验 + shape 二分） |
+| `run_precision_debug.sh` | 调试脚本运行入口（本地 / 远程 Docker） |
 | `precision_knowledge_base.json` | 精度问题模式库 + 算子 CHECKLIST |
+| `bug_examples/` | 精度缺陷诊断案例库（5 个典型根因 + 实验定位法） |
 | `decomposition_examples/` | 算子计算分解参考 |
 
 ### 策略差异
@@ -102,6 +118,12 @@ skills/ascendc/ascendc-debug/
 | `anticheat.py` | Step 0.1 / 每轮编译前 / 验收 | 检测 Python wrapper 被偷改、C++ kernel 偷调 ATen 等退化路径 | 双 Subagent |
 | `precision_knowledge_base.json` | Sub-step 2.4 | 已知精度问题模式 + 算子 CHECKLIST | 双 Subagent |
 | `decomposition_examples/*.md` | Sub-step 2.2 | 按算子类型提供计算分解示例 | 双 Subagent（构建式强制、发现式可选） |
+| `debug_precision_template.py` | Sub-step 2.5 | 调试脚本模板（误差分析 + 实验 C/D） | 双 Subagent |
+| `run_precision_debug.sh` | Sub-step 2.5 | 调试脚本运行入口（本地 / 远程 Docker） | 双 Subagent |
+| `bug_examples/*.md` | Sub-step 2.5 / 2.3 | 精度缺陷诊断案例库（5 个典型根因 + 实验定位） | 双 Subagent |
+| `exit-protocols.md` | 归档 / Step 5/6/7 | 退出产物协议（debug_trace + debug_status 模板） | 双 Subagent |
+| `branch-*.md` | Step 1-B/I/R/T | 非精度分支分析步骤（SKILL.md 外置） | 双 Subagent |
+| `phase-a-checklist.md` | Sub-step 2.3 | Phase A/C 格式模板（SKILL.md 外置） | 双 Subagent |
 
 ## 中间文件完整说明
 

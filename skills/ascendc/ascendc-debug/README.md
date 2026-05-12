@@ -14,7 +14,7 @@
 AscendOpGenAgent/
 ├── agents/
 │   ├── ascendc-debug-agent-discovery.md      # 发现式 Subagent（直接从取证 / 日志数据推理）
-│   └── ascendc-debug-agent.md                # 构建式 Subagent（Phase A→B→C 规范化审计）
+│   └── ascendc-debug-agent-constructive.md   # 构建式 Subagent（Phase A→B→C 规范化审计）
 └── skills/ascendc/ascendc-debug/
     ├── SKILL.md                           # Skill 执行手册（Step 0 ~ Step 7，含 Step 1-P/B/I/R/T）
     ├── README.md                          # 本文件：设计文档
@@ -34,8 +34,21 @@ AscendOpGenAgent/
     │       ├── branch_runtime.py          # 1-R 分支: runtime crash Gate
     │       └── branch_timeout.py          # 1-T 分支: 死锁 / 死循环 Gate
     └── references/                        # 共用参考资料
-        ├── precision_knowledge_base.json  # 精度问题知识库
-        └── decomposition_examples/        # 算子计算分解示例
+        ├── precision_knowledge_base.json  # 精度问题知识库（23 条目 + 算子 CHECKLIST）
+        ├── branch-build.md                # Step 1-B 编译错误分析（build_failed 分支，SKILL.md 外置）
+        ├── branch-import.md               # Step 1-I import 错误分析（import_kernel_side 分支，SKILL.md 外置）
+        ├── branch-runtime.md              # Step 1-R 运行时错误分析（runtime_error 分支，SKILL.md 外置）
+        ├── branch-timeout.md              # Step 1-T 超时分析（timeout 分支，SKILL.md 外置）
+        ├── exit-protocols.md              # 归档 / Step 5 成功 / Step 6 失败 / Step 7 退出产物协议（SKILL.md 外置）
+        ├── phase-a-checklist.md           # Phase A [REFERENCE_IMPL_SPEC] + Phase C [KERNEL_STEP_TRACE] 格式模板
+        ├── run_precision_debug.sh         # 精度调试脚本运行入口（本地 / 远程 Docker）
+        ├── bug_examples/                  # 精度缺陷诊断案例库（5 个）
+        │   ├── fp16-no-upcast.md          # FP16→FP32 缺失升精度
+        │   ├── gm-offset-error.md         # GM 偏移量公式 sizeof(T) 多余
+        │   ├── tail-tile-misalign.md      # 尾 tile 未使用 curTileLength
+        │   ├── multicore-tiling-overlap.md # 多核 tiling 区间重叠
+        │   └── async-sync-missing.md      # 核内队列同步缺失
+        └── decomposition_examples/        # 算子计算分解示例（Sub-step 2.2 参考）
             ├── README.md                  # 分解示例索引
             ├── softmax.md                 # Softmax: 单行归约 (5 步)
             ├── layer_norm.md              # LayerNorm: 单行归约 3-pass (7 步)
@@ -74,7 +87,7 @@ AscendOpGenAgent/
 - 快速从 diff 模式锁定嫌疑区域
 - 适用场景：Agent 对 AscendC API 规范已有充分了解
 
-### 构建式 Subagent (`ascendc-debug-agent`)
+### 构建式 Subagent (`ascendc-debug-agent-constructive`)
 
 **审计策略**: 严格遵循 Phase A→B→C 的构建式流程。
 
@@ -92,7 +105,10 @@ AscendOpGenAgent/
 | `precision_gate.py` | 脚本 | 链式 Gate 验证 + 循环控制 |
 | `precision_knowledge.py` | 脚本 | 知识库管理 |
 | `anticheat.py` | 脚本 | 反作弊: 禁改 wrapper + 扫 C++ 禁调 `at::<op>` |
-| `precision_knowledge_base.json` | 数据 | 精度问题模式库 |
+| `debug_precision_template.py` | 模板 | 精度调试分析脚本模板（误差分布 + 固定输入 + shape 二分） |
+| `run_precision_debug.sh` | 脚本 | 调试脚本运行入口（本地 / 远程 Docker） |
+| `precision_knowledge_base.json` | 数据 | 精度问题模式库（23 条目） |
+| `bug_examples/` | 文档 | 精度缺陷诊断案例库（5 个典型根因 + 实验定位法） |
 | `decomposition_examples/` | 文档 | 算子计算分解示例 |
 
 ### 策略对比
@@ -157,8 +173,9 @@ AscendOpGenAgent/
 ```
 Gate-F (forensics) → 无前置依赖，检查 attempt 号匹配
 Gate-A (audit)     → 前置: forensics 存在且 attempt 匹配
-                     检查 7 个必填 section: FORENSICS_SUMMARY, COMPUTATION_DECOMPOSITION,
-                     REFERENCE_IMPL_SPEC, KERNEL_STEP_TRACE, ROOT_CAUSE, FIX_PLAN, TARGET_FILES
+                     检查 8 个必填 section: FORENSICS_SUMMARY, COMPUTATION_DECOMPOSITION,
+                     REFERENCE_IMPL_SPEC, KERNEL_STEP_TRACE, ROOT_CAUSE, FIX_PLAN, TARGET_FILES,
+                     EXPERIMENT_RESULTS
                      attempt > 0 时额外检查: DIRECTION_ASSESSMENT（严格二值"是/否"）
 Gate-X (fix)       → 前置: audit 存在
 Gate-V (validate)  → 前置: 代码文件存在

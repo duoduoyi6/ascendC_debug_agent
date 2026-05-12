@@ -1062,6 +1062,8 @@ class PrecisionForensics:
             diff = analyzer.analyze(ref_np, cand_np)
             diff["basic_stats"]["int8_special_tolerance"] = is_int8
             diff["case_idx"] = case_idx
+            first_inp = self._first_tensor_in(case["inputs"])
+            diff["input_dtype"] = str(first_inp.dtype) if first_inp is not None else "unknown"
             diff["_int8"] = is_int8
             diff["_nan_inf_src"] = {"ref": nan_inf_ref, "cand": nan_inf_cand}
             per_case_diffs.append(diff)
@@ -1111,6 +1113,18 @@ class PrecisionForensics:
             len({d["pattern_hint"]["primary_hint"] for d in per_case_diffs}) == 1
         )
 
+        # Per-dtype best failing case, for grouped experiment (when all_cases_same_pattern=false)
+        dtype_best: dict = {}  # dtype_str → (mismatch_ratio, case_idx)
+        for d in per_case_diffs:
+            if d["basic_stats"]["num_mismatched"] == 0:
+                continue
+            dtype = d.get("input_dtype", "unknown")
+            ratio = d["basic_stats"]["mismatch_ratio"]
+            prev_ratio = dtype_best.get(dtype, (0.0, -1))[0]
+            if ratio > prev_ratio:
+                dtype_best[dtype] = (ratio, d["case_idx"])
+        dtype_representative_cases = {dt: idx for dt, (_, idx) in dtype_best.items()}
+
         return {
             "num_cases": len(per_case_diffs),
             "mismatch_ratio_min": min(ratios),
@@ -1122,6 +1136,7 @@ class PrecisionForensics:
             "fail_case_count": n_fail,
             "all_cases_same_pattern": all_same_pattern,
             "shape_conditional": shape_conditional,
+            "dtype_representative_cases": dtype_representative_cases,
         }
 
     def _init_nan_inf_agg(self) -> dict:
