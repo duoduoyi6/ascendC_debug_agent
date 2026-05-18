@@ -12,7 +12,6 @@ subagent:
     每类失败都涉及取证→深度分析→修复→验证的多步循环,
     需要 Agent 结合数值/日志证据和代码理解做深度推理。
     session 内按 verify_status.failure_type 锁定一条分支, 不跨分支跳转。
-  timeout: 5400
 ---
 
 ## What I do
@@ -404,8 +403,59 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_knowledge.py search \
 **Phase A: 构建参考实现规范 (强制执行, 不可跳过)**
 
 ⚠️ **在读取任何 Kernel 代码之前, 必须先完成此 Phase, 建立正确实现的参考规范。** 参考规范是后续 Phase C 结构化对照的基准。
+> 「不可跳过」的不变量是：`[REFERENCE_IMPL_SPEC]` 必须写入本轮 `precision_audit_{attempt}.md`（Gate-A 强制），无论由全量读取还是跨轮复用产出，约束等价。
 
-**Phase A 读取**:
+---
+
+**【Phase A 跨轮复用检查 — attempt > 0 时先执行；attempt == 0 直接跳到"Phase A 读取"】**
+
+> `[REFERENCE_IMPL_SPEC]` 完全来自参考文档（dsl2Ascendc、archive case），不依赖被调试的 kernel 代码。每轮 kernel 修改后规范内容不变，可安全复用。
+
+**步骤 A-0：查询 round_summary_0 的 spec 索引路径**
+```bash
+python3 -c "
+import json, os, sys
+p = '{task_dir}/precision_tuning/round_summary_0.json'
+if not os.path.exists(p):
+    print('NO_SUMMARY'); sys.exit(0)
+d = json.load(open(p))
+v = d.get('index', {}).get('sections', {}).get('reference_impl_spec')
+print(v if v else 'NO_SPEC')
+"
+```
+
+根据输出选择路径：
+
+| 输出值 | 含义 | 处理方式 |
+|--------|------|---------|
+| 有效相对路径（不以 `NO_` 开头） | 首轮 spec 已由 Gate-A 索引写入 | → 执行**复用步骤** |
+| `NO_SUMMARY` | round_summary_0.json 不存在（首轮 Gate-A 未通过，spec 从未生成） | → **回退**，执行完整"Phase A 读取" |
+| `NO_SPEC` | index.sections.reference_impl_spec 为 null（section 缺失） | → **回退**，执行完整"Phase A 读取" |
+
+**复用步骤（输出为有效路径时）：**
+```bash
+[ -f "{task_dir}/<上步输出路径>" ] && echo "EXISTS" || echo "FILE_MISSING"
+```
+
+| 输出 | 处理方式 |
+|------|---------|
+| `EXISTS` | ① Read `{task_dir}/<路径>` → ② 将内容**原样**写入本轮 `precision_audit_{attempt}.md` 的 `[REFERENCE_IMPL_SPEC]` section → ③ Read `skills/ascendc/ascendc-debug/references/phase-a-checklist.md`（取 `[KERNEL_STEP_TRACE]` 格式模板，Phase B 使用）→ **直接跳到 Phase B** |
+| `FILE_MISSING` | spec 文件已丢失 → **回退**，执行完整"Phase A 读取" |
+
+**Phase C 执行中途按需查阅（复用路径适用；无需重走完整 Phase A）：**
+
+当 Phase C 对照中遇到以下情况，只需按需 Read 对应文档的相关段落即可，**不必重新执行完整 Phase A**：
+
+| 触发情形 | 应 Read 的文档 |
+|----------|--------------|
+| spec 未覆盖的 API（如 `Vmax`、`Sub`、负无穷常量写法） | `skills/ascendc/ascendc-translator/references/TileLang-AscendC-API-Mapping.md` |
+| 对齐阈值不明确（32-byte 触发条件细节） | `skills/ascendc/ascendc-translator/references/dsl2Ascendc_compute_vector.md` |
+| 出现 spec 未列举的禁用模式 | `skills/ascendc/ascendc-translator/references/dsl2Ascendc.md` |
+| archive case 与当前 op_type 关联性存疑 | `archive_tasks/<最近似案例>/kernel/`（路由表见下方"Phase A 读取"第 1 条） |
+
+---
+
+**Phase A 读取**（attempt == 0，或上方复用检查回退时执行）:
 
 1. 根据 `L8_operator.op_type` 从 `archive_tasks/` 路由，读取对应案例的 `kernel/` 目录（仅含有完整 kernel/ 的案例）：
    - pooling → `archive_tasks/avg_pool3_d/kernel/`

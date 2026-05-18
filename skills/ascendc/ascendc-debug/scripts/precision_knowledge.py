@@ -47,7 +47,7 @@ from datetime import datetime
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = _SCRIPT_DIR.parent.parent.parent
+REPO_ROOT = _SCRIPT_DIR.parent.parent.parent.parent
 
 
 VALID_TYPES = [
@@ -277,13 +277,12 @@ def search_knowledge_base(kb_path: str, op_type: str | None = None,
     scored.sort(key=lambda x: x["score"], reverse=True)
     top_entries = scored[:top_k]
 
-    # Fallback: 无任何命中 → 全量 load
+    # Fallback: 无任何命中 → 返回前 top_k 条
     fallback = len(top_entries) == 0 and len(matched_checklists) == 0
     if fallback:
-        print(f"[KB-SEARCH] ⚠️ 无匹配条目, fallback 到全量加载", file=sys.stderr)
-        # 全量返回所有条目
-        top_entries = [{"score": 0, "entry": e} for e in normal_entries]
-        matched_checklists = checklists
+        print(f"[KB-SEARCH] ⚠️ 无匹配条目, fallback 到前 {top_k} 条", file=sys.stderr)
+        top_entries = [{"score": 0, "entry": e} for e in normal_entries[:top_k]]
+        matched_checklists = checklists[:top_k]
 
     result = {
         "query": {
@@ -357,7 +356,7 @@ def dump_success_knowledge(kb_path: str, task_dir: str, op_name: str) -> dict | 
 
     读取:
       - {task_dir}/precision_tuning/candidate_kb_entry.json (Agent 生成的候选条目)
-      - {task_dir}/precision_tuning/forensics_report.json (用于补充元数据)
+      - {task_dir}/precision_tuning/forensics_report_{attempt}.json (用于推断已用轮次)
 
     逻辑:
       1. 读取候选条目 JSON，验证五字段完整性
@@ -393,18 +392,21 @@ def dump_success_knowledge(kb_path: str, task_dir: str, op_name: str) -> dict | 
         print(f"[KB] ⚠️ type 值非法: {candidate['type']}，应为以下之一: {VALID_TYPES}", file=sys.stderr)
         return None
 
-    # 4. 补充元数据 (从取证报告读取)
-    forensics_path = os.path.join(tuning_dir, "forensics_report.json")
+    # 4. 补充元数据 (从取证报告推断已用轮次)
+    # 文件命名约定: forensics_report_{attempt}.json (attempt 从 1 起)
+    import glob as _glob
+    forensics_files = _glob.glob(os.path.join(tuning_dir, "forensics_report_*.json"))
     num_attempts = 1
-    if os.path.exists(forensics_path):
+    if forensics_files:
         try:
-            with open(forensics_path) as f:
-                forensics = json.load(f)
-            num_attempts = forensics.get("attempt", 0) + 1
-            history_dir = os.path.join(tuning_dir, "history")
-            if os.path.exists(history_dir):
-                num_attempts = max(num_attempts, len(os.listdir(history_dir)) + 1)
-        except (json.JSONDecodeError, KeyError, OSError):
+            attempt_nums = []
+            for fp in forensics_files:
+                stem = os.path.basename(fp)[len("forensics_report_"):-len(".json")]
+                if stem.isdigit():
+                    attempt_nums.append(int(stem))
+            if attempt_nums:
+                num_attempts = max(attempt_nums)
+        except (ValueError, OSError):
             pass
 
     entry = dict(candidate)  # 复制五字段

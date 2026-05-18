@@ -75,6 +75,28 @@ def _load_failure_type(task_dir: Path):
         return None
 
 
+def _session_branch_path(task_dir: Path) -> Path:
+    return task_dir / ".verify_status" / "session_branch.json"
+
+
+def _record_session_branch(task_dir: Path, failure_type: str) -> None:
+    """Gate-F 时将 failure_type 写入 session_branch.json 以锁定本次 session 的分支。"""
+    path = _session_branch_path(task_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"session_failure_type": failure_type}, ensure_ascii=False))
+
+
+def _load_session_branch(task_dir: Path):
+    """读取 session_branch.json；不存在返回 None。"""
+    path = _session_branch_path(task_dir)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text()).get("session_failure_type")
+    except Exception:
+        return None
+
+
 def _dispatch(step: str, task_dir: Path, op_name: str, attempt: int) -> dict:
     """主调度：通用层 → 分支层。返回单个 dict (gate 输出)。"""
     # 1. 通用层
@@ -83,7 +105,38 @@ def _dispatch(step: str, task_dir: Path, op_name: str, attempt: int) -> dict:
         return common_outcome.to_gate_output()
 
     # 2. 分支派发
-    failure_type = _load_failure_type(task_dir)
+    # Gate-V 使用 session 锁定的 failure_type，防止跨分支漂移
+    current_failure_type = _load_failure_type(task_dir)
+    if step == "forensics":
+        # Gate-F: 锁定本次 session 的 failure_type
+        _record_session_branch(task_dir, current_failure_type or "precision_failed")
+        failure_type = current_failure_type
+    elif step == "validate":
+        # Gate-V: 检测 cross-branch 转换
+        session_failure_type = _load_session_branch(task_dir)
+        if (session_failure_type is not None
+                and session_failure_type != current_failure_type
+                and current_failure_type != "success"):
+            # failure_type 发生变化且不是 success（success 由各分支 run_gate_v 处理），
+            # 说明本 session 引入了新的失败类型，需要开启新 session
+            return {
+                "gate": "GATE-CROSS-BRANCH-STOP",
+                "passed": False,
+                "loop_signal": "STOP",
+                "loop_reason": (
+                    f"failure_type 从 '{session_failure_type}' 变为 '{current_failure_type}'，"
+                    "原始问题已修复，请开启新 session 处理新错误类型"
+                ),
+                "checks": {
+                    "session_branch_consistent": False,
+                    "session_failure_type": session_failure_type,
+                    "current_failure_type": current_failure_type,
+                },
+            }
+        failure_type = session_failure_type or current_failure_type
+    else:
+        failure_type = current_failure_type
+
     branch = _select_branch(failure_type, op_name)
 
     # step → branch method 映射

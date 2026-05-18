@@ -210,8 +210,9 @@ class _LegacyPrecisionChecker:
             except (json.JSONDecodeError, KeyError):
                 pass
 
+        forensics_data = self._load_forensics()
         loop_signal, loop_reason, stop_reason_code = self._compute_loop_signal(
-            correctness_passed, match_rate
+            correctness_passed, match_rate, forensics_data
         )
 
         gate_result = self._result("GATE-V", checks)
@@ -221,7 +222,7 @@ class _LegacyPrecisionChecker:
         gate_result["attempt"] = self.attempt
         gate_result["max_attempts"] = MAX_ATTEMPTS
 
-        self._write_round_summary(stop_reason_code)
+        self._write_round_summary(stop_reason_code, forensics_data)
         self._write_tuning_directions(stop_reason_code)
 
         return gate_result
@@ -270,7 +271,7 @@ class _LegacyPrecisionChecker:
     # 循环控制
     # ================================================================
 
-    def _compute_loop_signal(self, passed: bool, match_rate: float = None) -> tuple:
+    def _compute_loop_signal(self, passed: bool, match_rate: float = None, forensics_data: dict = None) -> tuple:
         if passed:
             return "PASS", "精度验证通过", "precision_passed"
 
@@ -285,11 +286,9 @@ class _LegacyPrecisionChecker:
         if self.attempt + 1 >= MAX_ATTEMPTS:
             return "STOP", f"已达最大轮次 ({MAX_ATTEMPTS})", "max_attempts_reached"
 
-        forensics_path = os.path.join(self.tuning_dir, f"forensics_report_{self.attempt}.json")
-        if os.path.exists(forensics_path):
+        fr = forensics_data
+        if fr is not None:
             try:
-                with open(forensics_path) as f:
-                    fr = json.load(f)
                 trend = fr.get("history_trend")
                 if trend:
                     trend_list = trend.get("trend", [])
@@ -345,7 +344,7 @@ class _LegacyPrecisionChecker:
             return None
         return round((curr_match - prev_match) / remaining, 4)
 
-    def _write_round_summary(self, stop_reason_code) -> None:
+    def _write_round_summary(self, stop_reason_code, forensics_data: dict = None) -> None:
         summary_path = os.path.join(self.tuning_dir, f"round_summary_{self.attempt}.json")
 
         if stop_reason_code is None:
@@ -380,7 +379,7 @@ class _LegacyPrecisionChecker:
 
         if match_rate is not None:
             if self.attempt == 0:
-                baseline_match_rate = self._get_baseline_match_rate()
+                baseline_match_rate = self._get_baseline_match_rate(forensics_data)
                 if baseline_match_rate is not None:
                     baseline_mismatch = 1 - baseline_match_rate / 100
                     curr_mismatch = 1 - match_rate / 100
@@ -408,15 +407,10 @@ class _LegacyPrecisionChecker:
                     except (json.JSONDecodeError, KeyError, OSError, ValueError):
                         pass
 
-        forensics_path = os.path.join(self.tuning_dir, f"forensics_report_{self.attempt}.json")
-        if os.path.exists(forensics_path):
-            try:
-                with open(forensics_path) as f:
-                    fr = json.load(f)
-                forensics_hint = fr.get("primary_hint")
-                op_type = fr.get("op_type") or fr.get("L8_operator", {}).get("op_type")
-            except (json.JSONDecodeError, KeyError, OSError):
-                pass
+        fr = forensics_data
+        if fr is not None:
+            forensics_hint = fr.get("primary_hint")
+            op_type = fr.get("op_type") or fr.get("L8_operator", {}).get("op_type")
 
         compile_log_abs = os.path.join(
             self.tuning_dir, f"compilation_log_{self.attempt}.json"
@@ -527,7 +521,7 @@ class _LegacyPrecisionChecker:
 
         terminal_codes = {
             "max_attempts_reached", "stagnant_same_direction",
-            "stagnant_new_direction", "harmful_regression", "prerequisite_failure",
+            "harmful_regression", "prerequisite_failure",
             "nearly_success",
         }
         if stop_reason_code == "precision_passed":
@@ -782,7 +776,18 @@ class _LegacyPrecisionChecker:
     # 工具
     # ================================================================
 
-    def _get_baseline_match_rate(self):
+    def _load_forensics(self) -> dict:
+        """读取当前 attempt 的 forensics_report；失败返回 None。"""
+        path = os.path.join(self.tuning_dir, f"forensics_report_{self.attempt}.json")
+        if os.path.exists(path):
+            try:
+                with open(path) as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, OSError):
+                pass
+        return None
+
+    def _get_baseline_match_rate(self, forensics_data: dict = None):
         baseline_path = os.path.join(self.tuning_dir, "baseline_state.json")
         if os.path.exists(baseline_path):
             try:
@@ -794,12 +799,9 @@ class _LegacyPrecisionChecker:
             except (json.JSONDecodeError, OSError, ValueError):
                 pass
 
-        forensics_path = os.path.join(self.tuning_dir, f"forensics_report_{self.attempt}.json")
-        if os.path.exists(forensics_path):
+        fr = forensics_data if forensics_data is not None else self._load_forensics()
+        if fr is not None:
             try:
-                with open(forensics_path) as f:
-                    fr = json.load(f)
-
                 history_trend = fr.get("history_trend")
                 if history_trend:
                     trend_list = history_trend.get("trend", [])

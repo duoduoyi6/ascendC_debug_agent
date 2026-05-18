@@ -88,7 +88,7 @@ cp "{task_dir}/model_new_ascendc.py" \
 ### Attempt 1 ... N（同上）
 
 ## 3. 最终 Verdict（强制）
-- session_outcome: success / failed / stopped_by_gate / stopped_by_loop_limit / progressed_to_new_failure_type / timeout / skipped_env_issue / skipped_unsupported_type
+- session_outcome: success / failed / stopped_by_gate / stopped_by_loop_limit / progressed_to_new_failure_type / timeout / skipped_env_issue / skipped_unsupported_type / crashed
 - 退出时 verify_status 快照
 - 若 success: 确认全量 `.json.bak` 恢复后 verify 通过
 - 若 failed / stopped_*: 明确原因
@@ -126,7 +126,7 @@ cp "{task_dir}/model_new_ascendc.py" \
 ```json
 {
   "schema_version": 1,
-  "session_outcome": "success | failed | stopped_by_gate | stopped_by_loop_limit | progressed_to_new_failure_type | timeout | skipped_env_issue | skipped_unsupported_type",
+  "session_outcome": "success | failed | stopped_by_gate | stopped_by_loop_limit | progressed_to_new_failure_type | timeout | skipped_env_issue | skipped_unsupported_type | crashed",
   "session_branch": "1-P | 1-B | 1-I | 1-R | 1-T",
   "started_at": "<ISO>",
   "ended_at": "<ISO>",
@@ -140,7 +140,7 @@ cp "{task_dir}/model_new_ascendc.py" \
 
 **字段约束**：
 - `schema_version = 1`（本版本固定）
-- `session_outcome` 必须是上列 8 种之一；其他值视为未知结局，下游消费者应视同 `crashed`
+- `session_outcome` 必须是上列 9 种之一；其他值视为未知结局，下游消费者应视同 `crashed`
 - `session_branch` 必须与 Step 0.3 锁定的分支一致
 - `started_at` / `ended_at` 用 ISO 8601（带 UTC 时区）
 - `final_failure_type` 从**最后一次**本 session 内触发的 `utils/verification_ascendc.py` + `utils/classify_verify_result.py` 产出读取；若一次都没跑（例如 `skipped_*`），与 `entry_failure_type` 一致

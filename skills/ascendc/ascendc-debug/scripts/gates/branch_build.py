@@ -91,6 +91,7 @@ class BuildBranch:
                 # compile 阶段已推进到 execute/verify，failure_type 已变化 → 跨分支进展
                 # SKILL.md §跨分支跳转禁止：本 session 结束，标 progressed_to_new_failure_type
                 loop_signal = "STOP"
+                checks["stop_reason_code"] = "progressed_to_new_failure_type"
             else:
                 loop_signal = "STOP" if attempt >= MAX_ATTEMPTS - 1 else "CONTINUE"
         ok = loop_signal in ("PASS", "CONTINUE")

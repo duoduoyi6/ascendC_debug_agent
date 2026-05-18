@@ -765,8 +765,7 @@ class OutputFlattener:
         # --- type mismatch 顶层优先判定 ---
         if type(ref) is not type(cand):
             # 除了 list/tuple 互通这种 Python 内置差异，其他都视作 type_mismatch
-            if not (isinstance(ref, (list, tuple)) and isinstance(cand, (list, tuple))
-                    and type(ref) is type(cand)):
+            if not (isinstance(ref, (list, tuple)) and isinstance(cand, (list, tuple))):
                 out[path] = {
                     "ref": ref, "cand": cand, "kind": "none", "shape": None,
                     "dtype": None, "status": "type_mismatch",
@@ -1242,6 +1241,7 @@ class PrecisionForensics:
                 "pass_case_count": 0, "fail_case_count": num_cases,
                 "all_cases_same_pattern": True,
                 "shape_conditional": False,
+                "dtype_representative_cases": {},
             },
         }
 
