@@ -23,7 +23,7 @@ AscendOpGenAgent/
     │   ├── precision_forensics.py         # 数值取证 (L0-L4 + L6 + L8 + available_files)
     │   ├── precision_gate.py              # Gate 入口路由器（派发到 gates/ 分支层）
     │   ├── verify_status.py                 # verify_status.json loader / validator
-    │   ├── precision_knowledge.py         # 知识库管理: load / search / dump
+    │   ├── precision_knowledge.py         # 知识库管理: load / search / check / dump
     │   ├── anticheat.py                   # 反作弊: wrapper hash + AST + C++ 源码扫描
     │   └── gates/                         # 2 层 Gate 包：通用层 + 分支层
     │       ├── __init__.py

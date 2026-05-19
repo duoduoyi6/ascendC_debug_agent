@@ -5,7 +5,8 @@ precision_knowledge.py — 精度问题知识库管理
 职责:
   1. load   — 全量加载知识库 (fallback 用)
   2. search — 结构化 RAG 检索: 按 op_type + pattern + position 评分排序, 返回 top-K + CHECKLIST
-  3. dump   — 精度通过后, 将 Agent 生成的候选条目追加到知识库 (仅成功时调用)
+  3. check  — dump 前检查候选条目与知识库的相似度，辅助 Agent 决策 new/merge/abandon
+  4. dump   — 精度通过后，将 Agent 生成的候选条目写入知识库（支持 new / merge / abandon 三种操作）
 
 知识库格式: 扁平五字段 JSON, 与现有 knowledge_base.json 结构对齐, RAG-ready。
 每条记录:
@@ -35,13 +36,17 @@ type 枚举 (精度专项):
     # 结构化 RAG 检索 (推荐, stdout 输出 JSON)
     python3 precision_knowledge.py search --kb-path <path> --op-type <type> --pattern <hint> [--position <pos>] [--top-k 3]
 
-    # 成功后写入知识库
-    python3 precision_knowledge.py dump --kb-path <path> --output-path <path> --op-name <name>
+    # dump 前检查候选条目与知识库的相似度 (stdout 输出 JSON)
+    python3 precision_knowledge.py check --kb-path <path> --candidate-path <path> [--top-k 3] [--threshold 0.10]
+
+    # 写入知识库 (精度通过后)
+    python3 precision_knowledge.py dump --kb-path <path> --task-name <name> --op-name <name> [--action new|merge|abandon] [--merge-target-title "<title>"]
 """
 
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -63,6 +68,43 @@ VALID_TYPES = [
 ]
 
 REQUIRED_FIELDS = ["title", "feature", "reason", "fix", "type"]
+
+
+# ============================================================
+# Tokenize / Similarity helpers (用于 check 子命令)
+# ============================================================
+
+def _tokenize(text: str) -> set:
+    """
+    提取混合中英文 title/feature 文本中的 token 集合。
+    - 英文: 按非字母边界切分，snake_case / camelCase 进一步拆分，min 长度 2
+    - 中文: 每个汉字单独作为 token
+    """
+    tokens = set()
+    # 中文字符逐字
+    for ch in re.findall(r'[一-鿿]', text):
+        tokens.add(ch)
+    # 英文词段
+    for word in re.findall(r'[a-zA-Z][a-zA-Z0-9_]*', text):
+        w = word.lower()
+        if len(w) >= 2:
+            tokens.add(w)
+        # snake_case 拆分
+        for part in w.split('_'):
+            if len(part) >= 2:
+                tokens.add(part)
+        # camelCase 拆分 (对原始大小写执行)
+        for part in re.sub(r'([A-Z][a-z]+)', r' \1', word).split():
+            if len(part) >= 2:
+                tokens.add(part.lower())
+    return tokens
+
+
+def _jaccard(set_a: set, set_b: set) -> float:
+    """Jaccard 相似度: |A∩B| / |A∪B|"""
+    if not set_a or not set_b:
+        return 0.0
+    return len(set_a & set_b) / len(set_a | set_b)
 
 
 # ============================================================
@@ -347,31 +389,137 @@ def _empty_search_result(op_type, pattern, position, top_k) -> dict:
 
 
 # ============================================================
-# Dump (仅精度通过时调用)
+# Check (相似度检查，辅助 dump 前决策)
 # ============================================================
 
-def dump_success_knowledge(kb_path: str, task_dir: str, op_name: str) -> dict | None:
+def check_similarity(kb_path: str, candidate_path: str,
+                     top_k: int = 3, threshold: float = 0.10) -> dict:
     """
-    从 Agent 生成的候选知识库条目追加到知识库。
+    检查候选条目与知识库现有条目的相似度，辅助 Agent 判断 new/merge/abandon。
+
+    计算方式: 对每条知识库条目，以 (title + feature) 拼接文本提取 token 集合，
+    与候选条目的同字段 token 集合计算 Jaccard 相似度，返回 score >= threshold 的 top-K 条。
+
+    返回 (stdout JSON):
+      {
+        "candidate_title": ...,
+        "candidate_type": ...,
+        "similar_entries": [          # 按 score 降序，最多 top_k 条
+          {"index": N, "score": 0.xx, "title": ..., "type": ...,
+           "feature": ..., "reason": ..., "fix": ...}
+        ],
+        "suggestion": "new | review_needed"
+      }
+
+    suggestion:
+      "new"           — 无相似条目，可直接新增
+      "review_needed" — 存在相似条目，需 Agent 语义判断后决定 new/merge/abandon
+    """
+    # 读取候选条目
+    if not os.path.exists(candidate_path):
+        print(f"[KB-CHECK] ⚠️ 候选条目文件不存在: {candidate_path}", file=sys.stderr)
+        return {}
+
+    try:
+        with open(candidate_path) as f:
+            candidate = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[KB-CHECK] ⚠️ 候选条目读取失败: {e}", file=sys.stderr)
+        return {}
+
+    missing = [field for field in REQUIRED_FIELDS if not candidate.get(field)]
+    if missing:
+        print(f"[KB-CHECK] ⚠️ 候选条目缺少必填字段: {missing}", file=sys.stderr)
+        return {}
+
+    # 知识库不存在时直接建议 new
+    if not os.path.exists(kb_path):
+        print(f"[KB-CHECK] ⚠️ 知识库不存在: {kb_path}，建议 new", file=sys.stderr)
+        result = {
+            "candidate_title": candidate["title"],
+            "candidate_type": candidate["type"],
+            "similar_entries": [],
+            "suggestion": "new",
+        }
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return result
+
+    try:
+        with open(kb_path) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[KB-CHECK] ⚠️ 知识库读取失败: {e}", file=sys.stderr)
+        return {}
+
+    valid = [e for e in data if isinstance(e, dict) and all(e.get(k) for k in REQUIRED_FIELDS)]
+
+    cand_tokens = _tokenize(candidate["title"] + " " + candidate["feature"])
+
+    scored = []
+    for i, entry in enumerate(valid):
+        entry_tokens = _tokenize(entry["title"] + " " + entry["feature"])
+        score = _jaccard(cand_tokens, entry_tokens)
+        if score >= threshold:
+            scored.append({
+                "index": i,
+                "score": round(score, 4),
+                "title": entry["title"],
+                "type": entry["type"],
+                "feature": entry["feature"],
+                "reason": entry["reason"],
+                "fix": entry["fix"],
+            })
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    top_entries = scored[:top_k]
+
+    suggestion = "review_needed" if top_entries else "new"
+
+    result = {
+        "candidate_title": candidate["title"],
+        "candidate_type": candidate["type"],
+        "similar_entries": top_entries,
+        "suggestion": suggestion,
+    }
+
+    print(f"[KB-CHECK] 检查完成: {candidate['title']}", file=sys.stderr)
+    print(f"  知识库条目总数: {len(valid)}", file=sys.stderr)
+    print(f"  相似条目 (score>={threshold}): {len(top_entries)}", file=sys.stderr)
+    for e in top_entries:
+        print(f"    [{e['score']:.4f}] {e['title']}", file=sys.stderr)
+    print(f"  建议: {suggestion}", file=sys.stderr)
+
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    return result
+
+
+# ============================================================
+# Dump (精度通过后写入知识库)
+# ============================================================
+
+def dump_success_knowledge(kb_path: str, task_dir: str, op_name: str,
+                           action: str = "new",
+                           merge_target_title: str | None = None) -> dict | None:
+    """
+    将 Agent 生成的候选知识库条目写入知识库。
+
+    action:
+      new    — 追加为新条目（默认）
+      merge  — 用候选内容替换 merge_target_title 对应的已有条目
+               （合并/丰富由 Agent 在 Step 5.2.6 完成，Python 只负责定位并原地替换）
+      abandon — 候选已被现有知识完全覆盖，跳过写入
 
     读取:
       - {task_dir}/precision_tuning/candidate_kb_entry.json (Agent 生成的候选条目)
       - {task_dir}/precision_tuning/forensics_report_{attempt}.json (用于推断已用轮次)
-
-    逻辑:
-      1. 读取候选条目 JSON，验证五字段完整性
-      2. 验证 type 为合法枚举值
-      3. 从取证报告补充元数据 (_meta)
-      4. 按 title 去重
-      5. 追加到知识库文件
     """
     tuning_dir = os.path.join(task_dir, "precision_tuning")
 
-    # 1. 读取 Agent 生成的候选条目
+    # 1. 读取候选条目
     candidate_path = os.path.join(tuning_dir, "candidate_kb_entry.json")
     if not os.path.exists(candidate_path):
         print(f"[KB] ⚠️ 候选条目文件不存在: {candidate_path}", file=sys.stderr)
-        print(f"    请先执行 Step 5.1: 生成候选知识库条目", file=sys.stderr)
+        print(f"    请先执行 Step 5.2: 生成候选知识库条目", file=sys.stderr)
         return None
 
     try:
@@ -392,8 +540,13 @@ def dump_success_knowledge(kb_path: str, task_dir: str, op_name: str) -> dict | 
         print(f"[KB] ⚠️ type 值非法: {candidate['type']}，应为以下之一: {VALID_TYPES}", file=sys.stderr)
         return None
 
-    # 4. 补充元数据 (从取证报告推断已用轮次)
-    # 文件命名约定: forensics_report_{attempt}.json (attempt 从 1 起)
+    # 4. abandon: 记录日志后直接返回，不写入知识库
+    if action == "abandon":
+        print(f"[KB] ℹ️ action=abandon — 候选已被现有知识覆盖，跳过写入")
+        print(f"  title: {candidate['title']}")
+        return None
+
+    # 5. 补充 _meta（从取证报告文件名推断已用轮次）
     import glob as _glob
     forensics_files = _glob.glob(os.path.join(tuning_dir, "forensics_report_*.json"))
     num_attempts = 1
@@ -409,38 +562,56 @@ def dump_success_knowledge(kb_path: str, task_dir: str, op_name: str) -> dict | 
         except (ValueError, OSError):
             pass
 
-    entry = dict(candidate)  # 复制五字段
+    entry = dict(candidate)
     entry["_meta"] = {
         "op_name": op_name,
         "created_at": datetime.now().isoformat(),
         "attempts_needed": num_attempts,
+        "action": action,
     }
 
-    # 5. 去重 + 追加
+    # 6. 加载知识库
     kb = []
     if os.path.exists(kb_path):
         with open(kb_path) as f:
             kb = json.load(f)
 
-    existing_titles = {e.get("title") for e in kb}
-    if entry["title"] in existing_titles:
-        print(f"[KB] ⚠️ 知识条目已存在 (title 重复), 跳过: {entry['title']}")
-        return None
-
-    kb.append(entry)
+    # 7. 执行写入操作
+    if action == "merge":
+        if not merge_target_title:
+            print(f"[KB] ⚠️ action=merge 需要 --merge-target-title 参数", file=sys.stderr)
+            return None
+        target_idx = next(
+            (i for i, e in enumerate(kb) if e.get("title") == merge_target_title), None
+        )
+        if target_idx is None:
+            print(f"[KB] ⚠️ 未找到目标条目 (title): {merge_target_title}", file=sys.stderr)
+            return None
+        kb[target_idx] = entry
+        print(f"[KB] ✅ 已合并更新条目:")
+        print(f"  原 title: {merge_target_title}")
+        print(f"  新 title: {entry['title']}")
+        print(f"  type: {entry['type']}")
+        print(f"  kb_size: {len(kb)} 条 (条目数不变)")
+    else:  # action == "new"
+        existing_titles = {e.get("title") for e in kb}
+        if entry["title"] in existing_titles:
+            print(f"[KB] ⚠️ 知识条目已存在 (title 重复), 跳过: {entry['title']}")
+            return None
+        kb.append(entry)
+        print(f"[KB] ✅ 已写入新知识条目: {entry['title']}")
+        print(f"  type: {entry['type']}")
+        print(f"  attempts_needed: {num_attempts}")
+        print(f"  kb_size: {len(kb)} 条")
 
     with open(kb_path, "w") as f:
         json.dump(kb, f, indent=2, ensure_ascii=False)
 
-    print(f"[KB] ✅ 已写入知识条目: {entry['title']}")
-    print(f"  type: {entry['type']}")
-    print(f"  attempts_needed: {num_attempts}")
-    print(f"  kb_size: {len(kb)} 条")
     return entry
 
 
 # ============================================================
-# CLI
+# Search log
 # ============================================================
 
 def _append_search_log(log_dir: str, call_index: int, op_type, pattern,
@@ -491,6 +662,10 @@ def _append_search_log(log_dir: str, call_index: int, op_type, pattern,
         pass
 
 
+# ============================================================
+# CLI
+# ============================================================
+
 def main():
     parser = argparse.ArgumentParser(description="精度问题知识库管理")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -517,12 +692,26 @@ def main():
     p_search.add_argument("--attempt", type=int, default=None,
                           help="当前调优轮次编号，写入日志 attempt 字段以区分多轮检索")
 
-    # dump
-    p_dump = subparsers.add_parser("dump", help="成功后写入知识库")
+    # check (相似度检查，辅助 dump 前决策)
+    p_check = subparsers.add_parser("check", help="检查候选条目与知识库的相似度，辅助 new/merge/abandon 决策")
+    p_check.add_argument("--kb-path", required=True, help="知识库 JSON 路径")
+    p_check.add_argument("--candidate-path", required=True,
+                         help="候选条目 JSON 路径 (candidate_kb_entry.json)")
+    p_check.add_argument("--top-k", type=int, default=3,
+                         help="返回相似条目数量上限 (默认 3)")
+    p_check.add_argument("--threshold", type=float, default=0.10,
+                         help="Jaccard 相似度阈值，低于此值的条目不返回 (默认 0.10)")
+
+    # dump (精度通过后写入知识库)
+    p_dump = subparsers.add_parser("dump", help="精度通过后写入知识库 (支持 new/merge/abandon)")
     p_dump.add_argument("--kb-path", required=True, help="知识库 JSON 路径")
     p_dump.add_argument("--task-name", required=True, help="task 目录名")
     p_dump.add_argument("--task-dir", default=None, help="task 绝对路径，默认 {REPO_ROOT}/{task_name}")
     p_dump.add_argument("--op-name", required=True, help="算子名称")
+    p_dump.add_argument("--action", choices=["new", "merge", "abandon"], default="new",
+                        help="写入操作: new=追加新条目, merge=合并更新已有条目, abandon=跳过写入 (默认 new)")
+    p_dump.add_argument("--merge-target-title", default=None,
+                        help="action=merge 时，指定被替换的已有条目 title（精确匹配）")
 
     args = parser.parse_args()
 
@@ -548,9 +737,22 @@ def main():
                 result=result,
                 attempt=getattr(args, "attempt", None),
             )
+    elif args.command == "check":
+        check_similarity(
+            args.kb_path,
+            args.candidate_path,
+            top_k=args.top_k,
+            threshold=args.threshold,
+        )
     elif args.command == "dump":
         task_dir = args.task_dir or str(REPO_ROOT / args.task_name)
-        dump_success_knowledge(args.kb_path, task_dir, args.op_name)
+        dump_success_knowledge(
+            args.kb_path,
+            task_dir,
+            args.op_name,
+            action=args.action,
+            merge_target_title=args.merge_target_title,
+        )
 
 
 if __name__ == "__main__":

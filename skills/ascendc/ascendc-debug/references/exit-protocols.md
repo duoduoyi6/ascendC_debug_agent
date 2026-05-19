@@ -232,12 +232,40 @@ echo "精度通过，current_best 已更新为 100.0"
 - `fix` 要通用，不要引用具体代码行号或变量名
 - `type` 必须从以下枚举中选择：FIX_PRECISION_PADDING / FIX_PRECISION_TAIL / FIX_PRECISION_REDUCTION / FIX_PRECISION_TYPECAST / FIX_PRECISION_LAYOUT / FIX_PRECISION_SYNC / FIX_PRECISION_OVERFLOW / FIX_PRECISION_LOGIC / FIX_PRECISION_OTHER
 
+**5.2.5 相似性检查 (Python 执行):**
+```bash
+python3 skills/ascendc/ascendc-debug/scripts/precision_knowledge.py check \
+    --kb-path skills/ascendc/ascendc-debug/references/precision_knowledge_base.json \
+    --candidate-path {task_dir}/precision_tuning/candidate_kb_entry.json
+```
+
+输出 JSON 到 stdout，摘要到 stderr，关键字段：
+- `similar_entries`: 相似度 >= 0.10 的已有条目列表（含 title/feature/reason/fix，按 score 降序）
+- `suggestion`: `"new"`（无相似）或 `"review_needed"`（有相似，需 Agent 判断）
+
+**5.2.6 写入决策 (Agent 执行):**
+
+读取 5.2.5 的输出，对 `similar_entries` 做语义判断，确定 `action`：
+
+| suggestion | 语义判断结果 | action | 需要额外操作 |
+|---|---|---|---|
+| `new` | 无相似条目 | `new` | 无 |
+| `review_needed` | 候选与已有条目完全重叠，无新信息 | `abandon` | 无 |
+| `review_needed` | 候选有新细节（新触发场景、更精确的 fix、补充的 op_type 等） | `merge` | **必须先更新 `candidate_kb_entry.json`**（见下） |
+| `review_needed` | 关键词重叠但根因/场景本质不同 | `new` | 无 |
+
+> **merge 操作前 Agent 必须先丰富 `candidate_kb_entry.json`**：将相似条目的已有内容与新候选内容合并，形成更完整的条目（保留旧条目的核心知识，补充新触发场景或 fix 细节），再写回 `{task_dir}/precision_tuning/candidate_kb_entry.json`。Python 脚本只负责将该文件内容替换到知识库对应位置，合并本身由 Agent 完成。
+
 **5.3 写入知识库 (Python 执行):**
 ```bash
+# action 由 Step 5.2.6 决策确定（new / merge / abandon）
+# action=merge 时追加 --merge-target-title，值为被替换条目的完整 title（精确匹配）
 python3 skills/ascendc/ascendc-debug/scripts/precision_knowledge.py dump \
     --kb-path skills/ascendc/ascendc-debug/references/precision_knowledge_base.json \
     --task-name {task_name} \
-    --op-name {op_name}
+    --op-name {op_name} \
+    --action {action} \
+    [--merge-target-title "<existing entry title>"]
 ```
 
 **5.4 保存成功代码快照:**
