@@ -34,7 +34,7 @@ AscendOpGenAgent/
     │       ├── branch_runtime.py          # 1-R 分支: runtime crash Gate
     │       └── branch_timeout.py          # 1-T 分支: 死锁 / 死循环 Gate
     └── references/                        # 共用参考资料
-        ├── precision_knowledge_base.json  # 精度问题知识库（23 条目 + 算子 CHECKLIST）
+        ├── precision_knowledge_base.json  # 精度问题知识库（40 条目 + 5 算子 CHECKLIST）
         ├── branch-build.md                # Step 1-B 编译错误分析（build_failed 分支，SKILL.md 外置）
         ├── branch-import.md               # Step 1-I import 错误分析（import_kernel_side 分支，SKILL.md 外置）
         ├── branch-runtime.md              # Step 1-R 运行时错误分析（runtime_error 分支，SKILL.md 外置）
@@ -107,7 +107,7 @@ AscendOpGenAgent/
 | `anticheat.py` | 脚本 | 反作弊: 禁改 wrapper + 扫 C++ 禁调 `at::<op>` |
 | `debug_precision_template.py` | 模板 | 精度调试分析脚本模板（误差分布 + 固定输入 + shape 二分） |
 | `run_precision_debug.sh` | 脚本 | 调试脚本运行入口（本地 / 远程 Docker） |
-| `precision_knowledge_base.json` | 数据 | 精度问题模式库（23 条目） |
+| `precision_knowledge_base.json` | 数据 | 精度问题模式库（45 条目） |
 | `bug_examples/` | 文档 | 精度缺陷诊断案例库（5 个典型根因 + 实验定位法） |
 | `decomposition_examples/` | 文档 | 算子计算分解示例 |
 
@@ -198,10 +198,15 @@ Gate-V 输出 `loop_signal`，Agent **必须遵守**：
 
 ## 知识库
 
-扁平五字段结构（title / feature / reason / fix / type），RAG-ready。包含两类条目：
+七字段结构（title / feature / patterns / op_types / reason / fix / type），RAG-ready。包含两类条目：
 
-1. **问题模式**（9 条）: 具体精度问题的 feature/reason/fix
-2. **算子 CHECKLIST**（5 条）: 按算子类型的精度检查清单（reduction/pooling/loss/matmul/normalization）
+1. **问题模式**（40 条）: 具体精度问题的 feature/reason/fix，带 `patterns` 和 `op_types` 数组
+2. **算子 CHECKLIST**（5 条）: 按算子类型的精度检查清单（reduction/pooling/loss/matmul/normalization），`patterns=[]`，`op_types` 为算子类别标识
+
+**字段约束**：
+- `patterns`：枚举数组，值域 `tail_spike / uniform_offset / scattered / magnitude_correlated / nan_inf_contamination / dimension_concentration / boundary_concentration / all_wrong`；写入时强制校验，非法值 hard error
+- `op_types`：自由字符串数组，无枚举限制；CHECKLIST 条目通过此字段路由
+- `feature`：纯自然语言，**禁止**内嵌 `pattern=xxx` / `op_type=xxx` 标签
 
 成功修复后自动追加跃迁条目（仅成功时写入，避免污染）。
 
@@ -211,8 +216,8 @@ Gate-V 输出 `loop_signal`，Agent **必须遵守**：
 
 **设计决策**：
 1. aarch64 环境下 FAISS / sentence-transformers 依赖重
-2. 当前规模（18 条，预期增长到 100-200 条）不需要向量检索
-3. 知识库已有结构化标签（`type`、`feature` 中的 `pattern=xxx` / `op_type=xxx`），精确匹配比语义相似度更可靠
+2. 当前规模（44 条，预期增长到 100-200 条）不需要向量检索
+3. 知识库有独立结构化字段（`patterns` 数组 / `op_types` 数组），精确匹配比语义相似度更可靠
 4. Fallback 到全量 load 保底，不会漏掉任何条目
 
 **实现**：`precision_knowledge.py search` 命令
@@ -231,8 +236,8 @@ python3 precision_knowledge.py search \
 ```
 
 **评分逻辑**：
-- pattern 匹配 feature 中的 `pattern=xxx` → 权重 3
-- op_type 匹配 → 权重 2
+- pattern 命中条目 `patterns` 数组 → 权重 3
+- op_type 命中条目 `op_types` 数组 → 权重 2
 - type 字段与 pattern→type 亲和性映射匹配 → 权重 1
 - position 与 pattern 亲和性映射匹配（仅第二次检索）→ 权重 1
 
