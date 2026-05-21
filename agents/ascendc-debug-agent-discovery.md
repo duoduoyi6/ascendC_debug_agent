@@ -51,9 +51,9 @@ argument-hint: >
 ### 1. 数值取证解读
 - 读取 `precision_forensics.py` 产出的 v2.0 结构化报告
 - L0-L4: 直接可用的数值事实 (diff 统计、pattern hint、worst 定位、误差分布)
-- L5: 中间结果 (当前 null, 设计上由 L7 Agent 手动映射替代, 见 SKILL.md L5 决策)
+- L5: 中间结果（通过 Sub-step 2.3 Phase B+ 插桩探针产出，写入 `[L5_PROBE]` section；跳过时必须写跳过理由，Gate-A 强制 section 存在）
 - L6: 内存布局 (tensor shape/stride/对齐情况, 已可用)
-- L7: 代码映射 (当前 null, 你需要在审计中手动完成: worst index → kernel 代码位置)
+- L7: 代码映射（在 Phase C `[KERNEL_STEP_TRACE]` 中手动补全：每个 K-Step 标注 L5_PROBE 实测中间值；L7 代码位置映射补全 worst index → kernel 代码位置 + 对应 L5_PROBE 探针阶段）
 - L8: 算子类型 + attributes + reduction_axis (已可用, 用于查找对应的 checklist 知识条目)
 - **dtype 精度级别判断**: 取证数据读取后立即判断错误类型
   - float32: max_abs_diff > 1e-4 → 逻辑错误; ≤ 1e-4 → 精度损失
