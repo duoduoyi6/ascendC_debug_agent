@@ -4,19 +4,27 @@ precision_knowledge.py — 精度问题知识库管理
 
 职责:
   1. load   — 全量加载知识库 (fallback 用)
-  2. search — 结构化 RAG 检索: 按 op_type + pattern + position 评分排序, 返回 top-K + CHECKLIST
+  2. search — 结构化 RAG 检索: 按 op_types + patterns + position 评分排序, 返回 top-K + CHECKLIST
   3. check  — dump 前检查候选条目与知识库的相似度，辅助 Agent 决策 new/merge/abandon
   4. dump   — 精度通过后，将 Agent 生成的候选条目写入知识库（支持 new / merge / abandon 三种操作）
 
-知识库格式: 扁平五字段 JSON, 与现有 knowledge_base.json 结构对齐, RAG-ready。
+知识库格式: 七字段 JSON，RAG-ready。
 每条记录:
   {
-    "title":   "标准化中文标题 (含英文关键词)",
-    "feature": "错误特征签名 (泛化, 中文)",
-    "reason":  "深层原因 (中文)",
-    "fix":     "通用修复指南 (代码级别, 中文)",
-    "type":    "FIX_PRECISION_xxx"
+    "title":    "标准化中文标题 (含英文关键词)",
+    "patterns": ["tail_spike", "boundary_concentration"],   # 误差模式数组，可为空 []
+    "op_types": ["reduction", "pooling"],                   # 算子类型数组，可为空 []
+    "feature":  "自然语言描述错误特征 (泛化, 中文)，不嵌入 pattern=/op_type= 标签",
+    "reason":   "深层原因 (中文)",
+    "fix":      "通用修复指南 (代码级别, 中文)",
+    "type":     "FIX_PRECISION_xxx"
   }
+
+patterns 合法值（VALID_PATTERNS）:
+  tail_spike, uniform_offset, scattered, magnitude_correlated,
+  nan_inf_contamination, dimension_concentration, boundary_concentration, all_wrong
+
+op_types: 自由字符串数组，如 "reduction"、"pooling"、"matmul"、"convolution" 等，无枚举限制。
 
 type 枚举 (精度专项):
   FIX_PRECISION_PADDING     — Padding 值导致精度问题
@@ -67,7 +75,31 @@ VALID_TYPES = [
     "FIX_PRECISION_OTHER",
 ]
 
+VALID_PATTERNS = [
+    "tail_spike",
+    "uniform_offset",
+    "scattered",
+    "magnitude_correlated",
+    "nan_inf_contamination",
+    "dimension_concentration",
+    "boundary_concentration",
+    "all_wrong",
+]
+
+# 文本必填字段（非空字符串）
 REQUIRED_FIELDS = ["title", "feature", "reason", "fix", "type"]
+
+
+def _is_valid_entry(entry: dict) -> bool:
+    """校验知识库条目格式：文本字段非空 + patterns/op_types 为 list。"""
+    for k in REQUIRED_FIELDS:
+        if not entry.get(k):
+            return False
+    if not isinstance(entry.get("patterns"), list):
+        return False
+    if not isinstance(entry.get("op_types"), list):
+        return False
+    return True
 
 
 # ============================================================
@@ -76,24 +108,20 @@ REQUIRED_FIELDS = ["title", "feature", "reason", "fix", "type"]
 
 def _tokenize(text: str) -> set:
     """
-    提取混合中英文 title/feature 文本中的 token 集合。
+    提取混合中英文文本中的 token 集合。
     - 英文: 按非字母边界切分，snake_case / camelCase 进一步拆分，min 长度 2
     - 中文: 每个汉字单独作为 token
     """
     tokens = set()
-    # 中文字符逐字
     for ch in re.findall(r'[一-鿿]', text):
         tokens.add(ch)
-    # 英文词段
     for word in re.findall(r'[a-zA-Z][a-zA-Z0-9_]*', text):
         w = word.lower()
         if len(w) >= 2:
             tokens.add(w)
-        # snake_case 拆分
         for part in w.split('_'):
             if len(part) >= 2:
                 tokens.add(part)
-        # camelCase 拆分 (对原始大小写执行)
         for part in re.sub(r'([A-Z][a-z]+)', r' \1', word).split():
             if len(part) >= 2:
                 tokens.add(part.lower())
@@ -124,11 +152,7 @@ def load_knowledge_base(kb_path: str) -> list:
         print(f"[KB] ⚠️ 知识库格式错误 (期望 list), 使用空知识库", file=sys.stderr)
         return []
 
-    # 过滤无效条目
-    valid = []
-    for entry in data:
-        if all(entry.get(k) for k in REQUIRED_FIELDS):
-            valid.append(entry)
+    valid = [e for e in data if _is_valid_entry(e)]
 
     print(f"[KB] ✅ 已加载 {len(valid)} 条精度知识")
     print(json.dumps(valid, indent=2, ensure_ascii=False))
@@ -163,7 +187,7 @@ POSITION_PATTERN_AFFINITY = {
 W_PATTERN = 3
 W_OP_TYPE = 2
 W_TYPE = 1
-W_POSITION = 1  # 第二次检索时 position 辅助加分
+W_POSITION = 1
 W_OP_TYPE_ALL_WRONG_BOOST = 2  # all_wrong 是泛化 hint, op_type 精确匹配时额外加权
 
 
@@ -172,87 +196,39 @@ def _is_checklist(entry: dict) -> bool:
     return entry.get("title", "").startswith("[CHECKLIST]")
 
 
-def _extract_patterns_from_feature(feature: str) -> list[str]:
-    """从 feature 字段提取 pattern=xxx 标签"""
-    patterns = []
-    for token in feature.replace(",", " ").split():
-        if token.startswith("pattern="):
-            patterns.append(token.split("=", 1)[1])
-    # 也检查 "或" 分隔的 pattern (如 "pattern=tail_spike 或 boundary_concentration")
-    if "或" in feature:
-        parts = feature.split("或")
-        for part in parts:
-            stripped = part.strip().rstrip(",").strip()
-            # 如果 stripped 本身是一个 pattern 名 (无 = 前缀)
-            if stripped in PATTERN_TYPE_AFFINITY and stripped not in patterns:
-                patterns.append(stripped)
-    return patterns
-
-
-def _extract_op_type_from_feature(feature: str) -> str | None:
-    """从 feature 字段提取 op_type=xxx 标签"""
-    for token in feature.replace(",", " ").split():
-        if token.startswith("op_type="):
-            return token.split("=", 1)[1]
-    return None
-
-
 def _score_entry(entry: dict, query_pattern: str | None, query_op_type: str | None,
                  query_position: str | None) -> float:
-    """对单条知识库条目评分"""
+    """对单条知识库条目评分。直接从 patterns / op_types 数组读取，无需解析 feature 文本。"""
     score = 0.0
-    feature = entry.get("feature", "")
+    entry_patterns = entry.get("patterns", [])
+    entry_op_types = entry.get("op_types", [])
     entry_type = entry.get("type", "")
 
-    # 1. pattern 匹配 (权重 3)
-    if query_pattern:
-        entry_patterns = _extract_patterns_from_feature(feature)
-        if query_pattern in entry_patterns:
-            score += W_PATTERN
-        # 部分匹配: feature 中包含 pattern 关键词但非标准 pattern=xxx 格式
-        elif query_pattern in feature:
-            score += W_PATTERN * 0.5
+    # 1. pattern 精确匹配 (权重 3)
+    if query_pattern and query_pattern in entry_patterns:
+        score += W_PATTERN
 
-    # 2. op_type 匹配 (权重 2) — 仅对非 CHECKLIST 条目
+    # 2. op_type 精确匹配 (权重 2) — 仅对非 CHECKLIST 条目
     if query_op_type and not _is_checklist(entry):
-        entry_op_type = _extract_op_type_from_feature(feature)
-        if entry_op_type and entry_op_type == query_op_type:
+        if query_op_type in entry_op_types:
             score += W_OP_TYPE
-        # 名称推断: feature 中包含算子类型关键词
-        op_type_keywords = {
-            "reduction": ["归约", "reduce", "reduction"],
-            "pooling": ["池化", "pool", "pooling"],
-            "loss": ["损失", "loss"],
-            "matmul": ["矩阵", "matmul", "gemm"],
-            "normalization": ["归一化", "norm", "normalization"],
-            "activation": ["激活", "activation", "exp", "sigmoid"],
-        }
-        if query_op_type in op_type_keywords:
-            for kw in op_type_keywords[query_op_type]:
-                if kw.lower() in feature.lower() or kw.lower() in entry.get("title", "").lower():
-                    score += W_OP_TYPE * 0.5
-                    break
 
     # 3. type 字段交叉匹配 (权重 1)
     if query_pattern and query_pattern in PATTERN_TYPE_AFFINITY:
-        affine_types = PATTERN_TYPE_AFFINITY[query_pattern]
-        if entry_type in affine_types:
+        if entry_type in PATTERN_TYPE_AFFINITY[query_pattern]:
             score += W_TYPE
 
     # 4. position 辅助加分 (仅第二次检索时使用, 权重 1)
     if query_position and query_position in POSITION_PATTERN_AFFINITY:
         affine_patterns = POSITION_PATTERN_AFFINITY[query_position]
-        entry_patterns = _extract_patterns_from_feature(feature)
         for p in affine_patterns:
             if p in entry_patterns:
                 score += W_POSITION
-                break  # 只加一次
+                break
 
     # 5. all_wrong 特例: op_type 额外加权
-    # all_wrong 是泛化 hint, 不携带具体问题信息, 此时 op_type 精确匹配是最重要的分类依据
     if query_pattern == "all_wrong" and query_op_type and not _is_checklist(entry):
-        entry_op_type_check = _extract_op_type_from_feature(feature)
-        if entry_op_type_check and entry_op_type_check == query_op_type:
+        if query_op_type in entry_op_types:
             score += W_OP_TYPE_ALL_WRONG_BOOST
 
     return score
@@ -270,10 +246,9 @@ def search_knowledge_base(kb_path: str, op_type: str | None = None,
         "matched_entries": [...],       # top-K 普通条目 (按 score 降序)
         "checklists": [...],            # op_type 匹配的 CHECKLIST (不占 K 配额)
         "total_kb_size": N,
-        "fallback_to_full_load": bool   # 普通条目 + checklist 均为 0 时 True
+        "fallback_to_full_load": bool
       }
     """
-    # 加载知识库
     if not os.path.exists(kb_path):
         print(f"[KB-SEARCH] ⚠️ 知识库文件不存在: {kb_path}", file=sys.stderr)
         return _empty_search_result(op_type, pattern, position, top_k)
@@ -289,24 +264,17 @@ def search_knowledge_base(kb_path: str, op_type: str | None = None,
         print(f"[KB-SEARCH] ⚠️ 知识库格式错误 (期望 list)", file=sys.stderr)
         return _empty_search_result(op_type, pattern, position, top_k)
 
-    # 过滤无效条目
-    valid = [e for e in data if all(e.get(k) for k in REQUIRED_FIELDS)]
+    valid = [e for e in data if _is_valid_entry(e)]
 
     # 分离 CHECKLIST 和普通条目
-    checklists = []
-    normal_entries = []
-    for entry in valid:
-        if _is_checklist(entry):
-            checklists.append(entry)
-        else:
-            normal_entries.append(entry)
+    checklists = [e for e in valid if _is_checklist(e)]
+    normal_entries = [e for e in valid if not _is_checklist(e)]
 
-    # CHECKLIST 按 op_type 精确匹配
+    # CHECKLIST 按 op_types 数组精确匹配
     matched_checklists = []
     if op_type:
         for cl in checklists:
-            cl_op_type = _extract_op_type_from_feature(cl.get("feature", ""))
-            if cl_op_type and cl_op_type == op_type:
+            if op_type in cl.get("op_types", []):
                 matched_checklists.append(cl)
 
     # 普通条目评分排序
@@ -338,6 +306,8 @@ def search_knowledge_base(kb_path: str, op_type: str | None = None,
                 "index": valid.index(s["entry"]) if s["entry"] in valid else -1,
                 "score": s["score"],
                 "title": s["entry"]["title"],
+                "patterns": s["entry"].get("patterns", []),
+                "op_types": s["entry"].get("op_types", []),
                 "feature": s["entry"]["feature"],
                 "reason": s["entry"]["reason"],
                 "fix": s["entry"]["fix"],
@@ -348,6 +318,8 @@ def search_knowledge_base(kb_path: str, op_type: str | None = None,
         "checklists": [
             {
                 "title": cl["title"],
+                "patterns": cl.get("patterns", []),
+                "op_types": cl.get("op_types", []),
                 "feature": cl["feature"],
                 "reason": cl["reason"],
                 "fix": cl["fix"],
@@ -359,7 +331,6 @@ def search_knowledge_base(kb_path: str, op_type: str | None = None,
         "fallback_to_full_load": fallback,
     }
 
-    # 输出
     n_matched = len(result["matched_entries"])
     n_checklists = len(result["checklists"])
     print(f"[KB-SEARCH] ✅ 检索完成 (op_type={op_type}, pattern={pattern}, position={position})")
@@ -378,7 +349,6 @@ def search_knowledge_base(kb_path: str, op_type: str | None = None,
 
 
 def _empty_search_result(op_type, pattern, position, top_k) -> dict:
-    """空知识库时的返回结构"""
     return {
         "query": {"op_type": op_type, "pattern": pattern, "position": position, "top_k": top_k},
         "matched_entries": [],
@@ -397,25 +367,17 @@ def check_similarity(kb_path: str, candidate_path: str,
     """
     检查候选条目与知识库现有条目的相似度，辅助 Agent 判断 new/merge/abandon。
 
-    计算方式: 对每条知识库条目，以 (title + feature) 拼接文本提取 token 集合，
-    与候选条目的同字段 token 集合计算 Jaccard 相似度，返回 score >= threshold 的 top-K 条。
+    计算方式: 对 (title + feature + patterns + op_types) 拼接文本提取 token 集合，
+    与候选条目同字段 token 集合计算 Jaccard 相似度，返回 score >= threshold 的 top-K 条。
 
     返回 (stdout JSON):
       {
         "candidate_title": ...,
         "candidate_type": ...,
-        "similar_entries": [          # 按 score 降序，最多 top_k 条
-          {"index": N, "score": 0.xx, "title": ..., "type": ...,
-           "feature": ..., "reason": ..., "fix": ...}
-        ],
+        "similar_entries": [{"index": N, "score": 0.xx, "title": ..., ...}],
         "suggestion": "new | review_needed"
       }
-
-    suggestion:
-      "new"           — 无相似条目，可直接新增
-      "review_needed" — 存在相似条目，需 Agent 语义判断后决定 new/merge/abandon
     """
-    # 读取候选条目
     if not os.path.exists(candidate_path):
         print(f"[KB-CHECK] ⚠️ 候选条目文件不存在: {candidate_path}", file=sys.stderr)
         return {}
@@ -432,7 +394,12 @@ def check_similarity(kb_path: str, candidate_path: str,
         print(f"[KB-CHECK] ⚠️ 候选条目缺少必填字段: {missing}", file=sys.stderr)
         return {}
 
-    # 知识库不存在时直接建议 new
+    # patterns / op_types 缺失时警告但不中止（check 仅预览）
+    if not isinstance(candidate.get("patterns"), list):
+        print(f"[KB-CHECK] ⚠️ 候选条目 patterns 不是数组，相似度计算可能偏低", file=sys.stderr)
+    if not isinstance(candidate.get("op_types"), list):
+        print(f"[KB-CHECK] ⚠️ 候选条目 op_types 不是数组，相似度计算可能偏低", file=sys.stderr)
+
     if not os.path.exists(kb_path):
         print(f"[KB-CHECK] ⚠️ 知识库不存在: {kb_path}，建议 new", file=sys.stderr)
         result = {
@@ -451,13 +418,22 @@ def check_similarity(kb_path: str, candidate_path: str,
         print(f"[KB-CHECK] ⚠️ 知识库读取失败: {e}", file=sys.stderr)
         return {}
 
-    valid = [e for e in data if isinstance(e, dict) and all(e.get(k) for k in REQUIRED_FIELDS)]
+    valid = [e for e in data if isinstance(e, dict) and _is_valid_entry(e)]
 
-    cand_tokens = _tokenize(candidate["title"] + " " + candidate["feature"])
+    # 候选条目: title + feature + patterns + op_types 全部参与 tokenize
+    cand_patterns = candidate.get("patterns", []) if isinstance(candidate.get("patterns"), list) else []
+    cand_op_types = candidate.get("op_types", []) if isinstance(candidate.get("op_types"), list) else []
+    cand_text = (candidate["title"] + " " + candidate["feature"]
+                 + " " + " ".join(cand_patterns) + " " + " ".join(cand_op_types))
+    cand_tokens = _tokenize(cand_text)
 
     scored = []
     for i, entry in enumerate(valid):
-        entry_tokens = _tokenize(entry["title"] + " " + entry["feature"])
+        entry_patterns = entry.get("patterns", [])
+        entry_op_types = entry.get("op_types", [])
+        entry_text = (entry["title"] + " " + entry["feature"]
+                      + " " + " ".join(entry_patterns) + " " + " ".join(entry_op_types))
+        entry_tokens = _tokenize(entry_text)
         score = _jaccard(cand_tokens, entry_tokens)
         if score >= threshold:
             scored.append({
@@ -465,6 +441,8 @@ def check_similarity(kb_path: str, candidate_path: str,
                 "score": round(score, 4),
                 "title": entry["title"],
                 "type": entry["type"],
+                "patterns": entry_patterns,
+                "op_types": entry_op_types,
                 "feature": entry["feature"],
                 "reason": entry["reason"],
                 "fix": entry["fix"],
@@ -506,12 +484,9 @@ def dump_success_knowledge(kb_path: str, task_dir: str, op_name: str,
     action:
       new    — 追加为新条目（默认）
       merge  — 用候选内容替换 merge_target_title 对应的已有条目
-               （合并/丰富由 Agent 在 Step 5.2.6 完成，Python 只负责定位并原地替换）
       abandon — 候选已被现有知识完全覆盖，跳过写入
 
-    读取:
-      - {task_dir}/precision_tuning/candidate_kb_entry.json (Agent 生成的候选条目)
-      - {task_dir}/precision_tuning/forensics_report_{attempt}.json (用于推断已用轮次)
+    读取: {task_dir}/precision_tuning/candidate_kb_entry.json
     """
     tuning_dir = os.path.join(task_dir, "precision_tuning")
 
@@ -529,7 +504,7 @@ def dump_success_knowledge(kb_path: str, task_dir: str, op_name: str,
         print(f"[KB] ⚠️ 候选条目 JSON 解析失败: {e}", file=sys.stderr)
         return None
 
-    # 2. 验证五字段完整性
+    # 2. 验证文本字段完整性
     missing = [f for f in REQUIRED_FIELDS if not candidate.get(f)]
     if missing:
         print(f"[KB] ⚠️ 候选条目缺少必填字段: {missing}", file=sys.stderr)
@@ -540,13 +515,36 @@ def dump_success_knowledge(kb_path: str, task_dir: str, op_name: str,
         print(f"[KB] ⚠️ type 值非法: {candidate['type']}，应为以下之一: {VALID_TYPES}", file=sys.stderr)
         return None
 
-    # 4. abandon: 记录日志后直接返回，不写入知识库
+    # 4. 严格校验 patterns 字段（写入端强制）
+    patterns_val = candidate.get("patterns")
+    if not isinstance(patterns_val, list):
+        print(f"[KB] ❌ patterns 字段必须为数组，当前类型: {type(patterns_val).__name__}", file=sys.stderr)
+        print(f"    正确示例: \"patterns\": [\"all_wrong\", \"scattered\"]", file=sys.stderr)
+        return None
+    invalid_patterns = [p for p in patterns_val if p not in VALID_PATTERNS]
+    if invalid_patterns:
+        print(f"[KB] ❌ patterns 包含非法值: {invalid_patterns}", file=sys.stderr)
+        print(f"    合法值: {VALID_PATTERNS}", file=sys.stderr)
+        return None
+
+    # 5. 严格校验 op_types 字段（写入端强制）
+    op_types_val = candidate.get("op_types")
+    if not isinstance(op_types_val, list):
+        print(f"[KB] ❌ op_types 字段必须为数组，当前类型: {type(op_types_val).__name__}", file=sys.stderr)
+        print(f"    正确示例: \"op_types\": [\"reduction\"] 或空数组 []", file=sys.stderr)
+        return None
+    invalid_op_types = [t for t in op_types_val if not isinstance(t, str) or not t.strip()]
+    if invalid_op_types:
+        print(f"[KB] ❌ op_types 包含非法值（必须为非空字符串）: {invalid_op_types}", file=sys.stderr)
+        return None
+
+    # 6. abandon: 记录日志后直接返回
     if action == "abandon":
         print(f"[KB] ℹ️ action=abandon — 候选已被现有知识覆盖，跳过写入")
         print(f"  title: {candidate['title']}")
         return None
 
-    # 5. 补充 _meta（从取证报告文件名推断已用轮次）
+    # 7. 补充 _meta
     import glob as _glob
     forensics_files = _glob.glob(os.path.join(tuning_dir, "forensics_report_*.json"))
     num_attempts = 1
@@ -570,13 +568,13 @@ def dump_success_knowledge(kb_path: str, task_dir: str, op_name: str,
         "action": action,
     }
 
-    # 6. 加载知识库
+    # 8. 加载知识库
     kb = []
     if os.path.exists(kb_path):
         with open(kb_path) as f:
             kb = json.load(f)
 
-    # 7. 执行写入操作
+    # 9. 执行写入操作
     if action == "merge":
         if not merge_target_title:
             print(f"[KB] ⚠️ action=merge 需要 --merge-target-title 参数", file=sys.stderr)
@@ -601,6 +599,8 @@ def dump_success_knowledge(kb_path: str, task_dir: str, op_name: str,
         kb.append(entry)
         print(f"[KB] ✅ 已写入新知识条目: {entry['title']}")
         print(f"  type: {entry['type']}")
+        print(f"  patterns: {entry.get('patterns', [])}")
+        print(f"  op_types: {entry.get('op_types', [])}")
         print(f"  attempts_needed: {num_attempts}")
         print(f"  kb_size: {len(kb)} 条")
 
@@ -617,11 +617,6 @@ def dump_success_knowledge(kb_path: str, task_dir: str, op_name: str,
 def _append_search_log(log_dir: str, call_index: int, op_type, pattern,
                        position, top_k: int, result: dict,
                        attempt: int | None = None) -> None:
-    """
-    追加写入知识库检索调用日志到 knowledge_search_log.json（统一文件名，含 attempt 字段）。
-    若 log_dir 是目录，日志文件名固定为 knowledge_search_log.json；
-    若 log_dir 以 .json 结尾则直接作为日志文件路径。
-    """
     if log_dir.endswith(".json"):
         log_path = log_dir
     else:
@@ -670,48 +665,39 @@ def main():
     parser = argparse.ArgumentParser(description="精度问题知识库管理")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # load (全量, fallback 用)
+    # load
     p_load = subparsers.add_parser("load", help="全量加载知识库 (fallback)")
     p_load.add_argument("--kb-path", required=True, help="知识库 JSON 路径")
 
-    # search (结构化 RAG 检索)
+    # search
     p_search = subparsers.add_parser("search", help="结构化 RAG 检索")
     p_search.add_argument("--kb-path", required=True, help="知识库 JSON 路径")
     p_search.add_argument("--op-type", default=None,
                           help="算子类型 (来自 L8, 如 reduction/pooling/loss/matmul/normalization)")
     p_search.add_argument("--pattern", default=None,
-                          help="误差模式 (来自取证 primary_hint, 如 tail_spike/uniform_offset)")
+                          help=f"误差模式 (来自取证 primary_hint, 合法值: {VALID_PATTERNS})")
     p_search.add_argument("--position", default=None,
                           help="误差位置特征 (第二次检索用, 如 tail/boundary/head/scattered)")
-    p_search.add_argument("--top-k", type=int, default=3,
-                          help="返回普通条目数量上限 (默认 3, CHECKLIST 不占配额)")
-    p_search.add_argument("--log-path", default=None,
-                          help="知识库检索日志目录（如有，将追加写入 knowledge_search_log.json）")
-    p_search.add_argument("--call-index", type=int, default=0,
-                          help="本轮第几次检索（0-based），用于日志区分同轮多次调用")
-    p_search.add_argument("--attempt", type=int, default=None,
-                          help="当前调优轮次编号，写入日志 attempt 字段以区分多轮检索")
+    p_search.add_argument("--top-k", type=int, default=3)
+    p_search.add_argument("--log-path", default=None)
+    p_search.add_argument("--call-index", type=int, default=0)
+    p_search.add_argument("--attempt", type=int, default=None)
 
-    # check (相似度检查，辅助 dump 前决策)
-    p_check = subparsers.add_parser("check", help="检查候选条目与知识库的相似度，辅助 new/merge/abandon 决策")
-    p_check.add_argument("--kb-path", required=True, help="知识库 JSON 路径")
-    p_check.add_argument("--candidate-path", required=True,
-                         help="候选条目 JSON 路径 (candidate_kb_entry.json)")
-    p_check.add_argument("--top-k", type=int, default=3,
-                         help="返回相似条目数量上限 (默认 3)")
-    p_check.add_argument("--threshold", type=float, default=0.10,
-                         help="Jaccard 相似度阈值，低于此值的条目不返回 (默认 0.10)")
+    # check
+    p_check = subparsers.add_parser("check", help="检查候选条目与知识库的相似度")
+    p_check.add_argument("--kb-path", required=True)
+    p_check.add_argument("--candidate-path", required=True)
+    p_check.add_argument("--top-k", type=int, default=3)
+    p_check.add_argument("--threshold", type=float, default=0.10)
 
-    # dump (精度通过后写入知识库)
+    # dump
     p_dump = subparsers.add_parser("dump", help="精度通过后写入知识库 (支持 new/merge/abandon)")
-    p_dump.add_argument("--kb-path", required=True, help="知识库 JSON 路径")
-    p_dump.add_argument("--task-name", required=True, help="task 目录名")
-    p_dump.add_argument("--task-dir", default=None, help="task 绝对路径，默认 {REPO_ROOT}/{task_name}")
-    p_dump.add_argument("--op-name", required=True, help="算子名称")
-    p_dump.add_argument("--action", choices=["new", "merge", "abandon"], default="new",
-                        help="写入操作: new=追加新条目, merge=合并更新已有条目, abandon=跳过写入 (默认 new)")
-    p_dump.add_argument("--merge-target-title", default=None,
-                        help="action=merge 时，指定被替换的已有条目 title（精确匹配）")
+    p_dump.add_argument("--kb-path", required=True)
+    p_dump.add_argument("--task-name", required=True)
+    p_dump.add_argument("--task-dir", default=None)
+    p_dump.add_argument("--op-name", required=True)
+    p_dump.add_argument("--action", choices=["new", "merge", "abandon"], default="new")
+    p_dump.add_argument("--merge-target-title", default=None)
 
     args = parser.parse_args()
 
@@ -725,7 +711,6 @@ def main():
             position=args.position,
             top_k=args.top_k,
         )
-        # 追加写入检索日志（可观测性：每次调用记录查询条件 + 命中数量）
         if getattr(args, "log_path", None):
             _append_search_log(
                 log_dir=args.log_path,
@@ -746,13 +731,15 @@ def main():
         )
     elif args.command == "dump":
         task_dir = args.task_dir or str(REPO_ROOT / args.task_name)
-        dump_success_knowledge(
+        result = dump_success_knowledge(
             args.kb_path,
             task_dir,
             args.op_name,
             action=args.action,
             merge_target_title=args.merge_target_title,
         )
+        if result is None:
+            sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -218,8 +218,10 @@ echo "精度通过，current_best 已更新为 100.0"
 格式要求:
 ```json
 {
-  "title": "<标准化中文标题，含英文关键词，如：LayerNorm 尾块 Padding 污染精度>",
-  "feature": "<错误特征签名，泛化表达，不要写死具体 shape 或 tile size，如：tail_spike 模式，尾块 mismatch 率显著高于主体>",
+  "title": "<标准化中文标题，含英文关键词，如：LayerNorm 尾块 Padding 污染精度 (Tail Padding Contamination)>",
+  "feature": "<纯自然语言描述：错误特征签名，泛化表达，不要写死具体 shape 或 tile size；禁止包含 pattern=/op_type= 标签>",
+  "patterns": ["<pattern_value>"],
+  "op_types": ["<op_type_string>"],
   "reason": "<深层原因，50-200字，描述为什么会出现此问题>",
   "fix": "<通用修复指南，50-200字，描述应该如何修复，不要包含具体行号>",
   "type": "<FIX_PRECISION_XXX 枚举值，与 [FIX_PLAN] 中的修复类型一致>"
@@ -228,7 +230,10 @@ echo "精度通过，current_best 已更新为 100.0"
 
 注意:
 - `title` 必须含英文关键词（供 RAG 检索），格式为"中文描述 (English Keywords)"
-- `feature` 要泛化，不要写 `last_dim=37` 或 `tile_size=128` 这种具体值
+- `feature` 是**纯自然语言**，泛化描述错误特征，不要写 `last_dim=37` 等具体值，**禁止**写 `pattern=xxx` 或 `op_type=xxx` 标签
+- `patterns` 是**数组**，从以下枚举选取（可多选，无明显 pattern 时写 `[]`）：
+  `tail_spike` / `uniform_offset` / `scattered` / `magnitude_correlated` / `nan_inf_contamination` / `dimension_concentration` / `boundary_concentration` / `all_wrong`
+- `op_types` 是**数组**，填写算子类型标识符（如 `["reduction"]` / `["matmul"]`），不限定枚举；与具体算子无关的通用问题写 `[]`
 - `fix` 要通用，不要引用具体代码行号或变量名
 - `type` 必须从以下枚举中选择：FIX_PRECISION_PADDING / FIX_PRECISION_TAIL / FIX_PRECISION_REDUCTION / FIX_PRECISION_TYPECAST / FIX_PRECISION_LAYOUT / FIX_PRECISION_SYNC / FIX_PRECISION_OVERFLOW / FIX_PRECISION_LOGIC / FIX_PRECISION_OTHER
 
@@ -251,7 +256,7 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_knowledge.py check \
 |---|---|---|---|
 | `new` | 无相似条目 | `new` | 无 |
 | `review_needed` | 候选与已有条目完全重叠，无新信息 | `abandon` | 无 |
-| `review_needed` | 候选有新细节（新触发场景、更精确的 fix、补充的 op_type 等） | `merge` | **必须先更新 `candidate_kb_entry.json`**（见下） |
+| `review_needed` | 候选有新细节（新触发场景、更精确的 fix、补充的 op_types 条目等） | `merge` | **必须先更新 `candidate_kb_entry.json`**（见下） |
 | `review_needed` | 关键词重叠但根因/场景本质不同 | `new` | 无 |
 
 > **merge 操作前 Agent 必须先丰富 `candidate_kb_entry.json`**：将相似条目的已有内容与新候选内容合并，形成更完整的条目（保留旧条目的核心知识，补充新触发场景或 fix 细节），再写回 `{task_dir}/precision_tuning/candidate_kb_entry.json`。Python 脚本只负责将该文件内容替换到知识库对应位置，合并本身由 Agent 完成。
