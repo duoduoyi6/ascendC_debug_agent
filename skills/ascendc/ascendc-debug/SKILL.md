@@ -348,21 +348,79 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_knowledge.py search \
 
 ---
 
-#### Sub-step 2.2: 算子计算流程分解
+#### Sub-step 2.2: 计算链分解 + 参考规范（同步完成）
 
-**读取** (按顺序):
-1. `{task_dir}/model.py` — 参考实现的 forward() 逻辑
-2. `archive_tasks/` 中最近似案例的 `model.py`（可选，用于对比计算链）
+> 读取前必须 **Read** `skills/ascendc/ascendc-debug/references/phase-a-checklist.md`（获取 `[REFERENCE_IMPL_SPEC]` 和 `[KERNEL_STEP_TRACE]` 的完整格式模板，Phase C 使用）。
 
-**产出**: `[COMPUTATION_DECOMPOSITION]` section
+**【跨轮复用检查 — attempt > 0 时先执行；attempt == 0 直接跳到"全量读取"】**
+
+> `[REFERENCE_IMPL_SPEC]` 和 `[COMPUTATION_DECOMPOSITION]` 均来自不随 kernel 修改而变化的静态文档（model.py / AscendC 规范 / archive case），每轮可安全复用。
+
+**步骤 0：查询 round_summary_0 的 spec 和 decomposition 索引路径**
+```bash
+python3 -c "
+import json, os, sys
+p = '{task_dir}/precision_tuning/round_summary_0.json'
+if not os.path.exists(p):
+    print('NO_SUMMARY'); sys.exit(0)
+d = json.load(open(p))
+s = d.get('index', {}).get('sections', {})
+spec = s.get('reference_impl_spec')
+decomp = s.get('computation_decomposition')
+print(spec if spec else 'NO_SPEC')
+print(decomp if decomp else 'NO_DECOMP')
+"
+```
+
+根据输出选择路径：
+
+| 输出 | 含义 | 处理方式 |
+|------|------|---------|
+| 两条路径均有效（不以 `NO_` 开头） | 首轮两个 section 均已索引 | → 执行**复用步骤** |
+| 任一为 `NO_SUMMARY` / `NO_SPEC` / `NO_DECOMP` | 首轮未完成或 section 缺失 | → **回退**，执行完整"全量读取" |
+
+**复用步骤（两条路径均有效时）：**
+```bash
+[ -f "{task_dir}/<spec路径>" ] && [ -f "{task_dir}/<decomp路径>" ] && echo "EXISTS" || echo "FILE_MISSING"
+```
+
+| 输出 | 处理方式 |
+|------|---------|
+| `EXISTS` | ① Read 两个文件 → ② 将内容**原样**写入本轮 `precision_audit_{attempt}.md` → **直接跳到 Sub-step 2.3 Phase B** |
+| `FILE_MISSING` | 文件已丢失 → **回退**，执行完整"全量读取" |
+
+---
+
+**全量读取**（attempt == 0，或上方复用检查回退时执行）:
+
+1. **必须读取**: `{task_dir}/model.py` — 参考实现的 forward() 逻辑
+
+2. 根据 `L8_operator.op_type` 从 `archive_tasks/` 路由，读取对应案例的 `kernel/` 目录（仅含有完整 kernel/ 的案例）：
+   - pooling → `archive_tasks/avg_pool3_d/kernel/`
+   - normalization / rmsnorm / layernorm → `archive_tasks/rms_norm/kernel/`（含 vector_tile.h）
+   - matmul / gemm / linear → `archive_tasks/matmul_leakyrelu/kernel/` 或 `archive_tasks/quant_matmul/kernel/`
+   - gather / scatter / index → `archive_tasks/gather_elements_v2/kernel/`
+   - attention / softmax → `archive_tasks/flash_attention/`（有 TileLang 设计 model_new_tilelang.py，无 AscendC kernel/；读取设计理解计算结构，AscendC 约束依赖 dsl2Ascendc_compute_cv.md）
+   - 纯 elementwise / padding / activation → `archive_tasks/circular_pad/kernel/`
+   - 无精确匹配 → 选最近似案例，在 `[REFERENCE_IMPL_SPEC]` 中标注"参考案例非精确匹配"
+
+3. **必须读取**: `skills/ascendc/ascendc-translator/references/dsl2Ascendc.md`
+   （含禁用 API 模式和常见错误）
+
+4. **必须读取**: `skills/ascendc/ascendc-translator/references/dsl2Ascendc_compute_vector.md`
+   （含 DataCopyPad 触发条件和非对齐处理）
+
+5. **必须读取**: `skills/ascendc/ascendc-translator/references/TileLang-AscendC-API-Mapping.md`
+   （AscendC API 权威参考）
+   API 详细文档：`skills/ascendc/ascendc-translator/references/AscendC_knowledge/api_reference/`
+
+**产出**: `[COMPUTATION_DECOMPOSITION]` + `[REFERENCE_IMPL_SPEC]` sections（同步产出，按 `phase-a-checklist.md` 模板填写）
 
 **要求**:
-- 参考 `decomposition_examples/` 中最匹配的示例, 按其格式和粒度分解
-- 如果有完全匹配的示例, 引用其步骤结构并根据当前算子的具体参数填充
-- 如果没有匹配的示例, 按 README.md 的粒度标准自行分解
-- 每步必须包含: 操作名、输入来源、输出 shape、数值范围预期、精度风险点
-- 如果 DSL 存在, 每步标注 DSL 对应代码
-- 标注算子计算模式: 单行归约 / 跨核归约 / 分块累加 / 滑窗累加 / 前缀累加 / 逐元素
+
+`[COMPUTATION_DECOMPOSITION]` — 参考 `decomposition_examples/` 中最匹配示例，每步必须包含：操作名、输入来源、输出 shape、数值范围预期、**精度风险点（结合 AscendC API 约束标注，如 ReduceMax 需 Duplicate 初始化、DataCopy 需 32 字节对齐等）**；标注算子计算模式：单行归约 / 跨核归约 / 分块累加 / 滑窗累加 / 前缀累加 / 逐元素。
+
+`[REFERENCE_IMPL_SPEC]` — 必须覆盖：TQue/TBuf 规范、关键 API 规范（含 ReduceMax/ReduceSum 初始化）、非对齐处理规范、禁用模式；无精确匹配案例时标注"参考案例非精确匹配"。
 
 ```
 [COMPUTATION_DECOMPOSITION]
@@ -382,11 +440,8 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_knowledge.py search \
       - 输入: <上一步输出 / 原始输入>
       - 输出 shape: <shape>
       - 数值范围预期: <基于输入范围推断>
-      - 精度风险点: <该步可能引入误差的原因>
+      - 精度风险点: <该步可能引入误差的原因，结合 AscendC API 约束标注>
       - 知识库关联: <匹配的条目编号和标题, 或 "无">
-
-    Step 2: <operation_name>
-      ... (同上格式)
 
     Step N: 最终输出
       - 与取证报告的 golden output 统计对照
@@ -400,86 +455,16 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_knowledge.py search \
 
 #### Sub-step 2.3: AscendC 实现逐步对照
 
-**Phase A: 构建参考实现规范 (强制执行, 不可跳过)**
+> `[REFERENCE_IMPL_SPEC]` 和 `[COMPUTATION_DECOMPOSITION]` 已由 Sub-step 2.2 产出；`[KERNEL_STEP_TRACE]` 格式模板已在 Sub-step 2.2 开始时 Read（`phase-a-checklist.md`）。直接从 Phase B 开始。
 
-⚠️ **在读取任何 Kernel 代码之前, 必须先完成此 Phase, 建立正确实现的参考规范。** 参考规范是后续 Phase C 结构化对照的基准。
-> 「不可跳过」的不变量是：`[REFERENCE_IMPL_SPEC]` 必须写入本轮 `precision_audit_{attempt}.md`（Gate-A 强制），无论由全量读取还是跨轮复用产出，约束等价。
-
----
-
-**【Phase A 跨轮复用检查 — attempt > 0 时先执行；attempt == 0 直接跳到"Phase A 读取"】**
-
-> `[REFERENCE_IMPL_SPEC]` 完全来自参考文档（dsl2Ascendc、archive case），不依赖被调试的 kernel 代码。每轮 kernel 修改后规范内容不变，可安全复用。
-
-**步骤 A-0：查询 round_summary_0 的 spec 索引路径**
-```bash
-python3 -c "
-import json, os, sys
-p = '{task_dir}/precision_tuning/round_summary_0.json'
-if not os.path.exists(p):
-    print('NO_SUMMARY'); sys.exit(0)
-d = json.load(open(p))
-v = d.get('index', {}).get('sections', {}).get('reference_impl_spec')
-print(v if v else 'NO_SPEC')
-"
-```
-
-根据输出选择路径：
-
-| 输出值 | 含义 | 处理方式 |
-|--------|------|---------|
-| 有效相对路径（不以 `NO_` 开头） | 首轮 spec 已由 Gate-A 索引写入 | → 执行**复用步骤** |
-| `NO_SUMMARY` | round_summary_0.json 不存在（首轮 Gate-A 未通过，spec 从未生成） | → **回退**，执行完整"Phase A 读取" |
-| `NO_SPEC` | index.sections.reference_impl_spec 为 null（section 缺失） | → **回退**，执行完整"Phase A 读取" |
-
-**复用步骤（输出为有效路径时）：**
-```bash
-[ -f "{task_dir}/<上步输出路径>" ] && echo "EXISTS" || echo "FILE_MISSING"
-```
-
-| 输出 | 处理方式 |
-|------|---------|
-| `EXISTS` | ① Read `{task_dir}/<路径>` → ② 将内容**原样**写入本轮 `precision_audit_{attempt}.md` 的 `[REFERENCE_IMPL_SPEC]` section → ③ Read `skills/ascendc/ascendc-debug/references/phase-a-checklist.md`（取 `[KERNEL_STEP_TRACE]` 格式模板，Phase B 使用）→ **直接跳到 Phase B** |
-| `FILE_MISSING` | spec 文件已丢失 → **回退**，执行完整"Phase A 读取" |
-
-**Phase C 执行中途按需查阅（复用路径适用；无需重走完整 Phase A）：**
-
-当 Phase C 对照中遇到以下情况，只需按需 Read 对应文档的相关段落即可，**不必重新执行完整 Phase A**：
+**Phase C 执行中途按需查阅（无需重走 Sub-step 2.2 全量读取）：**
 
 | 触发情形 | 应 Read 的文档 |
 |----------|--------------|
 | spec 未覆盖的 API（如 `Vmax`、`Sub`、负无穷常量写法） | `skills/ascendc/ascendc-translator/references/TileLang-AscendC-API-Mapping.md` |
 | 对齐阈值不明确（32-byte 触发条件细节） | `skills/ascendc/ascendc-translator/references/dsl2Ascendc_compute_vector.md` |
 | 出现 spec 未列举的禁用模式 | `skills/ascendc/ascendc-translator/references/dsl2Ascendc.md` |
-| archive case 与当前 op_type 关联性存疑 | `archive_tasks/<最近似案例>/kernel/`（路由表见下方"Phase A 读取"第 1 条） |
-
----
-
-**Phase A 读取**（attempt == 0，或上方复用检查回退时执行）:
-
-1. 根据 `L8_operator.op_type` 从 `archive_tasks/` 路由，读取对应案例的 `kernel/` 目录（仅含有完整 kernel/ 的案例）：
-   - pooling → `archive_tasks/avg_pool3_d/kernel/`
-   - normalization / rmsnorm / layernorm → `archive_tasks/rms_norm/kernel/`（含 vector_tile.h）
-   - matmul / gemm / linear → `archive_tasks/matmul_leakyrelu/kernel/` 或 `archive_tasks/quant_matmul/kernel/`
-   - gather / scatter / index → `archive_tasks/gather_elements_v2/kernel/`
-   - attention / softmax → `archive_tasks/flash_attention/`（有 TileLang 设计 model_new_tilelang.py，无 AscendC kernel/；读取设计理解计算结构，AscendC 约束依赖 dsl2Ascendc_compute_cv.md）
-   - 纯 elementwise / padding / activation → `archive_tasks/circular_pad/kernel/`
-   - 无精确匹配 → 选最近似案例，在 [REFERENCE_IMPL_SPEC] 中标注"参考案例非精确匹配"
-
-2. **必须读取**: `skills/ascendc/ascendc-translator/references/dsl2Ascendc.md`
-   （含禁用 API 模式和常见错误）
-
-3. **必须读取**: `skills/ascendc/ascendc-translator/references/dsl2Ascendc_compute_vector.md`
-   （含 DataCopyPad 触发条件和非对齐处理）
-
-4. **必须读取**: `skills/ascendc/ascendc-translator/references/TileLang-AscendC-API-Mapping.md`
-   （AscendC API 权威参考）
-   API 详细文档：`skills/ascendc/ascendc-translator/references/AscendC_knowledge/api_reference/`
-
-**Phase A 产出**: `[REFERENCE_IMPL_SPEC]` section (写入 precision_audit_{attempt}.md, Gate-A 必填)
-
-> 填写前必须 **Read** `skills/ascendc/ascendc-debug/references/phase-a-checklist.md`，
-> 其中包含 `[REFERENCE_IMPL_SPEC]` 和 `[KERNEL_STEP_TRACE]` 的完整格式模板。
+| archive case 与当前 op_type 关联性存疑 | `archive_tasks/<最近似案例>/kernel/`（路由表见 Sub-step 2.2 全量读取第 2 条） |
 
 ---
 
@@ -494,11 +479,53 @@ print(v if v else 'NO_SPEC')
 
 注意：AscendOpGenAgent 中 host 逻辑（TilingFunc）在 pybind11.cpp 内，不是单独的 op_host.cpp。
 
-**产出**: `[REFERENCE_IMPL_SPEC]` + `[KERNEL_STEP_TRACE]` sections
+**产出**: `[KERNEL_STEP_TRACE]` section（经 Phase B+ 实测数据补充后填写）
+
+---
+
+**Phase B+: 插桩探针（读代码后，比对前）**
+
+在对全部 kernel 文件有了完整认知（Phase B 已读完）、但还未开始结构化比对之前，对 representative case 跑一次带中间值输出的探针，使 Phase C 的逐步比对能同时呈现"规范期望"与"代码实测"。
+
+**跳过条件（4 条全满足才可跳过，缺任一必须执行）**：
+1. `attempt > 0`（首轮永不跳过）
+2. `primary_hint` 与上一轮相同（问题性质未变）
+3. 上一轮 `[INSTRUMENTATION_FINDINGS]` 已存在且覆盖了 Phase B 识别出的疑似阶段
+4. Phase B 阅读中未发现上一轮未覆盖的新疑似路径
+
+**跳过时**：必须写入 `[L5_PROBE]` section 并注明跳过理由（Gate-A 强制 section 存在，内容可以是理由说明）。
+
+**执行步骤（自包含，共 6 步）**：
+
+1. 若 `{task_dir}/debug_{op_name}_precision.py` 不存在，复制 debug_precision_template.py 并替换占位符，将 `CASE_INDEX` 设为 `representative_case_idx`（来自 `[FORENSICS_SUMMARY]` 多 case 聚合字段）
+2. 在 Compute() 函数的 3 个阶段各插一个 printf 探针点：
+   - P1：CopyIn 后紧跟 `inQueue.DeQue()` 之后（DeQue 后立即读取，违反 R2 导致 UB 脏数据）
+   - P2：主计算逻辑中间点（如归约结束后、主乘法后）
+   - P3：CopyOut 前紧跟计算写入完成、`outQueue.EnQue()` 之前
+   - 必须遵守 5 条核心规则：R1（GetBlockIdx()==0 过滤）、R2（DeQue 后读取）、R3（half/bf16 转 float 再 printf）、R4（阶段标记字符串）、R5（DumpTensor 只 dump 首 16~32 个元素）
+3. 重编译
+4. 运行 `debug_{op_name}_precision.py` Section 1（仅运行 representative case 原始复现），从 stdout 提取 printf 中间值
+5. 将每阶段实测值写入 `[L5_PROBE]` section（见下方格式）
+6. 从 `precision_tuning/history/attempt_{attempt}/code_snapshot/kernel/` 恢复 kernel 文件（清除 printf），重编译（确保 binary 与源码一致；Sub-step 2.5 C/D 实验使用此 clean binary，无需再次重编译）
+
+**`[L5_PROBE]` 产出格式**：
+```
+[L5_PROBE]
+状态: 已执行 / 跳过（理由: <满足4条跳过条件的具体举证>）
+探针阶段:
+  P1 (CopyIn 后, DeQue 后读取): <实测值，如 x[0]=0.5000 x[1]=0.7031 len=128 / N/A>
+  P2 (计算中点): <实测值 / N/A>
+  P3 (CopyOut 前, EnQue 前读取): <实测值 / N/A>
+异常首现: <P1前 / P1-P2间 / P2-P3间 / P3后，或"暂无明确异常">
+```
+
+---
+
+**Phase C: 结构化对照**
 
 **Phase C 要求 (结构化对照)**:
 - 将 Kernel 的 Compute() 函数拆成与 Sub-step 2.2 对应的步骤
-- 每步标注: AscendC API 名称、count 参数值、buffer 来源、代码行号
+- 每步标注: AscendC API 名称、count 参数值、buffer 来源、代码行号、**L5_PROBE 实测中间值**
 - 逐步与 2.2 的计算链对齐, 用 ✅/⚠️/❌ 标注匹配状态
 - **对照 `[REFERENCE_IMPL_SPEC]` 逐项检查以下 5 个维度**:
   1. TQue/TBuf 数据流是否与规范一致 (特别: TBuf 是否绕过 outQueue 直接 DataCopy)
@@ -508,7 +535,7 @@ print(v if v else 'NO_SPEC')
   5. dsl2Ascendc.md 中列出的禁用模式是否在代码中出现
 - 遇到不确定的 API 名称时，查阅 `TileLang-AscendC-API-Mapping.md` 确认（如 Max vs Vmax、Subs 是否存在、负无穷常量写法等）
 
-> `[KERNEL_STEP_TRACE]` 的完整格式模板在 `references/phase-a-checklist.md` 中（Phase A 时已 Read），直接使用其格式填写。
+> `[KERNEL_STEP_TRACE]` 的完整格式模板在 `references/phase-a-checklist.md` 中（Sub-step 2.2 开始时已 Read），直接使用其格式填写，每个 K-Step 补充 L5_PROBE 实测中间值字段。
 
 ---
 
@@ -540,7 +567,7 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_knowledge.py search \
 
 记住检索到的条目, 用于下方的 `[KNOWLEDGE_MATCH]`。
 
-**产出**: `[KNOWLEDGE_MATCH]` + `[ROOT_CAUSE]` + `[FIX_PLAN]` + `[TARGET_FILES]` + `[DIRECTION_ASSESSMENT]` sections
+**产出**: `[KNOWLEDGE_MATCH]` + `[ROOT_CAUSE]` + `[CAUSAL_CHAIN_ANALYSIS]` + `[FIX_PLAN]` + `[TARGET_FILES]` + `[DIRECTION_ASSESSMENT]` sections
 
 **要求**: 根因判断必须基于 2.1~2.3 的具体发现, 不允许"凭直觉"给出根因。证据链中必须引用具体的 K-Step 编号和取证数据字段。
 
@@ -572,6 +599,23 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_knowledge.py search \
     4. 分解对照: <2.2 的哪个 Step 与 2.3 的哪个 K-Step 不一致>
     5. 逻辑推导: <为什么此代码问题会产生取证中观察到的 diff 模式>
 
+[CAUSAL_CHAIN_ANALYSIS]
+  第1步 - 哪些输出量错了:
+    - 主输出: <名称, mismatch_ratio, max_abs_diff（来自 FORENSICS_SUMMARY）>
+    - 辅助输出（如 scales, workspace）: <名称, mismatch_ratio 或 "无"，来自 forensics per_output>
+  第2步 - 哪些中间量也错了:
+    - L5_PROBE P1 (CopyIn 后): <正常 / 异常，引用实测值>
+    - L5_PROBE P2 (计算中点): <正常 / 异常，引用实测值>
+    - L5_PROBE P3 (CopyOut 前): <正常 / 异常，引用实测值>
+    - 错误首现区间: <P1前 / P1-P2间 / P2-P3间 / P3后>
+  第3步 - 计算链排除法:
+    - 已排除（产出正常的阶段）: <列出 K-Step 编号>
+    - 最小疑似路径: <缩小后的 K-Step 范围>
+  第4步 - 特异性 vs 通用性:
+    - L6: 最后一维对齐情况是否影响此路径 <是/否，引用具体值>
+    - L8: 是否依赖特定属性分支（如 activate_left=True）<是/否，引用属性>
+    - 结论: case 特有问题 / 通用实现缺陷
+
 [FIX_PLAN]
   修复方向: <具体描述, 引用变量名和行号>
   修复类型: <对应知识库 type, 如 FIX_PRECISION_TAIL>
@@ -601,16 +645,6 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_knowledge.py search \
 - 你**必须**先读 `tuning_directions.json` 获取跨轮方向全貌，再按需通过 `round_summary_N.json` 的 index 路径深入具体 section 小文件
 - **禁止重复 outcome 为 regressed 或连续 stagnant 的 fix_type**
 - 如某轮 `index.sections.root_cause` 为 null，fallback 读 `index.audit_full`
-
-Gate 验证:
-```bash
-python3 skills/ascendc/ascendc-debug/scripts/precision_gate.py \
-    --step audit --op-name {op_name} --task-name {task_name} --attempt {attempt}
-```
-
-⛔ **Gate-A 未通过 → 补全缺失的 section, 不计入轮次。Gate-A 现在检查 8 个必填 section: FORENSICS_SUMMARY, COMPUTATION_DECOMPOSITION, REFERENCE_IMPL_SPEC, KERNEL_STEP_TRACE, ROOT_CAUSE, FIX_PLAN, TARGET_FILES, EXPERIMENT_RESULTS。注意：EXPERIMENT_RESULTS 若跳过实验，需写入跳过理由（满足4条跳过条件的举证），同样视为通过。**
-
-> Gate-A 通过后，脚本自动提取 sections 小文件并写入 `round_summary_{attempt}.json` 初始字段（diagnostics + index）。**Agent 无需手动写 round_summary。**
 
 ---
 
@@ -734,7 +768,7 @@ bash skills/ascendc/ascendc-debug/references/run_precision_debug.sh {task_name} 
 
 错误周期判断：
   周期 = tileLength       → 搬运/偏移问题（优先实验 C）
-  周期 = 向量操作宽度(8/16/32) → 计算流程问题（优先 Sub-step 2.6 插桩）
+  周期 = 向量操作宽度(8/16/32) → 计算流程问题（参见 [L5_PROBE]，不足时启用 Sub-step 2.6）
   与核边界对齐            → 多核 tiling 问题（优先实验 A）
 ```
 
@@ -785,17 +819,33 @@ bash skills/ascendc/ascendc-debug/references/run_precision_debug.sh {task_name} 
 - NEVER 同时改变多个变量（如同时单核 + 固定输入）——无法定位原因
 - NEVER 跳过调试脚本生成直接靠肉眼判断实验结果
 
+Gate 验证:
+```bash
+python3 skills/ascendc/ascendc-debug/scripts/precision_gate.py \
+    --step audit --op-name {op_name} --task-name {task_name} --attempt {attempt}
+```
+
+⛔ **Gate-A 未通过 → 补全缺失的 section，不计入轮次。Gate-A 现在检查 10 个必填 section:
+FORENSICS_SUMMARY, COMPUTATION_DECOMPOSITION, REFERENCE_IMPL_SPEC, KERNEL_STEP_TRACE,
+L5_PROBE, ROOT_CAUSE, CAUSAL_CHAIN_ANALYSIS, FIX_PLAN, TARGET_FILES, EXPERIMENT_RESULTS。
+注意：EXPERIMENT_RESULTS 若跳过实验，需写入跳过理由（满足 4 条跳过条件的举证），同样视为通过。L5_PROBE 若跳过探针，需写入跳过理由（满足 4 条跳过条件的举证），同样视为通过。**
+
+> Gate-A 通过后，脚本自动提取 sections 小文件并写入 `round_summary_{attempt}.json` 初始字段（diagnostics + index）。**Agent 无需手动写 round_summary。**
+
 ---
 
-### Sub-step 2.6: 插桩定位（实验缩小范围后仍无法定位精确行时启用）
+### Sub-step 2.6: 插桩定位（默认执行，4 条全满足才可跳过）
 
-#### 触发条件（满足任一即启用）
+#### 跳过条件（4 条**同时满足**才可跳过，缺任意一条必须执行）
 
-1. Sub-step 2.5 实验后 `[ROOT_CAUSE]` 置信度仍为 MEDIUM（根因假设未被确认）
-2. 实验已将问题缩小到某个计算阶段，但无法确定哪一行/哪一个 API 调用出错
-3. `primary_hint = nan_inf_contamination`（数值溢出类问题必须插桩追踪传播路径）
+1. Phase B+ 已产出 `[L5_PROBE]`（非"跳过理由"版本，是实测数值版本）
+2. `[CAUSAL_CHAIN_ANALYSIS]` 的"错误首现区间"已精确定位到单个 K-Step
+3. `[ROOT_CAUSE]` 置信度 = HIGH 且修复位置已精确到代码行号
+4. `primary_hint ≠ nan_inf_contamination`（溢出传播类问题必须用插桩追踪，不可跳过）
 
-**不触发条件**：实验后 `[ROOT_CAUSE]` 已为 HIGH 且修复位置已精确定位到代码行 → 直接进入 Step 3。
+**首轮（attempt == 0）且 Phase B+ 未执行时：跳过条件 1 永不成立，必须执行。**
+
+**职责边界**：Sub-step 2.6 是 Phase B+ 的补充精化，不是替代。Phase B+ 做三阶段粗粒度探针（P1/P2/P3）；Sub-step 2.6 在 Phase B+ 已定位的可疑阶段内做 API 级二分搜索，精确到单行。
 
 ---
 

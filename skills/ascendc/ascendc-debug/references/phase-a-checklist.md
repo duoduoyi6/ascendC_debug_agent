@@ -48,6 +48,7 @@
       - 参数: count=<value>, src=<buffer>, dst=<buffer>
       - 对应计算链: Step <N> (<operation_name>)
       - 匹配状态: ✅ 匹配 / ⚠️ 参数偏差: <描述> / ❌ 缺失或多余
+      - 实测中间值 (来自 L5_PROBE): <值，如 "P2 后 out[0]=0.5312" / N/A（此阶段未被探针覆盖）>
 
     K-Step 2: ...
     ...
@@ -104,4 +105,5 @@
     - worst element index=<index> → 对应 kernel 中的 <函数/代码块>
     - 该元素位于 main block / tail block?
     - 对应的 K-Step: <编号>
+    - 对应的 L5_PROBE 探针阶段: <P1/P2/P3，或"探针未覆盖">
 ```

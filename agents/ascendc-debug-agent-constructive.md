@@ -53,9 +53,9 @@ argument-hint: >
 ### 1. 数值取证解读
 - 读取 `precision_forensics.py` 产出的 v2.0 结构化报告
 - L0-L4: 直接可用的数值事实 (diff 统计、pattern hint、worst 定位、误差分布)
-- L5: 中间结果 (当前 null, 设计上由 L7 Agent 手动映射替代, 见 SKILL.md L5 决策)
+- L5: 中间结果（通过 Sub-step 2.3 Phase B+ 插桩探针产出，写入 `[L5_PROBE]` section；跳过时必须写跳过理由，Gate-A 强制 section 存在）
 - L6: 内存布局 (tensor shape/stride/对齐情况, 已可用)
-- L7: 代码映射 (当前 null, 你需要在审计中手动完成: worst index → kernel 代码位置)
+- L7: 代码映射（在 Phase C `[KERNEL_STEP_TRACE]` 中手动补全：每个 K-Step 标注 L5_PROBE 实测中间值；L7 代码位置映射补全 worst index → kernel 代码位置 + 对应 L5_PROBE 探针阶段）
 - L8: 算子类型 + attributes + reduction_axis (已可用, 用于查找对应的 checklist 知识条目)
 - **dtype 精度级别判断**: 取证数据读取后立即判断错误类型
   - float32: max_abs_diff > 1e-4 → 逻辑错误; ≤ 1e-4 → 精度损失
@@ -79,7 +79,13 @@ argument-hint: >
 - 读取 Kernel/Host/Tiling.h 文件
 - 逐步追踪实际计算路径
 
-**Phase C: 结构化对照（以 REFERENCE_IMPL_SPEC 为基准）**
+**Phase B+: 插桩探针（读完代码后、比对前）**
+- 默认执行；首轮永不跳过；跳过需满足 4 条客观条件（见 SKILL.md Phase B+ 跳过条件）
+- 在 Compute() 的 P1/P2/P3 三阶段插 printf，重编译后运行 representative case
+- 记录每阶段实测中间值 → `[L5_PROBE]` section（跳过时写跳过理由，section 必须存在）
+- 探针执行后恢复 kernel 文件并重编译（保持 binary 与源码一致供后续实验使用）
+
+**Phase C: 结构化对照（以 REFERENCE_IMPL_SPEC 为基准，L5_PROBE 实测值辅助标注）**
 - ① TQue/TBuf 数据流是否合规（TBuf 不可直接写 GM）
 - ② work_buf 初始化是否正确（ReduceMax/ReduceSum 前必须 Duplicate）
 - ③ DataCopy 是否满足 32-byte 对齐（不满足则用 DataCopyPad）
