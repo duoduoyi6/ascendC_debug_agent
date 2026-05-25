@@ -489,8 +489,11 @@ class _LegacyPrecisionChecker:
             except (json.JSONDecodeError, OSError):
                 pass
 
+        result_path = os.path.join(self.tuning_dir, f"validation_result_attempt_{self.attempt}.json")
         if stop_reason_code == "precision_passed":
             outcome = "passed"
+        elif improvement_ratio is None and not os.path.exists(result_path):
+            outcome = "unknown"  # validation_result 文件缺失，不应误判为 stagnant
         elif improvement_ratio is None:
             outcome = "stagnant"
         elif improvement_ratio < -0.05:
@@ -831,23 +834,6 @@ class _LegacyPrecisionChecker:
     def _kernel_dir(self):
         kdir = os.path.join(self.task_dir, "kernel")
         return kdir if os.path.isdir(kdir) else None
-
-    def _check_import_name_match(self) -> bool:
-        wrapper = os.path.join(self.task_dir, "model_new_ascendc.py")
-        pybind  = os.path.join(self.task_dir, "kernel", "pybind11.cpp")
-        if not os.path.exists(wrapper) or not os.path.exists(pybind):
-            return False
-        wrapper_text = open(wrapper).read()
-        import_m = re.search(r"import\s+(_\w+)", wrapper_text)
-        if not import_m:
-            return False
-        import_name = import_m.group(1)
-        pybind_text = open(pybind).read()
-        module_m = re.search(r"PYBIND11_MODULE\s*\(\s*(\w+)\s*,", pybind_text)
-        if not module_m:
-            return False
-        module_name = "_" + module_m.group(1)
-        return import_name == module_name
 
     def _result(self, gate_name: str, checks: dict) -> dict:
         return {"gate": gate_name, "passed": all(checks.values()), "checks": checks}

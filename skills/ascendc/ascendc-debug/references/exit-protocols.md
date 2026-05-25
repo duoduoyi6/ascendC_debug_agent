@@ -1,7 +1,7 @@
 # AscendC Debug — 归档与退出协议
 
 > **读取时机**：Gate-V 返回信号后立即 Read 本文件：
-> - **CONTINUE** → 执行「归档当前轮次」后 `attempt += 1`，回到 Step 1
+> - **CONTINUE** → 执行「归档当前轮次」后 `attempt += 1`，回到 Step 0.3（重新按当前 failure_type 路由到对应 Step 1 分支）
 > - **PASS** → 执行 Step 5 成功收尾
 > - **STOP**（非 PASS）→ 执行 Step 6 失败报告
 > - **所有结局**退出前必须执行 Step 7，产出 `debug_trace.md` + `debug_status.json`
@@ -46,13 +46,15 @@ cp "{task_dir}/model_new_ascendc.py" \
    "{task_dir}/precision_tuning/history/attempt_{next_attempt}/code_snapshot/model_new_ascendc.py"
 ```
 
-然后 `attempt += 1`, 回到 Step 1。
+然后 `attempt += 1`, 回到 Step 0.3（重新按当前 failure_type 路由到对应 Step 1 分支）。
 
 ---
 
 ### Step 7: 退出前强制产物（所有分支 / 所有结局共用）
 
-> **本 Step 是 Step 5 / Step 6 的共同前置**：无论 session 以 `success` / `failed` / `stopped_by_gate` / `stopped_by_loop_limit` / `progressed_to_new_failure_type` / `timeout` / `skipped_env_issue` / `skipped_unsupported_type` 中哪种结局退出，**必须**在退出前产出以下两份文件。任一缺失将导致本次 debug 叙事丢失、下游无法判定结果。
+> **退出前最后一步（所有结局共用）**：无论 session 以 `success` / `failed` / `stopped_by_gate` / `stopped_by_loop_limit` / `timeout` / `skipped_env_issue` / `skipped_unsupported_type` / `crashed` 中哪种结局退出，**必须**在退出前产出以下两份文件。任一缺失将导致本次 debug 叙事丢失、下游无法判定结果。
+>
+> 执行顺序：Step 5/6 的实质动作（归档/全量验证/知识库写入）先完成，Step 7 最后执行（需要其产出的数值写入 `debug_trace.md`），然后再输出 Step 5/6 的最终报告。
 
 #### 7.1 `{task_dir}/debug_trace.md`（详细叙事，4 节强制 + 可选附录）
 
@@ -88,11 +90,10 @@ cp "{task_dir}/model_new_ascendc.py" \
 ### Attempt 1 ... N（同上）
 
 ## 3. 最终 Verdict（强制）
-- session_outcome: success / failed / stopped_by_gate / stopped_by_loop_limit / progressed_to_new_failure_type / timeout / skipped_env_issue / skipped_unsupported_type / crashed
+- session_outcome: success / failed / stopped_by_gate / stopped_by_loop_limit / timeout / skipped_env_issue / skipped_unsupported_type / crashed
 - 退出时 verify_status 快照
 - 若 success: 确认全量 `.json.bak` 恢复后 verify 通过
 - 若 failed / stopped_*: 明确原因
-- 若 progressed_to_new_failure_type: 新 failure_type 是什么（需用户独立再触发本 agent 才能进入新分支）
 
 ## 4. 产物清单（强制）
 - 各轮 audit 文件相对 {task_dir} 路径
@@ -126,7 +127,7 @@ cp "{task_dir}/model_new_ascendc.py" \
 ```json
 {
   "schema_version": 1,
-  "session_outcome": "success | failed | stopped_by_gate | stopped_by_loop_limit | progressed_to_new_failure_type | timeout | skipped_env_issue | skipped_unsupported_type | crashed",
+  "session_outcome": "success | failed | stopped_by_gate | stopped_by_loop_limit | timeout | skipped_env_issue | skipped_unsupported_type | crashed",
   "session_branch": "1-P | 1-B | 1-I | 1-R | 1-T",
   "started_at": "<ISO>",
   "ended_at": "<ISO>",
@@ -140,8 +141,8 @@ cp "{task_dir}/model_new_ascendc.py" \
 
 **字段约束**：
 - `schema_version = 1`（本版本固定）
-- `session_outcome` 必须是上列 9 种之一；其他值视为未知结局，下游消费者应视同 `crashed`
-- `session_branch` 必须与 Step 0.3 锁定的分支一致
+- `session_outcome` 必须是上列 8 种之一；其他值视为未知结局，下游消费者应视同 `crashed`
+- `session_branch` 填写 session 入口 failure_type 对应的分支标签（与 `entry_failure_type` 一致，failure_type 后续变化后不更新此字段）
 - `started_at` / `ended_at` 用 ISO 8601（带 UTC 时区）
 - `final_failure_type` 从**最后一次**本 session 内触发的 `utils/verification_ascendc.py` + `utils/classify_verify_result.py` 产出读取；若一次都没跑（例如 `skipped_*`），与 `entry_failure_type` 一致
 - `final_verify_status_path` 也指向最后一次本 session 内的 phase8_attempt_N.json；未跑时为 `null`
@@ -151,7 +152,7 @@ cp "{task_dir}/model_new_ascendc.py" \
 - ⛔ **禁止 append 或重写 `{task_dir}/trace.md`** —— 主 agent 产物，本 skill 全程只读；所有 debug 叙事 / verdict 都落到 `debug_trace.md` + `debug_status.json`
 - ⛔ **禁止修改 `utils/` / `CMakeLists.txt` / `setup.py` / `agents/` / `skills/`** —— 只能改 `{task_dir}/kernel/` 下文件，`{task_dir}/precision_tuning/` 下写 skill 产物
 - ⛔ **禁止删除或重写 `{task_dir}/.verify_status/latest.json`、`{task_dir}/{op_name}.json.bak`** —— 上游 artefact / 全量用例备份，只读
-- 写完 `debug_trace.md` + `debug_status.json` 后，再进入 Step 5（成功）或 Step 6（失败）的**报告输出**部分；Step 5 / 6 里的"归档当前轮 / 更新 current_best / 全量验证"等动作在写 Step 7 产物前完成即可（Step 7 是退出前的最后一步，只负责 debug_trace / debug_status 两份产物）
+- Step 7 是退出前的最后一步，只负责产出 `debug_trace.md` + `debug_status.json`；Step 5/6 里的"归档/更新 current_best/全量验证/知识库写入"等实质动作需在 Step 7 之前完成（Step 7 的 debug_trace 要引用这些结果）；Step 5/6 的最终报告输出（如 `[PRECISION_TUNING_RESULT]`）在 Step 7 产出后再输出
 
 ---
 
@@ -166,7 +167,11 @@ cp "{task_dir}/model_new_ascendc.py" \
 ```bash
 if [ -f "{task_dir}/{op_name}.json.bak" ]; then
     cp "{task_dir}/{op_name}.json.bak" "{task_dir}/{op_name}.json"
-    bash skills/ascendc/ascendc-translator/references/evaluate_ascendc.sh {task_name}
+    STDOUT_FULL="{task_dir}/.verify_logs/phase8_attempt{attempt}_full.stdout"
+    STDERR_FULL="{task_dir}/.verify_logs/phase8_attempt{attempt}_full.stderr"
+    mkdir -p "{task_dir}/.verify_logs"
+    python3 utils/verification_ascendc.py {task_dir} >"$STDOUT_FULL" 2>"$STDERR_FULL"; rc=$?
+    python3 utils/classify_verify_result.py --exit-code $rc --stdout-path "$STDOUT_FULL" --stderr-path "$STDERR_FULL" --task-dir {task_dir} --phase 8 --attempt {attempt} --write-status
 fi
 ```
 

@@ -1,6 +1,6 @@
 # Phase A/C 模板：[REFERENCE_IMPL_SPEC] 与 [KERNEL_STEP_TRACE]
 
-> **读取时机**：进入 Sub-step 2.3 Phase A 填写 `[REFERENCE_IMPL_SPEC]` 之前，以及 Phase C 填写 `[KERNEL_STEP_TRACE]` 之前，必须 Read 本文件获取完整格式模板。
+> **读取时机**：进入 Sub-step 2.2 填写 `[REFERENCE_IMPL_SPEC]` 之前（同时获取 Sub-step 2.3 Phase C 所需的 `[KERNEL_STEP_TRACE]` 模板），必须 Read 本文件。
 
 ---
 

@@ -1,6 +1,6 @@
 # Step 1-B: Build Error Analysis（build_failed 分支）
 
-> **读取时机**：`Step 0.3` 将 `session_branch` 锁定为 `1-B`（`failure_type == build_failed`）后，立即 Read 本文件。
+> **读取时机**：`Step 0.3` 按当前 `failure_type == build_failed` 路由到本分支时，立即 Read 本文件。
 
 **输入**:
 - `{task_dir}/.verify_status/latest.json` — 结构化状态 + `log_path` + `compile.error_summary`
@@ -31,6 +31,6 @@
 - `skills/ascendc/ascendc-translator/references/AscendC_knowledge/api_reference/`（API 详细文档）
 
 **Step 4（共用）**: 修复后调 `utils/verification_ascendc.py` + `utils/classify_verify_result.py` 重跑，然后走 `Gate-BUILD-V`：
-- `verify_status.failed_step` 从 `compile` 推进到 `import`/`execute`/`verify`/`null` = 进步（跨分支语义下仍算 `progressed_to_new_failure_type`，本 session 结束）
+- `verify_status.failed_step` 从 `compile` 推进到 `import`/`execute`/`verify`/`null` = 进步（Gate-V 自动切换到新 failure_type 对应分支继续 debug）
 - 仍卡在 `compile` 且 error 行未变 = 停滞
-- `compile` 阶段 passed 且 `failure_type != build_failed` = 本分支完成（不切分支，写 `debug_status.json` 后退出）
+- `failure_type == success` = 成功，进入 Step 5

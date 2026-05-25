@@ -77,21 +77,9 @@ class BuildBranch:
                 c = json.loads(curr.read_text())
             except (OSError, json.JSONDecodeError):
                 c = {}
-            curr_failed_step = c.get("failed_step")
-            curr_failure_type = c.get("failure_type")
-            checks["curr_failed_step"] = curr_failed_step
-            progressed = (
-                curr_failed_step in ("execute", "verify", None)
-                and curr_failure_type != "build_failed"
-            )
-            checks["progressed_past_compile"] = progressed
-            if curr_failure_type == "success":
+            checks["curr_failed_step"] = c.get("failed_step")
+            if c.get("failure_type") == "success":
                 loop_signal = "PASS"
-            elif progressed:
-                # compile 阶段已推进到 execute/verify，failure_type 已变化 → 跨分支进展
-                # SKILL.md §跨分支跳转禁止：本 session 结束，标 progressed_to_new_failure_type
-                loop_signal = "STOP"
-                checks["stop_reason_code"] = "progressed_to_new_failure_type"
             else:
                 loop_signal = "STOP" if attempt >= MAX_ATTEMPTS - 1 else "CONTINUE"
         ok = loop_signal in ("PASS", "CONTINUE")

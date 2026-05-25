@@ -1,6 +1,6 @@
 # Step 1-R: Runtime Error Analysis（runtime_error 分支）
 
-> **读取时机**：`Step 0.3` 将 `session_branch` 锁定为 `1-R`（`failure_type == runtime_error`）后，立即 Read 本文件。
+> **读取时机**：`Step 0.3` 按当前 `failure_type == runtime_error` 路由到本分支时，立即 Read 本文件。
 
 **输入**:
 - `{task_dir}/.verify_status/latest.json` — 结构化状态 + `execute.crash_signal`（SIGSEGV / SIGABRT / SIGBUS / SIGFPE）
@@ -29,4 +29,4 @@
 
 **Step 4（共用）**: 修复后调 `utils/verification_ascendc.py` + `utils/classify_verify_result.py` 重跑，然后走 `Gate-RUNTIME-V`：
 - `verify_status.failure_type != runtime_error` 或 crash 位置 / signal 变化 = 进步（若仍是 runtime_error 但位置变则视为 `progressed`）
-- `failure_type` 变为 `precision_failed` = 进步但跨分支，本 session 结束
+- `failure_type` 变为 `precision_failed` = 进步（Gate-V 自动切换到对应分支继续 debug）

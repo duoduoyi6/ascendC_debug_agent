@@ -11,13 +11,13 @@ subagent:
     覆盖 AscendC build / import / runtime / timeout / precision 五类失败。
     每类失败都涉及取证→深度分析→修复→验证的多步循环,
     需要 Agent 结合数值/日志证据和代码理解做深度推理。
-    session 内按 verify_status.failure_type 锁定一条分支, 不跨分支跳转。
+    failure_type 变化时 Gate-V 自动切换到对应分支继续 debug, 直到 success 或达到 MAX_ATTEMPTS。
 ---
 
 ## What I do
 
 修复 AscendC 算子的 **build / import / runtime / timeout / precision** 五类失败。流程:
-1. 读取 `{task_dir}/.verify_status/latest.json` 确定 `failure_type`（缺失时由 agent 的 Initialization Protocol 先产出），分流到对应 Step 1 分支（一次 session 锁定一条分支）
+1. 读取 `{task_dir}/.verify_status/latest.json` 确定 `failure_type`（缺失时由 agent 的 Initialization Protocol 先产出），分流到对应 Step 1 分支（failure_type 变化时 Gate-V 自动切换分支，持续 debug）
 2. Agent 结合上下文 + 代码 + 日志 / 数值证据 + 知识库做深度分析, 定位根因并制定修复计划
 3. Agent 修复代码（只能改 `{task_dir}/kernel/` 下文件）
 4. 重新编译 + 验证（通过 `utils/verification_ascendc.py` + `utils/classify_verify_result.py`）
@@ -70,6 +70,7 @@ if [ ! -d "{task_dir}/precision_tuning/history/baseline/code_snapshot" ]; then
        "{task_dir}/precision_tuning/history/baseline/code_snapshot/kernel/"
     cp "{task_dir}/model_new_ascendc.py" \
        "{task_dir}/precision_tuning/history/baseline/code_snapshot/model_new_ascendc.py"
+    python3 skills/ascendc/ascendc-debug/scripts/anticheat.py snapshot {task_dir}
     echo "基线快照已保存，后续可从 baseline 恢复"
 fi
 ```
@@ -95,7 +96,7 @@ cp "{task_dir}/model_new_ascendc.py" \
 
 ---
 
-### Step 0.3: 读 verify_status，锁定 session_branch
+### Step 0.3: 读 verify_status，路由 Step 1 分支
 
 ```bash
 # 读结构化 verify_status（最后一次 evaluate 的 failure_type / failed_step / log 路径）
@@ -105,22 +106,21 @@ python3 skills/ascendc/ascendc-debug/scripts/verify_status.py \
 
 > 本 skill 的唯一 failure 事实源是 `{task_dir}/.verify_status/latest.json`。
 
-**分支选择规则（本 session 唯一锁定，不可切换）**：
+**分支路由规则（每轮按当前 failure_type 动态路由）**：
 
-- 入口按 `verify_status.latest.json.failure_type` 选定 `session_branch`
-- `session_branch` 在整个 session 中**只锁定一次**，之后 Step 1 / 2 / 3 / 4 / 5 / 6 都基于这条分支的 Gate 语义执行
+- 每轮入口按 `verify_status.latest.json.failure_type` 查表（见下方路由表），进入对应 Step 1-X 分支
+- 首轮调用任何 Gate 时，`session_branch.json` 自动记录起始 failure_type（仅供 `debug_status.json` 的 `entry_failure_type` / `session_branch` 字段使用，不限制后续路由）
 - `import_failed` 还要读 `verify_status.latest.json.import_subtype`：
   - `import_kernel_side` → 进入 Step 1-I
   - `import_env_side` → 环境库 / LD_LIBRARY_PATH 问题，本 skill 不处理；直接写 `debug_trace.md` + `debug_status.json` 标 `session_outcome: skipped_env_issue` 后退出
 
-**跨分支跳转禁止（硬约束）**：
+**failure_type 变化时自动切换分支（不停止 session）**：
 
-- 若某轮修复后 `verify_status.failure_type` 变化（如 `build_failed` → `precision_failed`），视为"本分支 Gate-V 取得进展"
-- **不切换分支**，本次 session 结束；`debug_trace.md` / `debug_status.json` 标 `session_outcome: progressed_to_new_failure_type`
-- 重新进入新 failure_type 需用户再次独立调用本 agent（不自动二次触发）
-- 原因：跨分支会导致 audit schema、Gate 语义、`debug_trace.md` 模板同时漂移，风险远大于收益
+- 若某轮修复后 `verify_status.failure_type` 变化（如 `build_failed` → `precision_failed`），Gate-V 按新 failure_type 自动派发到对应分支，无需重新启动 session
+- `session_branch.json` 记录 session 起始 failure_type，仅用于历史追踪（`debug_status.json` 的 `entry_failure_type` 字段），不影响分支切换
+- 一个 session 持续 debug 直至 `success` 或达到 `MAX_ATTEMPTS` 上限
 
-**根据 `session_branch` 选择 Step 1 分支**：
+**Step 1 分支路由表（每轮按当前 failure_type 查表，CONTINUE 后同样适用）**：
 
 | session_branch | failure_type | 进入 |
 |---|---|---|
@@ -129,7 +129,7 @@ python3 skills/ascendc/ascendc-debug/scripts/verify_status.py \
 | `1-I` | `import_failed` + `import_kernel_side` | Step 1-I |
 | `1-R` | `runtime_error` | Step 1-R |
 | `1-T` | `timeout` | Step 1-T |
-| — | 其他（`success` / `degraded` / `no_kernel` / `tilelang_only_failed` / `execution_aborted` / `import_env_side`） | 写 `debug_status.json` 标 `skipped_unsupported_type`，退出 |
+| — | 其他（`success` / `degraded` / `no_kernel` / `tilelang_only_failed` / `execution_aborted`） | 执行 Step 7（写 `debug_trace.md` + `debug_status.json` 标 `session_outcome: skipped_unsupported_type`），退出 |
 
 ---
 
@@ -151,7 +151,7 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_gate.py \
 ⛔ **Gate-F 未通过 → 停止, 检查错误输出。不要在没有取证数据的情况下分析代码。**
 如果报错含 `FileNotFoundError`，先确认 `{task_dir}/kernel/pybind11.cpp` 存在，再检查 `utils/verification_ascendc.py` 路径。
 
-> 1-P 分支继续走 Step 2（精度深度分析 4 Sub-step）→ Step 3（修复）→ Step 4（重编译+验证，走 Gate-V 的精度语义）→ Step 5/6。
+> 1-P 分支继续走 Step 2（精度深度分析 6 Sub-step）→ Step 3（修复）→ Step 4（重编译+验证，走 Gate-V 的精度语义）→ Step 5/6。
 
 ---
 
@@ -183,15 +183,15 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_gate.py \
 
 ---
 
-### Step 2: 深度分析 + 修复计划 (Agent 推理, 核心步骤)
+### Step 2: 深度分析 + 修复计划（仅精度分支 1-P，Agent 推理, 核心步骤）
 
-**本步骤分为 4 个 Sub-step, 每个 Sub-step 有明确的输入文件和产出 section, 不可跳过或合并。**
+**本步骤分为 6 个 Sub-step, 每个 Sub-step 有明确的输入文件和产出 section, 不可跳过或合并。**
 
 将全部分析结果写入 `{task_dir}/precision_tuning/precision_audit_{attempt}.md`。
 
 **历史扫描（attempt > 0 时必须执行，首轮跳过）：**
 
-**第一步：读方向学习表（一次读完，直接获得跨轮全貌）**
+**扫描 A：读方向学习表（一次读完，直接获得跨轮全貌）**
 ```bash
 cat "{task_dir}/precision_tuning/tuning_directions.json"
 ```
@@ -206,7 +206,7 @@ cat "{task_dir}/precision_tuning/tuning_directions.json"
 
 > ⚠️ **禁止重复已证实无效的方向**：outcome 为 regressed 或连续 stagnant 的 fix_type，本轮不得再用。
 
-**第二步：按需深入（仅在确实需要时通过 round_summary 的 index 定位）**
+**扫描 B：按需深入（仅在确实需要时通过 round_summary 的 index 定位）**
 ```bash
 # 读某轮的 round_summary 获取文件路径索引
 cat "{task_dir}/precision_tuning/round_summary_{N}.json"
@@ -946,6 +946,8 @@ if (GetBlockIdx() == 0 && (v0 != v0 || v0 > 1e30f || v0 < -1e30f)) {
 
 ### Step 3: 代码修复 (Agent 执行)
 
+> **非精度分支（1-B/I/R/T）注意**：代码修复已在 `branch-*.md` 的步骤 4 中完成，Step 3 的 Gate-Fix 仍需运行（验证 audit 文件完整性），但不需要再次修改代码。
+
 根据审计报告 [FIX_PLAN] 中的修改点, 逐一修复代码。
 
 **修复原则:**
@@ -954,20 +956,24 @@ if (GetBlockIdx() == 0 && (v0 != v0 || v0 > 1e30f || v0 < -1e30f)) {
 3. **真实变量名**: 使用代码中实际存在的变量名
 4. **禁止逃避**: 不得缩小 shape、添加 if 跳过、放大 tolerance、删除功能
 
-修复完成后, Gate 验证代码文件完整性:
+修复完成后, Gate 验证代码文件完整性（`--step fix` 等价于 Gate-A，验证 audit 文件结构完整）:
 ```bash
 python3 skills/ascendc/ascendc-debug/scripts/precision_gate.py \
     --step fix --op-name {op_name} --task-name {task_name} --attempt {attempt}
 ```
 
-⛔ **Gate-X 未通过 → 检查文件是否正确保存。**
+⛔ **Gate 未通过 → 检查 audit 文件 [FIX_PLAN] 等必填 section 是否完整写入。**
 
 ---
 
 ### Step 4: 重新编译 + 精度验证
 
 ```bash
-python3 utils/verification_ascendc.py {task_dir} >$STDOUT 2>$STDERR; rc=$?; python3 utils/classify_verify_result.py --exit-code $rc --stdout-path $STDOUT --stderr-path $STDERR --task-dir {task_dir} --phase 8 --attempt {attempt} --write-status
+STDOUT="{task_dir}/.verify_logs/phase8_attempt{attempt}.stdout"
+STDERR="{task_dir}/.verify_logs/phase8_attempt{attempt}.stderr"
+mkdir -p "{task_dir}/.verify_logs"
+python3 utils/verification_ascendc.py {task_dir} >"$STDOUT" 2>"$STDERR"; rc=$?
+python3 utils/classify_verify_result.py --exit-code $rc --stdout-path "$STDOUT" --stderr-path "$STDERR" --task-dir {task_dir} --phase 8 --attempt {attempt} --write-status
 ```
 
 > 产出 `{task_dir}/.verify_status/phase8_attempt{attempt}.json`（结构化 failure 数据，所有分支共用）。
@@ -1022,7 +1028,7 @@ Gate-V 输出包含 **loop_signal**, 你**必须遵守**:
 | loop_signal | 含义 | 你的操作 |
 |-------------|------|---------|
 | **PASS** | 精度通过 | → 跳到 Step 5 (成功收尾) |
-| **CONTINUE** | 未通过但有改善 | → 归档本轮, 回到 Step 1 (attempt + 1) |
+| **CONTINUE** | 未通过但有改善 | → 归档本轮, 回到 Step 0.3 (attempt + 1，按当前 failure_type 重新路由) |
 | **STOP** | 未通过且无改善/达上限 | → 跳到 Step 6 (失败报告) |
 
 ⚠️ **你不能自行决定继续或停止。loop_signal 由 Gate 脚本根据数值趋势决定, Agent 必须遵守。**
@@ -1034,7 +1040,7 @@ Gate-V 输出包含 **loop_signal**, 你**必须遵守**:
 ### 归档 / Step 5 成功 / Step 6 失败 / Step 7 退出产物
 
 > 完整协议见 `skills/ascendc/ascendc-debug/references/exit-protocols.md`，Gate-V 返回后必须 **Read 该文件**：
-> - **CONTINUE** → 执行「归档当前轮次」后 `attempt += 1`，回到 Step 1
+> - **CONTINUE** → 执行「归档当前轮次」后 `attempt += 1`，回到 Step 0.3（重新按当前 failure_type 查表路由到对应 Step 1 分支）
 > - **PASS** → 执行 Step 5 成功收尾
 > - **STOP**（非 PASS）→ 执行 Step 6 失败报告
 > - **所有结局**退出前必须执行 Step 7，产出 `debug_trace.md` + `debug_status.json`

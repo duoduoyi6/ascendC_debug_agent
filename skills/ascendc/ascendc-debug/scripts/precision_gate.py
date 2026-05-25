@@ -80,7 +80,7 @@ def _session_branch_path(task_dir: Path) -> Path:
 
 
 def _record_session_branch(task_dir: Path, failure_type: str) -> None:
-    """Gate-F 时将 failure_type 写入 session_branch.json 以锁定本次 session 的分支。"""
+    """首次 Gate 调用时将 session 起始 failure_type 写入 session_branch.json（追踪用）。"""
     path = _session_branch_path(task_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"session_failure_type": failure_type}, ensure_ascii=False))
@@ -105,39 +105,22 @@ def _dispatch(step: str, task_dir: Path, op_name: str, attempt: int) -> dict:
         return common_outcome.to_gate_output()
 
     # 2. 分支派发
-    # Gate-V 使用 session 锁定的 failure_type，防止跨分支漂移
     current_failure_type = _load_failure_type(task_dir)
-    if step == "forensics":
-        # Gate-F: 锁定本次 session 的 failure_type
-        _record_session_branch(task_dir, current_failure_type or "precision_failed")
-        failure_type = current_failure_type
-    elif step == "validate":
-        # Gate-V: 检测 cross-branch 转换
-        session_failure_type = _load_session_branch(task_dir)
-        if (session_failure_type is not None
-                and session_failure_type != current_failure_type
-                and current_failure_type != "success"):
-            # failure_type 发生变化且不是 success（success 由各分支 run_gate_v 处理），
-            # 说明本 session 引入了新的失败类型，需要开启新 session
-            return {
-                "gate": "GATE-CROSS-BRANCH-STOP",
-                "passed": False,
-                "loop_signal": "STOP",
-                "loop_reason": (
-                    f"failure_type 从 '{session_failure_type}' 变为 '{current_failure_type}'，"
-                    "原始问题已修复，请开启新 session 处理新错误类型"
-                ),
-                "checks": {
-                    "session_branch_consistent": False,
-                    "session_failure_type": session_failure_type,
-                    "current_failure_type": current_failure_type,
-                },
-            }
-        failure_type = session_failure_type or current_failure_type
-    else:
-        failure_type = current_failure_type
 
-    branch = _select_branch(failure_type, op_name)
+    # 首次 Gate 调用时记录 session 起始 failure_type（追踪用，不用于 STOP）
+    if _load_session_branch(task_dir) is None:
+        _record_session_branch(task_dir, current_failure_type or "unknown")
+
+    # 派发 failure_type 选择：
+    # - success 时回退到 session 起始分支（各分支 run_gate_v 均有 failure_type==success→PASS 检查；
+    #   精度分支需走 PrecisionBranch 以更新 round_summary/tuning_directions）
+    # - 其他情况始终按当前 failure_type 派发（failure_type 变化时自动切换分支继续）
+    if current_failure_type == "success":
+        dispatch_type = _load_session_branch(task_dir) or "precision_failed"
+    else:
+        dispatch_type = current_failure_type
+
+    branch = _select_branch(dispatch_type, op_name)
 
     # step → branch method 映射
     # fix 不单独 gate（findings §3.3）；为向后兼容保留 choice，实际复用 audit 分支逻辑
