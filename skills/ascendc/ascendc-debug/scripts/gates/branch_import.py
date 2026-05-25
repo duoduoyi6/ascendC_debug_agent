@@ -85,12 +85,8 @@ class ImportBranch:
                 c = json.loads(curr.read_text())
             except (OSError, json.JSONDecodeError):
                 c = {}
-            import_passed = c.get("import", {}).get("status") == "passed"
-            checks["import_passed"] = import_passed
             if c.get("failure_type") == "success":
                 loop_signal = "PASS"
-            elif import_passed:
-                loop_signal = "CONTINUE"
             else:
                 loop_signal = "STOP" if attempt >= MAX_ATTEMPTS - 1 else "CONTINUE"
         return GateOutcome(
@@ -98,5 +94,5 @@ class ImportBranch:
             loop_signal != "STOP",
             checks,
             loop_signal=loop_signal,
-            reason="import.status transitioned to passed",
+            reason="import failure resolved",
         )

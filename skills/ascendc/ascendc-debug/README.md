@@ -16,15 +16,17 @@ AscendOpGenAgent/
 │   ├── ascendc-debug-agent-discovery.md      # 发现式 Subagent（直接从取证 / 日志数据推理）
 │   └── ascendc-debug-agent-constructive.md   # 构建式 Subagent（Phase A→B→C 规范化审计）
 └── skills/ascendc/ascendc-debug/
-    ├── SKILL.md                           # Skill 执行手册（Step 0 ~ Step 7，含 Step 1-P/B/I/R/T）
+    ├── SKILL.md                           # Skill 执行手册（Step 0 ~ Step 4，含 Step 1-P/B/I/R/T + Step 2 Sub-step 2.1~2.6；Step 5/6/7 外置至 exit-protocols.md）
     ├── README.md                          # 本文件：设计文档
     ├── STRUCTURE.md                       # 目录结构说明
     ├── scripts/                           # 共用脚本
     │   ├── precision_forensics.py         # 数值取证 (L0-L4 + L6 + L8 + available_files)
+    │   ├── _forensics_child.py            # 取证子进程 worker（被 precision_forensics.py 以 subprocess 方式调用）
     │   ├── precision_gate.py              # Gate 入口路由器（派发到 gates/ 分支层）
-    │   ├── verify_status.py                 # verify_status.json loader / validator
+    │   ├── verify_status.py               # verify_status.json loader / validator
     │   ├── precision_knowledge.py         # 知识库管理: load / search / check / dump
     │   ├── anticheat.py                   # 反作弊: wrapper hash + AST + C++ 源码扫描
+    │   ├── debug_precision_template.py    # 精度调试分析脚本模板（误差分布 + 固定输入 + shape 二分）
     │   └── gates/                         # 2 层 Gate 包：通用层 + 分支层
     │       ├── __init__.py
     │       ├── common.py                  # 通用层: 反作弊 / AST / baseline / verify_status / 目录完整性
@@ -56,7 +58,9 @@ AscendOpGenAgent/
             ├── mse_loss.md                # MSELoss: 跨核两阶段归约 (6 步)
             ├── matmul.md                  # MatMul: 分块累加 (4 步)
             ├── average_pooling2d.md       # AvgPool2d: 滑窗累加 (3 步)
-            └── cumsum.md                  # CumSum: 前缀累加 (2 步)
+            ├── cumsum.md                  # CumSum: 前缀累加 (2 步)
+            ├── rms_norm.md                # RMSNorm: 单行归约 + 逐元素缩放
+            └── flash_attention.md         # FlashAttention: 分块 QKV 注意力计算
 ```
 
 **上下游依赖**：
@@ -107,7 +111,7 @@ AscendOpGenAgent/
 | `anticheat.py` | 脚本 | 反作弊: 禁改 wrapper + 扫 C++ 禁调 `at::<op>` |
 | `debug_precision_template.py` | 模板 | 精度调试分析脚本模板（误差分布 + 固定输入 + shape 二分） |
 | `run_precision_debug.sh` | 脚本 | 调试脚本运行入口（本地 / 远程 Docker） |
-| `precision_knowledge_base.json` | 数据 | 精度问题模式库（45 条目） |
+| `precision_knowledge_base.json` | 数据 | 精度问题模式库（40 条目 + 5 算子 CHECKLIST） |
 | `bug_examples/` | 文档 | 精度缺陷诊断案例库（5 个典型根因 + 实验定位法） |
 | `decomposition_examples/` | 文档 | 算子计算分解示例 |
 
@@ -144,7 +148,7 @@ AscendOpGenAgent/
 | L2 | 位置特征 (尾块/维度/边界) | ✅ 已实现 | DiffAnalyzer._tail_analysis / _dimension_analysis |
 | L3 | 数值特征 (幅值/NaN/符号) | ✅ 已实现 | DiffAnalyzer._check_magnitude_correlation 等 |
 | L4 | 张量切片 (per-index) | ✅ 已实现 | DiffAnalyzer._worst_elements |
-| L5 | 中间结果探测 | ❌ 不实现，由 L7 替代 | 见下方 L5 设计决策 |
+| L5 | 中间结果探测 | ✅ Agent 手动插桩 (Phase B+) | Sub-step 2.3 Phase B+，产出 [L5_PROBE]（Gate-A 必填） |
 | L6 | 内存布局分析 | ✅ 已实现 | MemoryLayoutAnalyzer |
 | L7 | 代码位置映射 | ✅ Agent 手动完成 | Sub-step 2.3 L7 手动映射 (静态推算) |
 | L8 | 算子语义 | ✅ 部分实现 | OperatorTypeDetector + 知识库 CHECKLIST |
@@ -173,11 +177,11 @@ AscendOpGenAgent/
 ```
 Gate-F (forensics) → 无前置依赖，检查 attempt 号匹配
 Gate-A (audit)     → 前置: forensics 存在且 attempt 匹配
-                     检查 8 个必填 section: FORENSICS_SUMMARY, COMPUTATION_DECOMPOSITION,
-                     REFERENCE_IMPL_SPEC, KERNEL_STEP_TRACE, ROOT_CAUSE, FIX_PLAN, TARGET_FILES,
-                     EXPERIMENT_RESULTS
+                     检查 10 个必填 section: FORENSICS_SUMMARY, COMPUTATION_DECOMPOSITION,
+                     REFERENCE_IMPL_SPEC, KERNEL_STEP_TRACE, L5_PROBE, ROOT_CAUSE,
+                     CAUSAL_CHAIN_ANALYSIS, FIX_PLAN, TARGET_FILES, EXPERIMENT_RESULTS
                      attempt > 0 时额外检查: DIRECTION_ASSESSMENT（严格二值"是/否"）
-Gate-X (fix)       → 前置: audit 存在
+Gate-A (fix)       → 前置: audit 存在
 Gate-V (validate)  → 前置: 代码文件存在
 ```
 
@@ -192,9 +196,9 @@ Gate-V 输出 `loop_signal`，Agent **必须遵守**：
 
 | 信号 | 条件 | Agent 操作 |
 |------|------|-----------|
-| PASS | 精度通过 | 成功收尾 + 知识库跃迁 |
-| CONTINUE | 未通过但 mismatch 有改善 | 归档本轮，回到 Step 1 |
-| STOP | 达到 `MAX_ATTEMPTS` 轮上限 或 连续 `MAX_STAGNANT_ROUNDS` 轮无改善 | 失败报告 |
+| PASS | 精度通过（evaluate 返回 success） | 成功收尾 + 知识库跃迁 |
+| CONTINUE | 未通过但 mismatch 有改善；或停滞但 `[DIRECTION_ASSESSMENT]` 表明已换方向 | 归档本轮，回到 Step 0.3（按当前 failure_type 重新路由） |
+| STOP | ① 达到 `MAX_ATTEMPTS` 轮上限；② match_rate ≥ 99% 但仍失败（量化截断噪声，建议人工）；③ 检测到 A→B→A 振荡型有害回退；④ `mismatch_improving=False` 且连续 `MAX_STAGNANT_ROUNDS` 轮无改善且 `[DIRECTION_ASSESSMENT]` 仍沿用同一方向 | 失败报告 |
 
 ## 知识库
 
@@ -248,15 +252,16 @@ python3 precision_knowledge.py search \
 
 ## 计算分解示例 (`decomposition_examples/`)
 
-Step 2 的 Sub-step 2.2 要求 Agent 将算子的参考实现分解为逐步计算链。`references/decomposition_examples/` 提供 7 个算子的分解示例，覆盖 5 种计算模式：
+Step 2 的 Sub-step 2.2 要求 Agent 将算子的参考实现分解为逐步计算链。`references/decomposition_examples/` 提供 9 个算子的分解示例，覆盖 5 种计算模式：
 
 | 计算模式 | 示例算子 | 关键审计点 |
 |---------|---------|-----------|
-| 单行归约 | softmax, layer_norm | padding 值、count 对齐、归约维完整性 |
+| 单行归约 | softmax, layer_norm, rms_norm | padding 值、count 对齐、归约维完整性 |
 | 跨核归约 | mse_loss | workspace 同步、Phase 2 正确性、分母计算 |
 | 分块累加 | matmul | 累加器初始化、分块边界、精度累积 |
 | 滑窗累加 | average_pooling2d | 有效面积计算、边界/padding 处理 |
 | 前缀累加 | cumsum | 跨 tile 累加器传递、顺序正确性 |
+| 多阶段融合 | flash_attention | Online Softmax 稳定性、KV tile 边界、Q/K/V 分块对齐 |
 
 Agent 在 Sub-step 2.2 中：
 1. 先读取 `decomposition_examples/README.md` 了解格式和模式分类
@@ -278,11 +283,11 @@ Agent 在 Sub-step 2.2 中：
 
 `precision_forensics.py` **复制**（不 import）了 `utils/verification_ascendc.py` 的 tensor 加载辅助函数到 `OperatorExecutor`，以便独立增强（如直接 dump tensor 做 L1-L4 深度分析）而不破坏 bench。语义升级时需同步两处。
 
-## L5 设计决策：不实现，由 L7 Agent 手动映射替代
+## L5 设计决策：Python 自动化放弃，Agent 手动插桩（Phase B+）替代
 
 **背景**: 早期设计希望通过 Python 脚本自动探测 Kernel 内部每个计算步骤的中间输出，定位误差引入步骤。
 
-**技术评估**:
+**Python 自动化评估（放弃原因）**:
 
 | 维度 | 评估结果 |
 |------|---------|
@@ -291,13 +296,13 @@ Agent 在 Sub-step 2.2 中：
 | 侵入风险 | 探针修改可能影响 buffer 对齐，改变精度问题表现（Heisenbug 效应） |
 | 工程代价 | 相当于为每个算子维护一个 debug 版本，成本高、不可复用 |
 
-**替代方案**: Sub-step 2.3 的 L7 手动映射已覆盖 L5 的核心价值:
-- `worst element index [row, col]` → 静态推算落在哪个 Core、main/tail block
-- 对照 tiling 参数（`tileLength`、`rowsPerCore`）直接定位到 Compute() 中的 K-Step
-- 对单行归约、逐元素算子完全够用
-- 对跨核归约（Phase1→Phase2），L7 同样可通过 workspace 地址偏移推算
+**当前实现（Phase B+）**: Sub-step 2.3 的 Phase B+ 步骤实现了 L5 中间结果探测：
+- Agent 在 Compute() 函数的 P1（CopyIn 后）、P2（计算中点）、P3（CopyOut 前）插入 printf 探针
+- 遵守 R1-R5 核心规则（GetBlockIdx==0 过滤、DeQue 后读取、half/bf16 转 float、阶段标记、仅 dump 首 16~32 个元素），规避 Heisenbug 效应
+- 运行 `debug_{op_name}_precision.py` 提取实测中间值，写入 `[L5_PROBE]` section
+- 探针完成后恢复 kernel 原始代码，不影响后续编译
 
-**结论**: L5 Python 实现不可行，已由 L7 Agent 手动映射替代。`IntermediateProbe` 类保留为存根，不再标记为 TODO。
+**结论**: L5 Python 自动化不可行，已由 Phase B+ Agent 手动插桩实现。`[L5_PROBE]` 是 Gate-A 的 10 个必填 section 之一。`IntermediateProbe` Python 类保留为存根，不再调用。
 
 ## 详细中间文件说明
 
@@ -307,5 +312,5 @@ Agent 在 Sub-step 2.2 中：
 
 | 接口 | 类 | 位置 | 状态 | 说明 |
 |------|-----|------|-------|------|
-| 中间结果探测 | IntermediateProbe | precision_forensics.py | ❌ 不实现（见 L5 决策） | 接口存根，不调用 |
+| 中间结果探测 | IntermediateProbe | precision_forensics.py | ❌ Python 存根，不调用 | L5 已由 Phase B+ Agent 手动插桩实现，见 Sub-step 2.3 |
 | 代码位置映射 | CodeMapper | precision_forensics.py | ❌ 不实现，由 Agent 手动完成 | Sub-step 2.3 L7 手动映射 |

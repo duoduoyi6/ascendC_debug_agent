@@ -1,6 +1,6 @@
 # Step 1-T: Timeout Analysis（timeout 分支）
 
-> **读取时机**：`Step 0.3` 将 `session_branch` 锁定为 `1-T`（`failure_type == timeout`）后，立即 Read 本文件。进入条件：`timeout_marker_present == true`，否则视为 `execution_aborted`，不应进本分支。
+> **读取时机**：`Step 0.3` 按当前 `failure_type == timeout` 路由到本分支时，立即 Read 本文件。进入条件：`timeout_marker_present == true`，否则视为 `execution_aborted`，不应进本分支。
 
 **输入**:
 - `{task_dir}/.verify_status/latest.json` — 结构化状态；必须满足 `failure_type == timeout` 且 `timeout_marker_present == true`（否则视为 `execution_aborted`，不应进本分支）
@@ -33,4 +33,4 @@
 **Step 4（共用）**: 修复后调 `utils/verification_ascendc.py` + `utils/classify_verify_result.py` 重跑，然后走 `Gate-TIMEOUT-V`：
 - `verify_status.duration_sec < timeout_threshold` 且 `failure_type != timeout` = 本分支完成（无论对错 — 精度对错由后续判断，但 timeout 语义已解除）
 - 仍超时且 duration 基本不变 = 停滞
-- 不再超时但转 `runtime_error` / `precision_failed` = 进步但跨分支，本 session 结束
+- 不再超时但转 `runtime_error` / `precision_failed` = 进步（Gate-V 自动切换到对应分支继续 debug）

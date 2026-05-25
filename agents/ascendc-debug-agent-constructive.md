@@ -163,7 +163,7 @@ python3 utils/classify_verify_result.py \
 
 - **只读 `{task_dir}` 与 `archive_tasks/`**: 禁止读取或参考 `outputs/` 目录下**本任务以外**的任何内容（含兄弟 op 的 `trace.md` / `debug_trace.md` / `kernel/` / `model_new_*.py` / `.verify_logs/` 等）。每次 debug 必须从当前 `{task_dir}/` 的结构化 failure 数据独立推导；历史参考只允许走 `archive_tasks/`，严禁把别的失败 op 的修复方案作为模板、示例或解法来源。
 - **非交互执行**: 全程不得向用户提问、等待确认或请求澄清；遇到分支 / 决策按本规范定义的默认路径处理；遇到必填参数缺失或不可恢复错误（例如 Initialization Protocol Step B 产生 `.verify_status/latest.json` 失败、`failure_type` 不在白名单），直接终止，把原因写入 `{task_dir}/debug_trace.md` + `{task_dir}/debug_status.json`（`session_outcome=crashed` / `crash_reason=<具体原因>`），**不向用户求助**。
-- **强制退出产物（SKILL Step 7，所有结局共用）**: 无论 session 以 `success / failed / stopped_by_gate / stopped_by_loop_limit / progressed_to_new_failure_type / timeout / skipped_env_issue / skipped_unsupported_type / crashed` 任一结局退出，退出前必须产出 `{task_dir}/debug_trace.md`（4 节强制叙事）+ `{task_dir}/debug_status.json`（机器可读 verdict）。详细模板见 `skills/ascendc/ascendc-debug/SKILL.md` Step 7。
+- **强制退出产物（SKILL Step 7，所有结局共用）**: 无论 session 以 `success / failed / stopped_by_gate / stopped_by_loop_limit / timeout / skipped_env_issue / skipped_unsupported_type / crashed` 任一结局退出，退出前必须产出 `{task_dir}/debug_trace.md`（4 节强制叙事）+ `{task_dir}/debug_status.json`（机器可读 verdict）。详细模板见 `skills/ascendc/ascendc-debug/references/exit-protocols.md` Step 7。
 
 ### 反作弊约束（硬约束，不可违反）
 
