@@ -1,6 +1,6 @@
 # Step 1-I: Import Error Analysis（import_failed + import_kernel_side 分支）
 
-> **读取时机**：`Step 0.3` 将 `session_branch` 锁定为 `1-I`（`import_subtype == import_kernel_side`）后，立即 Read 本文件。`import_env_side` 应已被 Step 0.3 过滤为 `skipped_env_issue`，不进入本分支。
+> **读取时机**：`Step 0.3` 按当前 `failure_type == import_failed` 且 `import_subtype == import_kernel_side` 路由到本分支时，立即 Read 本文件。`import_env_side` 应已被 Step 0.3 过滤为 `skipped_env_issue`，不进入本分支。
 
 **输入**:
 - `{task_dir}/.verify_status/latest.json` — 结构化状态，确认 `import_subtype == import_kernel_side`（若是 `import_env_side` 应已被 Step 0.3 过滤）
@@ -30,6 +30,6 @@
 - `skills/ascendc/ascendc-translator/references/TileLang-AscendC-API-Mapping.md`（`extern "C"` 导出规范）
 
 **Step 4（共用）**: 修复后调 `utils/verification_ascendc.py` + `utils/classify_verify_result.py` 重跑，然后走 `Gate-IMPORT-V`：
-- `verify_status.import.status == passed` = 本分支完成
+- `failure_type == success` = 本分支完成
 - 仍卡在 `import` 且 traceback 未变 = 停滞
-- `import` 通过但 `failure_type` 变为 `build_failed` / `runtime_error` / `precision_failed` = 进步但跨分支，本 session 结束
+- `import` 通过但 `failure_type` 变为 `build_failed` / `runtime_error` / `precision_failed` = 进步（Gate-V 自动切换到对应分支继续 debug）
