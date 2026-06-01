@@ -74,6 +74,10 @@ class _LegacyPrecisionChecker:
         if gate_result["passed"] and self.attempt == 0 and r is not None:
             self._write_baseline_from_forensics(r)
 
+        # 写入进度检查点
+        if gate_result["passed"]:
+            self._write_progress_checkpoint("forensics_completed")
+
         return gate_result
 
     def _write_baseline_from_forensics(self, forensics: dict) -> None:
@@ -168,6 +172,7 @@ class _LegacyPrecisionChecker:
 
         if gate_result["passed"] and content:
             self._write_audit_index(content)
+            self._write_progress_checkpoint("audit_completed")
 
         return gate_result
 
@@ -228,6 +233,7 @@ class _LegacyPrecisionChecker:
 
         self._write_round_summary(stop_reason_code, forensics_data)
         self._write_tuning_directions(stop_reason_code)
+        self._write_progress_checkpoint("validation_completed", loop_signal=loop_signal)
 
         return gate_result
 
@@ -287,6 +293,15 @@ class _LegacyPrecisionChecker:
                 "nearly_success",
             )
 
+        # fp16 early exit: 连续两轮仅 fp16 失败且 max_abs_diff ≤ 0.25 且 mismatch_ratio < 2.0%
+        if self.attempt >= 1 and forensics_data is not None:
+            if self._check_fp16_ceiling(forensics_data):
+                return (
+                    "STOP",
+                    "连续两轮仅 fp16 失败且 max_abs_diff ≤ 0.25, mismatch_ratio < 2.0%, 已达 fp16 硬件精度上限",
+                    "fp16_precision_ceiling",
+                )
+
         if self.attempt + 1 >= MAX_ATTEMPTS:
             return "STOP", f"已达最大轮次 ({MAX_ATTEMPTS})", "max_attempts_reached"
 
@@ -339,6 +354,69 @@ class _LegacyPrecisionChecker:
         mid_improved = (r_prev - r_mid) > 0.01
         curr_regressed = r_curr >= (r_prev - 0.005)
         return mid_improved and curr_regressed
+
+    def _check_fp16_ceiling(self, forensics_data: dict) -> bool:
+        """检查连续两轮是否仅 fp16 失败且达到硬件精度上限。
+
+        条件：
+        1. 当前轮和上一轮的 forensics 都存在
+        2. 两轮都只有 fp16 失败（fp32/bf16 通过或不存在）
+        3. 当前轮 max_abs_diff ≤ 0.25 且 mismatch_ratio < 0.02
+        """
+        if self.attempt < 1:
+            return False
+
+        # 读取当前轮 forensics
+        curr_forensics = forensics_data
+        if curr_forensics is None:
+            return False
+
+        # 读取上一轮 forensics
+        prev_forensics_path = os.path.join(self.tuning_dir, f"forensics_report_{self.attempt - 1}.json")
+        if not os.path.exists(prev_forensics_path):
+            return False
+        try:
+            with open(prev_forensics_path) as f:
+                prev_forensics = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return False
+
+        # 检查两轮是否都只有 fp16 失败
+        def _only_fp16_fails(forensics: dict) -> bool:
+            outputs = forensics.get("outputs", [])
+            if not outputs:
+                return False
+            per_case = outputs[0].get("per_case", [])
+            if not per_case:
+                return False
+
+            has_fp16_fail = False
+            for case in per_case:
+                dtype = case.get("input_dtype", "")
+                passed = case.get("passed", False)
+                if "float16" in dtype or "fp16" in dtype:
+                    if not passed:
+                        has_fp16_fail = True
+                elif "float32" in dtype or "fp32" in dtype or "bfloat16" in dtype or "bf16" in dtype:
+                    if not passed:
+                        return False  # fp32/bf16 失败，不是纯 fp16 问题
+            return has_fp16_fail
+
+        if not _only_fp16_fails(curr_forensics) or not _only_fp16_fails(prev_forensics):
+            return False
+
+        # 检查当前轮精度指标
+        curr_outputs = curr_forensics.get("outputs", [])
+        if not curr_outputs:
+            return False
+        stats = curr_outputs[0].get("basic_stats", {})
+        max_abs_diff = stats.get("max_abs_diff")
+        mismatch_ratio = stats.get("mismatch_ratio")
+
+        if max_abs_diff is None or mismatch_ratio is None:
+            return False
+
+        return float(max_abs_diff) <= 0.25 and float(mismatch_ratio) < 0.02
 
     def _compute_improvement_ratio(self, prev_mismatch: float, curr_mismatch: float):
         prev_match = (1 - prev_mismatch) * 100
@@ -837,6 +915,34 @@ class _LegacyPrecisionChecker:
 
     def _result(self, gate_name: str, checks: dict) -> dict:
         return {"gate": gate_name, "passed": all(checks.values()), "checks": checks}
+
+    def _write_progress_checkpoint(self, stage: str, loop_signal: str = None) -> None:
+        """写入轮内进度检查点，用于超时恢复和进度追踪。
+
+        Args:
+            stage: forensics_completed / audit_completed / validation_completed
+            loop_signal: 仅 validation_completed 时传入 (PASS/CONTINUE/STOP)
+        """
+        progress_path = os.path.join(self.tuning_dir, f"progress_attempt_{self.attempt}.json")
+        progress = {
+            "attempt": self.attempt,
+            "stage": stage,
+            "timestamp": self._utcnow_iso(),
+        }
+        if loop_signal is not None:
+            progress["loop_signal"] = loop_signal
+
+        try:
+            os.makedirs(self.tuning_dir, exist_ok=True)
+            with open(progress_path, "w", encoding="utf-8") as f:
+                json.dump(progress, f, indent=2, ensure_ascii=False)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _utcnow_iso() -> str:
+        import datetime as dt
+        return dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _legacy_to_outcome(raw: dict) -> GateOutcome:

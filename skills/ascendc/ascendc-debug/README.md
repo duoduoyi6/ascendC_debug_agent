@@ -36,7 +36,7 @@ AscendOpGenAgent/
     │       ├── branch_runtime.py          # 1-R 分支: runtime crash Gate
     │       └── branch_timeout.py          # 1-T 分支: 死锁 / 死循环 Gate
     └── references/                        # 共用参考资料
-        ├── precision_knowledge_base.json  # 精度问题知识库（40 条目 + 5 算子 CHECKLIST）
+        ├── precision_knowledge_base.json  # 精度问题知识库（45 条：40 问题模式 + 5 算子 CHECKLIST）
         ├── branch-build.md                # Step 1-B 编译错误分析（build_failed 分支，SKILL.md 外置）
         ├── branch-import.md               # Step 1-I import 错误分析（import_kernel_side 分支，SKILL.md 外置）
         ├── branch-runtime.md              # Step 1-R 运行时错误分析（runtime_error 分支，SKILL.md 外置）
@@ -111,7 +111,7 @@ AscendOpGenAgent/
 | `anticheat.py` | 脚本 | 反作弊: 禁改 wrapper + 扫 C++ 禁调 `at::<op>` |
 | `debug_precision_template.py` | 模板 | 精度调试分析脚本模板（误差分布 + 固定输入 + shape 二分） |
 | `run_precision_debug.sh` | 脚本 | 调试脚本运行入口（本地 / 远程 Docker） |
-| `precision_knowledge_base.json` | 数据 | 精度问题模式库（40 条目 + 5 算子 CHECKLIST） |
+| `precision_knowledge_base.json` | 数据 | 精度问题模式库（45 条：40 问题模式 + 5 算子 CHECKLIST） |
 | `bug_examples/` | 文档 | 精度缺陷诊断案例库（5 个典型根因 + 实验定位法） |
 | `decomposition_examples/` | 文档 | 算子计算分解示例 |
 
@@ -204,7 +204,7 @@ Gate-V 输出 `loop_signal`，Agent **必须遵守**：
 
 七字段结构（title / feature / patterns / op_types / reason / fix / type），RAG-ready。包含两类条目：
 
-1. **问题模式**（40 条）: 具体精度问题的 feature/reason/fix，带 `patterns` 和 `op_types` 数组
+1. **问题模式**（40 条）: 具体精度问题的 feature/reason/fix，带 `patterns` 和 `op_types` 数组；新增 `op_type` 和 `patterns` 字段支持精确匹配检索
 2. **算子 CHECKLIST**（5 条）: 按算子类型的精度检查清单（reduction/pooling/loss/matmul/normalization），`patterns=[]`，`op_types` 为算子类别标识
 
 **字段约束**：
@@ -278,7 +278,7 @@ Agent 在 Sub-step 2.2 中：
 - 模型加载：`model.py` 的 `Model` + `model_new_ascendc.py` 的 `ModelNew`（通过 `importlib`）
 - 输入：`get_input_groups()` 优先，fallback 到 `get_inputs()`
 - 初始化：`ModelNew.get_init_inputs()` 优先（candidate 可覆盖 ref 的 init 参数）
-- 容差：`atol=1e-2, rtol=1e-2`；int8 特判 `atol=1.5, rtol=0.0`
+- 容差：dtype-specific 动态阈值（float32: atol=1e-4/rtol=1e-4；float16: atol=1e-2/rtol=1e-3；bfloat16: atol=5e-2/rtol=5e-3）；int8 特判 `atol=1.5, rtol=0.0`；由 `utils/verification_ascendc.py` 的 `_infer_dtype_from_value()` 自动推断
 - 设备：`ASCEND_RT_VISIBLE_DEVICES` 环境变量
 
 `precision_forensics.py` **复制**（不 import）了 `utils/verification_ascendc.py` 的 tensor 加载辅助函数到 `OperatorExecutor`，以便独立增强（如直接 dump tensor 做 L1-L4 深度分析）而不破坏 bench。语义升级时需同步两处。

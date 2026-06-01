@@ -225,9 +225,36 @@ def build_status(
             "status": "skipped", "total_cases": None,
             "passed_cases": None, "failed_cases": [],
         },
+        "per_case_results": _extract_per_case_results(stdout_text),
     }
     status.update(classify_failure(status))
     return status
+
+
+def _extract_per_case_results(stdout_text: str) -> list:
+    """从 verification_ascendc.py 的 stdout 提取 per-case 结果。
+
+    格式示例：
+      case[0]: output[0]: matched
+      case[1]: output[1]: dtype(ref=torch.float16, cand=torch.float16), unequal_elements=42, mismatch_ratio=0.123456%, max_abs_diff=0.0625, mean_abs_diff=0.0312
+
+    返回：
+      [
+        {"case_index": 0, "passed": true, "detail": "output[0]: matched"},
+        {"case_index": 1, "passed": false, "detail": "output[1]: dtype(...), unequal_elements=42, ..."},
+        ...
+      ]
+    """
+    results = []
+    for line in stdout_text.splitlines():
+        m = re.match(r"case\[(\d+)\]:\s*(.+)", line.strip())
+        if not m:
+            continue
+        case_idx = int(m.group(1))
+        detail = m.group(2).strip()
+        passed = "matched" in detail
+        results.append({"case_index": case_idx, "passed": passed, "detail": detail})
+    return results
 
 
 def write_status(task_dir: Path, status: dict, phase: int, attempt: int) -> tuple[Path, Path]:
