@@ -247,6 +247,34 @@ def _get_input_groups(module):
     raise AttributeError(f"Neither get_input_groups() nor get_inputs() found in {module.__file__}")
 
 
+def _infer_dtype_from_tensor(tensor: torch.Tensor) -> str:
+    """从 tensor 推断 dtype 字符串，用于选择精度阈值。"""
+    if tensor.dtype == torch.float32:
+        return "float32"
+    if tensor.dtype == torch.float16:
+        return "float16"
+    if tensor.dtype == torch.bfloat16:
+        return "bfloat16"
+    return "other"
+
+
+def _infer_dtype_from_value(value) -> str:
+    """从输出值推断主要 dtype（递归查找第一个浮点 tensor）。"""
+    if isinstance(value, torch.Tensor):
+        return _infer_dtype_from_tensor(value)
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            dtype = _infer_dtype_from_value(item)
+            if dtype != "other":
+                return dtype
+    if isinstance(value, dict):
+        for item in value.values():
+            dtype = _infer_dtype_from_value(item)
+            if dtype != "other":
+                return dtype
+    return "other"
+
+
 def _run_verification(op: str):
     report = {
         "op": op,
@@ -330,11 +358,23 @@ def _run_verification(op: str):
             ref_out = _normalize_output(ref_out)
             cand_out = _normalize_output(cand_out)
 
+            # dtype-specific thresholds (aligned with SKILL.md lines 270-273)
             atol = report["atol"]
             rtol = report["rtol"]
             if _contains_int8_tensor(ref_out) and _contains_int8_tensor(cand_out):
                 atol = 1.5
                 rtol = 0.0
+            else:
+                inferred_dtype = _infer_dtype_from_value(ref_out)
+                if inferred_dtype == "float32":
+                    atol = 1e-4
+                    rtol = 1e-4
+                elif inferred_dtype == "float16":
+                    atol = 1e-2
+                    rtol = 1e-3
+                elif inferred_dtype == "bfloat16":
+                    atol = 5e-2
+                    rtol = 5e-3
 
             ok, comparison = _compare_values(
                 ref_out,

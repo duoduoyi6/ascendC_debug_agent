@@ -267,10 +267,11 @@ cat "{task_dir}/precision_tuning/round_summary_{N}.json"
   dtype 精度级别判断:
     - dtype: <来自取证 outputs[0] 或 L8_operator, 如 float32/float16/bfloat16>
     - max_abs_diff (来自取证): <值>
-    - 精度阈值参考 (来自 ascend-torch-comparison/precision_config.py AbsoluteThreshConfig):
-      * float32 rtol=1e-4: max_diff > 1e-4 → 逻辑错误; ≤ 1e-4 → 精度达标
-      * float16 rtol=1e-3: max_diff > 1e-2 → 逻辑错误; 1e-3~1e-2 → float16 精度损失(可能可接受); ≤ 1e-3 → 精度达标
-      * bfloat16 rtol=5e-3: max_diff > 5e-2 → 逻辑错误; 5e-3~5e-2 → bfloat16 精度损失; ≤ 5e-3 → 精度达标
+    - 精度阈值参考 (与 utils/verification_ascendc.py 实际使用的阈值对齐):
+      * float32: atol=1e-4, rtol=1e-4 → max_diff > 1e-4 为逻辑错误; ≤ 1e-4 为精度达标
+      * float16: atol=1e-2, rtol=1e-3 → max_diff > 1e-2 为逻辑错误; 1e-3~1e-2 为 float16 精度损失(可能可接受); ≤ 1e-3 为精度达标
+      * bfloat16: atol=5e-2, rtol=5e-3 → max_diff > 5e-2 为逻辑错误; 5e-3~5e-2 为 bfloat16 精度损失; ≤ 5e-3 为精度达标
+      * int8: atol=1.5, rtol=0.0 → 整数类型使用绝对误差判断
     - 判断: <逻辑错误(实现缺陷, 必须修复) / float16精度损失(检查 float32 下是否通过) / 精度达标>
     - 对分析方向的影响: <逻辑错误→重点查实现缺陷; float16精度损失→检查归约是否需要 upcast>
   我对取证 hint 的初步判断:

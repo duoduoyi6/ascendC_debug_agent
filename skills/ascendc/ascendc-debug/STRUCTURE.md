@@ -7,7 +7,7 @@ skills/ascendc/ascendc-debug/
 ├── STRUCTURE.md                       # 本文件：目录结构示意图
 │
 ├── references/                        # 静态参考资料
-│   ├── precision_knowledge_base.json  # 精度问题知识库（40 条目 + 5 算子 CHECKLIST）
+│   ├── precision_knowledge_base.json  # 精度问题知识库（45 条：40 问题模式 + 5 算子 CHECKLIST）
 │   ├── branch-build.md                # Step 1-B 编译错误分析（SKILL.md 外置）
 │   ├── branch-import.md               # Step 1-I import 错误分析（SKILL.md 外置）
 │   ├── branch-runtime.md              # Step 1-R 运行时错误分析（SKILL.md 外置）
@@ -120,7 +120,7 @@ skills/ascendc/ascendc-debug/
 | `gates/branch_*.py` | 每次 Gate | 对应分支的 F/A/V 语义 + audit section schema | 双 Subagent |
 | `precision_knowledge.py` | Sub-step 2.1 / 2.4 / Step 5.2.5 / Step 5.3 | 知识库 RAG 检索、加载、相似度检查、写入 | 双 Subagent |
 | `anticheat.py` | Step 0.1 / 每轮编译前 / 验收 | 检测 Python wrapper 被偷改、C++ kernel 偷调 ATen 等退化路径 | 双 Subagent |
-| `precision_knowledge_base.json` | Sub-step 2.4 | 已知精度问题模式 + 算子 CHECKLIST | 双 Subagent |
+| `precision_knowledge_base.json` | Sub-step 2.4 | 已知精度问题模式（45 条：40 问题模式 + 5 算子 CHECKLIST）；支持 op_type + patterns 精确匹配检索 | 双 Subagent |
 | `decomposition_examples/*.md` | Sub-step 2.2 | 按算子类型提供计算分解示例 | 双 Subagent（构建式强制、发现式可选） |
 | `debug_precision_template.py` | Sub-step 2.5 | 调试脚本模板（误差分析 + 实验 C/D） | 双 Subagent |
 | `run_precision_debug.sh` | Sub-step 2.5 | 调试脚本运行入口（本地 / 远程 Docker） | 双 Subagent |
