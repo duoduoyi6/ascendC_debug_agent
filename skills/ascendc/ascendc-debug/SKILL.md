@@ -114,12 +114,6 @@ python3 skills/ascendc/ascendc-debug/scripts/verify_status.py \
   - `import_kernel_side` → 进入 Step 1-I
   - `import_env_side` → 环境库 / LD_LIBRARY_PATH 问题，本 skill 不处理；直接写 `debug_trace.md` + `debug_status.json` 标 `session_outcome: skipped_env_issue` 后退出
 
-**failure_type 变化时自动切换分支（不停止 session）**：
-
-- 若某轮修复后 `verify_status.failure_type` 变化（如 `build_failed` → `precision_failed`），Gate-V 按新 failure_type 自动派发到对应分支，无需重新启动 session
-- `session_branch.json` 记录 session 起始 failure_type，仅用于历史追踪（`debug_status.json` 的 `entry_failure_type` 字段），不影响分支切换
-- 一个 session 持续 debug 直至 `success` 或达到 `MAX_ATTEMPTS` 上限
-
 **Step 1 分支路由表（每轮按当前 failure_type 查表，CONTINUE 后同样适用）**：
 
 | session_branch | failure_type | 进入 |
@@ -1018,33 +1012,13 @@ python3 utils/classify_verify_result.py --exit-code $rc --stdout-path "$STDOUT" 
 - `match_rate`: 用正则 `r"mismatch_ratio=([0-9.]+)%"` 取所有 case 平均，转换为 match_rate = 100 - avg_mismatch；若无 mismatch 行则写 `100.0`
 - `max_diff`: 用正则 `r"max_abs_diff=([0-9.eE+\-g]+)"`；若无 mismatch 行则写 `0.0`
 
-**Gate 验证 + 循环控制:**
+**Gate 验证:**
 ```bash
 python3 skills/ascendc/ascendc-debug/scripts/precision_gate.py \
     --step validate --op-name {op_name} --task-name {task_name} --attempt {attempt}
 ```
 
-Gate-V 输出包含 **loop_signal**, 你**必须遵守**:
-
-| loop_signal | 含义 | 你的操作 |
-|-------------|------|---------|
-| **PASS** | 精度通过 | → 跳到 Step 5 (成功收尾) |
-| **CONTINUE** | 未通过但有改善 | → 归档本轮, 回到 Step 0.3 (attempt + 1，按当前 failure_type 重新路由) |
-| **STOP** | 未通过且无改善/达上限 | → 跳到 Step 6 (失败报告) |
-
-⚠️ **你不能自行决定继续或停止。loop_signal 由 Gate 脚本根据数值趋势决定, Agent 必须遵守。**
-
-> 注意：这里的 Gate-V 只校验“当前 `{op_name}.json`”对应的验证结果。若任务目录还存在 `{op_name}.json.bak`，则这通常意味着当前 `.json` 是精简用例，**还不能直接宣布最终成功**；必须继续执行 Step 5 中的全量用例验证。
-
----
-
-### 归档 / Step 5 成功 / Step 6 失败 / Step 7 退出产物
-
-> 完整协议见 `skills/ascendc/ascendc-debug/references/exit-protocols.md`，Gate-V 返回后必须 **Read 该文件**：
-> - **CONTINUE** → 执行「归档当前轮次」后 `attempt += 1`，回到 Step 0.3（重新按当前 failure_type 查表路由到对应 Step 1 分支）
-> - **PASS** → 执行 Step 5 成功收尾
-> - **STOP**（非 PASS）→ 执行 Step 6 失败报告
-> - **所有结局**退出前必须执行 Step 7，产出 `debug_trace.md` + `debug_status.json`
+> 注意：Gate-V 只校验”当前 `{op_name}.json`”对应的验证结果。若任务目录还存在 `{op_name}.json.bak`，则这通常意味着当前 `.json` 是精简用例，**还不能直接宣布最终成功**；必须继续执行 Step 5 中的全量用例验证。
 
 ---
 

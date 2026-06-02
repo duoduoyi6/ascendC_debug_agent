@@ -2,9 +2,32 @@
 
 ```
 skills/ascendc/ascendc-debug/
-├── README.md                          # Skill 说明文档（设计概览、双 Subagent 架构、知识库结构、gates/ 2 层架构）
-├── SKILL.md                           # Agent 执行手册（Step 0 ~ Step 4，含 Step 0.3 分流 + Step 1-P/B/I/R/T + Step 2 Sub-step 2.1~2.6；Step 5/6/7 外置至 exit-protocols.md）
+├── README.md                          # Skill 说明文档（设计概览、双 Subagent 架构、知识库结构、gates/ 2 层架构、engine/ 事件溯源引擎）
+├── SKILL.md                           # Agent 执行手册（Step 0 ~ Step 4，含 Step 0.3 分流 + Step 1-P/B/I/R/T + Step 2 Sub-step 2.1~2.6；Step 5/6/7 外置至 exit-protocols.md；编排/循环/退出由 engine/ 引擎掌控）
 ├── STRUCTURE.md                       # 本文件：目录结构示意图
+│
+├── engine/                            # 事件溯源调试引擎（方案 C：引擎主导主循环，Step 1-5 完备实现）
+│   ├── __init__.py
+│   ├── __main__.py                    # CLI 入口：python -m engine {task_dir} --op-name ... → 退出码按 session_outcome 映射
+│   ├── types.py                       # 闭集类型定义：FailureType/SessionOutcome/Action/Continue/Done/Abort/Escalate/LoopSignal
+│   ├── events.py                      # EventWriter（追加写 .debug_events/events.jsonl）+ read_events（重放）
+│   ├── transition.py                  # 写侧：record_session_started/attempt_started/action_started/completed/session_done 等
+│   ├── state.py                       # 读侧：derive_counters 纯 fold + DebugState（per_branch_attempt/跨分支重置/dangling 检测）
+│   ├── gate_adapter.py                # parse_gate_output（纯函数）+ run_gate（subprocess 跑 precision_gate.py CLI）→ GateResult
+│   ├── next_action.py                 # debug_next_action(state, gate_result)：路由+三道闸+轮内步序+loop_signal 派发（核心决策纯函数）
+│   ├── runner.py                      # run_debug_session 主循环：Continue→attempt_started / Action→dispatch / Done/Abort→终态+产物
+│   ├── exit_artifacts.py              # 从 events 重建 debug_status.json（10 键）+ debug_trace.md（4 节）
+│   ├── agent_backend.py               # spawn_diagnose_agent（唯一 spawn 点：claude --bare -p，单轮诊断+改 kernel）+ make_agent_callback
+│   └── tests/ut/engine/               # 单元测试（119 UT，stdlib unittest）
+│       ├── run_all.py                 # 全量跑：python engine/tests/ut/engine/run_all.py
+│       ├── test_events.py             # EventWriter / read_events / _advisory_lock
+│       ├── test_types.py              # 闭集 Literal / dataclass
+│       ├── test_state.py              # derive_counters / _reset_upstream / DebugState / dangling
+│       ├── test_gate_adapter.py       # parse_gate_output / run_gate / GateResult
+│       ├── test_next_action.py        # 五分支×三信号 + 路由 + 三道闸 + 漂移 + gate 优先于预算 + crash-resume 重建
+│       ├── test_runner.py             # 完整 session 到各终态 + timeout + resume + dangling reconcile
+│       ├── test_exit_artifacts.py     # debug_status.json 10 键 + debug_trace.md 4 节
+│       └── test_agent_backend.py      # 命令行参数 + 结果分类 + callback 注入 runner
 │
 ├── references/                        # 静态参考资料
 │   ├── precision_knowledge_base.json  # 精度问题知识库（45 条：40 问题模式 + 5 算子 CHECKLIST）
@@ -53,6 +76,36 @@ skills/ascendc/ascendc-debug/
         └── branch_timeout.py          # 1-T 分支：死锁 / 死循环 Gate（SYNC_POINT_ANALYSIS）
 ```
 
+### `engine/` 事件溯源调试引擎
+
+引擎是方案 C（引擎主导主循环）的完备实现，解决旧版"SKILL.md 散文 + Agent 自驱"的 reward-hacking / 不可复现问题。
+
+**核心设计**：
+
+| 原则 | 实现 |
+|------|------|
+| **单一事实源** | `.debug_events/events.jsonl`；所有状态 = `read_events + derive_counters`（纯 fold）；无独立状态文件 |
+| **漂移 = 同 session 续跑** | failure_type 变化时引擎自动 reload 新 ft，`_reset_upstream` 清零更靠前分支计数，同 session 内切换分支 |
+| **三道闸预算** | ①全局 MAX_ATTEMPTS=5 ②分支硬上限{precision:5,其余:3} ③wall-clock timeout（主动 emit 终态）|
+| **唯一 spawn 点** | `diagnose_and_fix`：spawn 一次 `claude --bare -p` 做单轮诊断+改 kernel，改完退出；forensics/validate 是 py_action（引擎直接 subprocess） |
+| **防 reward-hack** | backend 只判「claude 进程是否正常完成」；「修没修好」由 runner 随后的 Gate-V 客观判定 |
+| **可重放 / crash-resume** | runner resume 入口检测 dangling（崩在 spawn started 后）→ `_reconcile_dangling` 补 failed completed；terminal session 直接短路返回产物 |
+
+**SessionOutcome 8 值闭集**（`types.py`）：`success / failed / stopped_by_gate / stopped_by_loop_limit / timeout / skipped_env_issue / skipped_unsupported_type / crashed`
+
+**运行方式（方案 C，runner 在容器内）**：
+```bash
+cd /path/to/AscendOpGenAgent
+PYTHONPATH=skills/ascendc/ascendc-debug python3 -m engine <task_dir> \
+    --op-name <op> --agent constructive --npu <N> --workdir $(pwd)
+```
+
+**UT 运行**：
+```bash
+cd skills/ascendc/ascendc-debug
+python -m unittest discover -s engine/tests/ut/engine -t . -p "test_*.py"
+```
+
 ### `gates/` 2 层 Gate 协议
 
 | 层 | 负责 | 通过条件 |
@@ -86,7 +139,7 @@ skills/ascendc/ascendc-debug/
 | 组件 | 说明 |
 |------|------|
 | `precision_forensics.py` | L0-L8 数值取证，输出结构化报告（1-P 分支专用） |
-| `precision_gate.py` | Gate 入口路由器（派发到 gates/ 分支层）+ 循环控制 |
+| `precision_gate.py` | Gate 入口路由器（派发到 gates/ 分支层）；loop_signal 产出供 engine 消费 |
 | `verify_status.py` | `verify_status.json` loader / schema 校验器，消费 `utils/verification_ascendc.py` + `utils/classify_verify_result.py` 产出 |
 | `gates/common.py` | 通用层：反作弊 / AST / baseline / verify_status / 目录完整性 |
 | `gates/branch_*.py` | 分支层：precision / build / import / runtime / timeout 各自的 F/A/V 语义 |
@@ -111,13 +164,18 @@ skills/ascendc/ascendc-debug/
 
 | 文件 | 阶段 | 职责 | 使用方 |
 |------|------|------|--------|
-| `SKILL.md` | 全流程 | Agent 执行手册，定义 Step 0 ~ Step 4（含 Step 0.3 分流 + Step 1-P/B/I/R/T + Step 2 的 Sub-step 2.1~2.6）；Step 5/6/7 全部外置至 `exit-protocols.md` | 双 Subagent |
-| `README.md` | 参考 | 设计文档，含双 Subagent 架构、gates/ 2 层架构、知识库结构 | 开发者 |
+| `SKILL.md` | 全流程 | Agent 执行手册，定义 Step 0 ~ Step 4（含 Step 0.3 分流 + Step 1-P/B/I/R/T + Step 2 的 Sub-step 2.1~2.6）；Step 5/6/7 全部外置至 `exit-protocols.md`；编排/循环/退出由 `engine/` 掌控，SKILL.md 只含方法论 | 双 Subagent |
+| `README.md` | 参考 | 设计文档，含双 Subagent 架构、gates/ 2 层架构、engine/ 引擎、知识库结构 | 开发者 |
+| `engine/` | 全程编排 | 事件溯源引擎：运行主循环、派发 Action、管三道闸、crash-resume、产出 debug_status.json + debug_trace.md | 批处理脚本 |
+| `engine/__main__.py` | CLI 入口 | `python -m engine {task_dir} --op-name ...`，退出码按 session_outcome 映射 | 批处理脚本 |
+| `engine/runner.py` | 主循环 | run_debug_session：Continue/Action/Done/Abort 派发；wall-clock timeout 闸；crash-resume | 批处理脚本 / UT |
+| `engine/next_action.py` | 决策 | debug_next_action 纯函数：路由+三道闸+轮内步序+loop_signal 派发 | runner |
+| `engine/agent_backend.py` | spawn 点 | spawn_diagnose_agent（唯一 spawn：claude --bare -p 单轮诊断+改 kernel）+ make_agent_callback | runner |
 | `precision_forensics.py` | Step 1-P 取证 | 运行算子取证，输出误差统计与 worst element 数据 | 双 Subagent（1-P 分支专用） |
-| `precision_gate.py` | 每步 Gate 末尾 | Gate 入口路由器，派发到 gates/ 分支层；通用层先跑 | 双 Subagent |
-| `verify_status.py` | Step 0.3 / 每轮 Step 4 | 读取 `utils/verification_ascendc.py` + `utils/classify_verify_result.py` 产出的 `verify_status.json`，schema 校验 | 双 Subagent |
-| `gates/common.py` | 每次 Gate | 反作弊 / AST / baseline / verify_status / 目录完整性，通用不变量 | 双 Subagent |
-| `gates/branch_*.py` | 每次 Gate | 对应分支的 F/A/V 语义 + audit section schema | 双 Subagent |
+| `precision_gate.py` | 每步 Gate 末尾 | Gate 入口路由器，派发到 gates/ 分支层；通用层先跑；loop_signal 由此产出（引擎消费） | engine/runner（py_action） |
+| `verify_status.py` | Step 0.3 / 每轮 Step 4 | 读取 `utils/verification_ascendc.py` + `utils/classify_verify_result.py` 产出的 `verify_status.json`，schema 校验 | 双 Subagent / engine |
+| `gates/common.py` | 每次 Gate | 反作弊 / AST / baseline / verify_status / 目录完整性，通用不变量 | 双 Subagent / engine |
+| `gates/branch_*.py` | 每次 Gate | 对应分支的 F/A/V 语义 + audit section schema | 双 Subagent / engine |
 | `precision_knowledge.py` | Sub-step 2.1 / 2.4 / Step 5.2.5 / Step 5.3 | 知识库 RAG 检索、加载、相似度检查、写入 | 双 Subagent |
 | `anticheat.py` | Step 0.1 / 每轮编译前 / 验收 | 检测 Python wrapper 被偷改、C++ kernel 偷调 ATen 等退化路径 | 双 Subagent |
 | `precision_knowledge_base.json` | Sub-step 2.4 | 已知精度问题模式（45 条：40 问题模式 + 5 算子 CHECKLIST）；支持 op_type + patterns 精确匹配检索 | 双 Subagent |
@@ -563,12 +621,12 @@ Step 4.2  →  compilation_log_0.json                  (Agent, 仅编译失败�
 Step 4.4  →  validation_result_attempt_0.json        (Agent)
 Gate-V    →  round_summary_0.json (metrics 补充)     (precision_gate.py)
           →  tuning_directions.json                  (precision_gate.py)
-            ├─ loop_signal=CONTINUE → 归档步骤:
+            ├─ loop_signal=CONTINUE → engine 驱动后续：
             │    cp forensics_report_0.json → history/attempt_0/forensics_report.json
             │    cp precision_audit_0.md   → history/attempt_0/precision_audit.md
             │    更新 history/current_best/ (若 match_rate 改善)
             │    cp 起始代码 → history/attempt_1/code_snapshot/
-            │    → 回到 Step 0.3 (attempt+1, 按当前 failure_type 重新路由)
+            │    → engine runner reload failure_type，emit attempt_started(attempt+1)，进入下一轮
             └─ loop_signal=PASS → Step 5:
                  Step 5.1: 归档 + 更新 current_best (match_rate=100.0)
                  Step 5.2: candidate_kb_entry.json   (Agent)
