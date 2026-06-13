@@ -185,10 +185,25 @@ POSITION_PATTERN_AFFINITY = {
 
 # 评分权重
 W_PATTERN = 3
+W_PATTERN_WEAK = 1        # all_wrong 等泛化 pattern 降权 (无区分度, 占库近半)
 W_OP_TYPE = 2
 W_TYPE = 1
 W_POSITION = 1
 W_OP_TYPE_ALL_WRONG_BOOST = 2  # all_wrong 是泛化 hint, op_type 精确匹配时额外加权
+# 问题7 增强权重:
+W_OP_TYPE_FUZZY = 1       # op_type 精确失败时的模糊回退 (子串/标题命中)，弱于精确
+# op_name 关键词通道用 IDF 式稀有度加权: 命中分 = W_OP_NAME_KEYWORD * idf(词)。
+# 专有稀有词 (rfft/hyena df 小→idf 大) 远重于泛词 (padding/size df 大→idf 小)，
+# 避免泛词命中压过算子专项条目 (真实数据: RFFT 专项条目 #45 曾被 padding 泛匹配挤出 top-3)。
+W_OP_NAME_KEYWORD = 2.0
+W_OP_NAME_KEYWORD_CAP = 15.0  # op_name 关键词通道单条封顶: 放宽以让多专有词 (rfft+fft+...)
+                             # 命中的算子专项条目压过单泛词命中的条目, 同时防超长名无限刷分
+
+# op_name 分词通道的停用词: 纯位号/通用词，命中无区分度，剔除避免噪声匹配。
+_OP_NAME_STOPWORDS = {
+    "op", "kernel", "ascendc", "npu", "fwd", "bwd", "forward", "backward",
+    "v2", "v3", "with", "and", "the", "for", "from",
+}
 
 
 def _is_checklist(entry: dict) -> bool:
@@ -196,27 +211,135 @@ def _is_checklist(entry: dict) -> bool:
     return entry.get("title", "").startswith("[CHECKLIST]")
 
 
+def _op_name_keywords(op_name: str | None) -> set:
+    """把 op_name 拆成有区分度的关键词集合 (剔除位号前缀 + 停用词)。
+
+    例: "023_HyenaFftSizePaddingRfft" → {hyena, fft, size, padding, rfft}。
+    复用 _tokenize 的 snake/camel 拆分; 去掉纯数字 token 与 _OP_NAME_STOPWORDS。
+    """
+    if not op_name:
+        return set()
+    toks = _tokenize(op_name)
+    return {t for t in toks
+            if not t.isdigit() and t not in _OP_NAME_STOPWORDS}
+
+
+def _entry_keyword_pool(entry: dict) -> set:
+    """条目可供 op_name 关键词匹配的 token 池 (title + feature + op_types + derived_keywords)。
+
+    derived_keywords 为入库时从 op_name 自动派生的检索辅助词 (写读对称, 见 dump
+    侧回填): agent 留空 op_types 的通用经验也借此可被同类算子的 op_name 召回。
+    """
+    text = (entry.get("title", "") + " " + entry.get("feature", "")
+            + " " + " ".join(entry.get("op_types", []))
+            + " " + " ".join(entry.get("derived_keywords", [])))
+    return _tokenize(text)
+
+
+def _keyword_idf(normal_entries: list) -> dict:
+    """对普通条目的 keyword_pool 计算每词 IDF: log((N+1)/(df+1)) + 1，词越稀有越大。
+
+    用于 op_name 关键词通道加权——专有词 (rfft df=1) 远重于泛词 (padding df=5)。
+    """
+    import math
+    pools = [_entry_keyword_pool(e) for e in normal_entries]
+    n = len(pools)
+    df: dict = {}
+    for pool in pools:
+        for tok in pool:
+            df[tok] = df.get(tok, 0) + 1
+    return {tok: math.log((n + 1) / (d + 1)) + 1.0 for tok, d in df.items()}
+
+
+# 近重复阈值: new 入库时与现有条目 Jaccard 超此值则提示应 merge。与 check 子命令
+# 默认 threshold(0.10) 拉开——0.10 是"值得 agent 复核"的弱相似, 0.55 才是"疑似重复"。
+_DUP_MERGE_THRESHOLD = 0.55
+
+
+def _entry_sim_text(entry: dict) -> str:
+    """条目相似度比对文本: title + feature + patterns + op_types (对齐 check_similarity)。"""
+    return (entry.get("title", "") + " " + entry.get("feature", "")
+            + " " + " ".join(entry.get("patterns", []))
+            + " " + " ".join(entry.get("op_types", [])))
+
+
+def _most_similar_entry(entry: dict, kb: list):
+    """返回 kb 中与 entry 最相似的 (jaccard, title); kb 空返回 None。"""
+    cand_tokens = _tokenize(_entry_sim_text(entry))
+    best = None
+    for e in kb:
+        score = _jaccard(cand_tokens, _tokenize(_entry_sim_text(e)))
+        if best is None or score > best[0]:
+            best = (score, e.get("title", ""))
+    return best
+
+
+def _op_name_from_task_dir(task_dir: str | None) -> str | None:
+    """--op-name 缺省时的回退: 优先读 events.jsonl 的 session_started.op_name,
+    否则用 task 目录名。任何异常静默返回 None (best-effort)。"""
+    if not task_dir or not os.path.isdir(task_dir):
+        return None
+    events = os.path.join(task_dir, ".debug_events", "events.jsonl")
+    try:
+        with open(events, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                e = json.loads(line)
+                if e.get("type") == "session_started" and e.get("op_name"):
+                    return e["op_name"]
+    except (OSError, ValueError):
+        pass
+    return os.path.basename(os.path.normpath(task_dir)) or None
+
+
 def _score_entry(entry: dict, query_pattern: str | None, query_op_type: str | None,
-                 query_position: str | None) -> float:
-    """对单条知识库条目评分。直接从 patterns / op_types 数组读取，无需解析 feature 文本。"""
+                 query_position: str | None,
+                 op_name_kw: set | None = None,
+                 idf: dict | None = None) -> tuple[float, list]:
+    """对单条知识库条目评分。返回 (score, reasons): reasons 记录命中的维度 (why-matched)。
+
+    直接从 patterns / op_types 数组读取，无需解析 feature 文本。op_name_kw 为 op_name
+    分词集合 (问题7 增强): 当 op_type/pattern 失效 (unknown/all_wrong) 时提供关键词召回。
+    idf 为各词的稀有度权重 (KB 内文档频率倒数), 专有词命中远重于泛词。
+    """
     score = 0.0
+    reasons: list = []
     entry_patterns = entry.get("patterns", [])
     entry_op_types = entry.get("op_types", [])
     entry_type = entry.get("type", "")
+    is_checklist = _is_checklist(entry)
 
-    # 1. pattern 精确匹配 (权重 3)
+    # 1. pattern 匹配。all_wrong 是泛化 hint (占库近半, 无区分度), 降权为弱信号,
+    #    避免它给所有条目同一虚高基底、压过真正相关的 op_name 专有词命中 (问题7)。
     if query_pattern and query_pattern in entry_patterns:
-        score += W_PATTERN
+        if query_pattern == "all_wrong":
+            score += W_PATTERN_WEAK
+            reasons.append("pattern=all_wrong(弱)")
+        else:
+            score += W_PATTERN
+            reasons.append(f"pattern={query_pattern}")
 
-    # 2. op_type 精确匹配 (权重 2) — 仅对非 CHECKLIST 条目
-    if query_op_type and not _is_checklist(entry):
+    # 2. op_type 匹配 (权重 2 精确 / 1 模糊) — 仅对非 CHECKLIST 条目
+    if query_op_type and query_op_type != "unknown" and not is_checklist:
         if query_op_type in entry_op_types:
             score += W_OP_TYPE
+            reasons.append(f"op_type={query_op_type}")
+        else:
+            # 模糊回退: op_type 作子串命中条目 op_types 或 title (补救 19 类稀疏 + 命名不齐)
+            qt = query_op_type.lower()
+            hay = (" ".join(entry_op_types) + " " + entry.get("title", "")).lower()
+            if qt in hay or any(qt in ot.lower() or ot.lower() in qt
+                                for ot in entry_op_types):
+                score += W_OP_TYPE_FUZZY
+                reasons.append(f"op_type~{query_op_type}")
 
     # 3. type 字段交叉匹配 (权重 1)
     if query_pattern and query_pattern in PATTERN_TYPE_AFFINITY:
         if entry_type in PATTERN_TYPE_AFFINITY[query_pattern]:
             score += W_TYPE
+            reasons.append(f"type≈{entry_type}")
 
     # 4. position 辅助加分 (仅第二次检索时使用, 权重 1)
     if query_position and query_position in POSITION_PATTERN_AFFINITY:
@@ -224,26 +347,44 @@ def _score_entry(entry: dict, query_pattern: str | None, query_op_type: str | No
         for p in affine_patterns:
             if p in entry_patterns:
                 score += W_POSITION
+                reasons.append(f"position={query_position}")
                 break
 
-    # 5. all_wrong 特例: op_type 额外加权
-    if query_pattern == "all_wrong" and query_op_type and not _is_checklist(entry):
-        if query_op_type in entry_op_types:
-            score += W_OP_TYPE_ALL_WRONG_BOOST
+    # 5. all_wrong 特例: op_type 精确匹配额外加权 (仅精确, 模糊不享此 boost)
+    if query_pattern == "all_wrong" and query_op_type and query_op_type != "unknown" \
+            and not is_checklist and query_op_type in entry_op_types:
+        score += W_OP_TYPE_ALL_WRONG_BOOST
+        reasons.append("all_wrong+op_type")
 
-    return score
+    # 6. op_name 关键词软匹配通道 (问题7 核心) — pattern/op_type 失效时的主召回。
+    #    当 pattern=all_wrong (无区分度) 时这是唯一有效信号。命中分按 IDF 加权:
+    #    专有稀有词 (rfft/hyena) 远重于泛词 (padding/size), 单条封顶防霸榜。
+    if op_name_kw and not is_checklist:
+        hits = op_name_kw & _entry_keyword_pool(entry)
+        if hits:
+            if idf:
+                kw_score = sum(W_OP_NAME_KEYWORD * idf.get(h, 1.0) for h in hits)
+            else:
+                kw_score = len(hits) * W_OP_NAME_KEYWORD
+            kw_score = min(kw_score, W_OP_NAME_KEYWORD_CAP)
+            score += kw_score
+            # reason 标注命中词 (按 IDF 降序, 让最有区分度的词排前)
+            ordered = sorted(hits, key=lambda h: -(idf.get(h, 1.0) if idf else 1.0))
+            reasons.append("op_name_kw:" + ",".join(ordered))
+
+    return round(score, 2), reasons
 
 
 def search_knowledge_base(kb_path: str, op_type: str | None = None,
                           pattern: str | None = None, position: str | None = None,
-                          top_k: int = 3) -> dict:
+                          top_k: int = 3, op_name: str | None = None) -> dict:
     """
-    结构化 RAG 检索: 根据 op_type + pattern + position 筛选并评分排序。
+    结构化 RAG 检索: 根据 op_type + pattern + position + op_name 关键词筛选并评分排序。
 
     返回:
       {
-        "query": {"op_type": ..., "pattern": ..., "position": ..., "top_k": ...},
-        "matched_entries": [...],       # top-K 普通条目 (按 score 降序)
+        "query": {"op_type": ..., "pattern": ..., "position": ..., "top_k": ..., "op_name": ...},
+        "matched_entries": [...],       # top-K 普通条目 (按 score 降序, 含 match_reason)
         "checklists": [...],            # op_type 匹配的 CHECKLIST (不占 K 配额)
         "total_kb_size": N,
         "fallback_to_full_load": bool
@@ -251,18 +392,18 @@ def search_knowledge_base(kb_path: str, op_type: str | None = None,
     """
     if not os.path.exists(kb_path):
         print(f"[KB-SEARCH] ⚠️ 知识库文件不存在: {kb_path}", file=sys.stderr)
-        return _empty_search_result(op_type, pattern, position, top_k)
+        return _empty_search_result(op_type, pattern, position, top_k, op_name)
 
     try:
         with open(kb_path) as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError) as e:
         print(f"[KB-SEARCH] ⚠️ 知识库读取失败: {e}", file=sys.stderr)
-        return _empty_search_result(op_type, pattern, position, top_k)
+        return _empty_search_result(op_type, pattern, position, top_k, op_name)
 
     if not isinstance(data, list):
         print(f"[KB-SEARCH] ⚠️ 知识库格式错误 (期望 list)", file=sys.stderr)
-        return _empty_search_result(op_type, pattern, position, top_k)
+        return _empty_search_result(op_type, pattern, position, top_k, op_name)
 
     valid = [e for e in data if _is_valid_entry(e)]
 
@@ -270,9 +411,14 @@ def search_knowledge_base(kb_path: str, op_type: str | None = None,
     checklists = [e for e in valid if _is_checklist(e)]
     normal_entries = [e for e in valid if not _is_checklist(e)]
 
-    # CHECKLIST 按 op_types 数组精确匹配
+    # op_name 分词 (问题7): op_type/pattern 失效时的关键词召回通道
+    op_name_kw = _op_name_keywords(op_name)
+    # 关键词 IDF: 仅在用到 op_name 通道时计算 (省开销)
+    idf = _keyword_idf(normal_entries) if op_name_kw else None
+
+    # CHECKLIST 按 op_types 数组精确匹配 (unknown 不参与)
     matched_checklists = []
-    if op_type:
+    if op_type and op_type != "unknown":
         for cl in checklists:
             if op_type in cl.get("op_types", []):
                 matched_checklists.append(cl)
@@ -280,9 +426,10 @@ def search_knowledge_base(kb_path: str, op_type: str | None = None,
     # 普通条目评分排序
     scored = []
     for entry in normal_entries:
-        score = _score_entry(entry, pattern, op_type, position)
+        score, reasons = _score_entry(entry, pattern, op_type, position,
+                                      op_name_kw, idf)
         if score > 0:
-            scored.append({"score": score, "entry": entry})
+            scored.append({"score": score, "entry": entry, "reasons": reasons})
 
     scored.sort(key=lambda x: x["score"], reverse=True)
     top_entries = scored[:top_k]
@@ -291,7 +438,8 @@ def search_knowledge_base(kb_path: str, op_type: str | None = None,
     fallback = len(top_entries) == 0 and len(matched_checklists) == 0
     if fallback:
         print(f"[KB-SEARCH] ⚠️ 无匹配条目, fallback 到前 {top_k} 条", file=sys.stderr)
-        top_entries = [{"score": 0, "entry": e} for e in normal_entries[:top_k]]
+        top_entries = [{"score": 0, "entry": e, "reasons": ["fallback"]}
+                       for e in normal_entries[:top_k]]
         matched_checklists = checklists[:top_k]
 
     result = {
@@ -300,11 +448,14 @@ def search_knowledge_base(kb_path: str, op_type: str | None = None,
             "pattern": pattern,
             "position": position,
             "top_k": top_k,
+            "op_name": op_name,
+            "op_name_keywords": sorted(op_name_kw),
         },
         "matched_entries": [
             {
                 "index": valid.index(s["entry"]) if s["entry"] in valid else -1,
                 "score": s["score"],
+                "match_reason": s.get("reasons", []),
                 "title": s["entry"]["title"],
                 "patterns": s["entry"].get("patterns", []),
                 "op_types": s["entry"].get("op_types", []),
@@ -333,14 +484,16 @@ def search_knowledge_base(kb_path: str, op_type: str | None = None,
 
     n_matched = len(result["matched_entries"])
     n_checklists = len(result["checklists"])
-    print(f"[KB-SEARCH] ✅ 检索完成 (op_type={op_type}, pattern={pattern}, position={position})")
+    print(f"[KB-SEARCH] ✅ 检索完成 (op_type={op_type}, pattern={pattern}, "
+          f"position={position}, op_name={op_name})")
     print(f"  知识库总条目: {len(valid)}")
     print(f"  命中普通条目: {n_matched} / top-K={top_k}")
     print(f"  命中 CHECKLIST: {n_checklists}")
     if fallback:
         print(f"  ⚠️ FALLBACK: 无匹配, 已返回全量 {len(valid)} 条")
     for s in top_entries[:top_k]:
-        print(f"    [{s['score']:.1f}] {s['entry']['title']}")
+        why = ",".join(s.get("reasons", []))
+        print(f"    [{s['score']:.1f}] {s['entry']['title']}  ⟵ {why}")
     for cl in matched_checklists:
         print(f"    [CL] {cl['title']}")
 
@@ -348,9 +501,11 @@ def search_knowledge_base(kb_path: str, op_type: str | None = None,
     return result
 
 
-def _empty_search_result(op_type, pattern, position, top_k) -> dict:
+def _empty_search_result(op_type, pattern, position, top_k, op_name=None) -> dict:
     return {
-        "query": {"op_type": op_type, "pattern": pattern, "position": position, "top_k": top_k},
+        "query": {"op_type": op_type, "pattern": pattern, "position": position,
+                  "top_k": top_k, "op_name": op_name,
+                  "op_name_keywords": sorted(_op_name_keywords(op_name))},
         "matched_entries": [],
         "checklists": [],
         "total_kb_size": 0,
@@ -561,12 +716,34 @@ def dump_success_knowledge(kb_path: str, task_dir: str, op_name: str,
             pass
 
     entry = dict(candidate)
+
+    # 7.5 检索闭环回填 (问题7 写侧): 从 op_name 派生检索辅助关键词存入 derived_keywords。
+    # agent 留空 op_types 的通用经验 (真实库 46% 如此) 借此仍可被同类算子 op_name 召回——
+    # 与检索侧 _entry_keyword_pool/_op_name_keywords 严格同源, 保证"写进去的查得到"。
+    derived = sorted(_op_name_keywords(op_name)
+                     - {kw.lower() for kw in op_types_val})
+    if derived:
+        entry["derived_keywords"] = derived
+
     entry["_meta"] = {
         "op_name": op_name,
         "created_at": datetime.now().isoformat(),
         "attempts_needed": num_attempts,
         "action": action,
     }
+
+    # 7.6 可检索性自检 (质量门, 非阻断): 一条经验要能被 op_name 关键词通道召回, 必须
+    # 至少有一个检索锚点 —— op_types 非空 / derived_keywords 非空 / title 含英文专有词
+    # (中文标题分词后是单字, 区分度低, 不算锚点)。三者全无 = 纯通用中文标题 + 空类型 +
+    # op_name 也派生不出词, 这种条目入库后任何算子都难定位到。告警建议补 title 关键词。
+    title_kw = {t for t in _tokenize(entry.get("title", ""))
+                if t.isascii() and len(t) >= 2}
+    has_anchor = bool(entry.get("op_types") or entry.get("derived_keywords")
+                      or title_kw)
+    if not has_anchor:
+        print(f"[KB] ⚠️ 可检索性弱: 条目无 op_types、无派生关键词、title 无英文特征词, "
+              f"入库后难被算子 op_name 检索召回; 建议在 title 补充英文算子/机制关键词。",
+              file=sys.stderr)
 
     # 8. 加载知识库
     kb = []
@@ -596,11 +773,22 @@ def dump_success_knowledge(kb_path: str, task_dir: str, op_name: str,
         if entry["title"] in existing_titles:
             print(f"[KB] ⚠️ 知识条目已存在 (title 重复), 跳过: {entry['title']}")
             return None
+        # 近重复抑制 (问题7 写侧): new 入库前自检与现有条目相似度, 高相似提示应 merge,
+        # 避免近义条目膨胀稀释检索信噪比 (真实库已有大量 Reduction/Padding 近义条目)。
+        sim = _most_similar_entry(entry, kb)
+        if sim and sim[0] >= _DUP_MERGE_THRESHOLD:
+            print(f"[KB] ⚠️ 与现有条目高相似 (Jaccard={sim[0]:.2f}): \"{sim[1]}\"",
+                  file=sys.stderr)
+            print(f"    建议改用 --action merge --merge-target-title \"{sim[1]}\" "
+                  f"合并, 而非新增近重复条目; 如确为不同经验可忽略本提示。",
+                  file=sys.stderr)
         kb.append(entry)
         print(f"[KB] ✅ 已写入新知识条目: {entry['title']}")
         print(f"  type: {entry['type']}")
         print(f"  patterns: {entry.get('patterns', [])}")
         print(f"  op_types: {entry.get('op_types', [])}")
+        if entry.get("derived_keywords"):
+            print(f"  derived_keywords: {entry['derived_keywords']}")
         print(f"  attempts_needed: {num_attempts}")
         print(f"  kb_size: {len(kb)} 条")
 
@@ -616,7 +804,7 @@ def dump_success_knowledge(kb_path: str, task_dir: str, op_name: str,
 
 def _append_search_log(log_dir: str, call_index: int, op_type, pattern,
                        position, top_k: int, result: dict,
-                       attempt: int | None = None) -> None:
+                       attempt: int | None = None, op_name=None) -> None:
     if log_dir.endswith(".json"):
         log_path = log_dir
     else:
@@ -632,6 +820,7 @@ def _append_search_log(log_dir: str, call_index: int, op_type, pattern,
         except (json.JSONDecodeError, OSError):
             existing_entries = []
 
+    matched = result.get("matched_entries", [])
     entry = {
         "attempt": attempt,
         "call_index": call_index,
@@ -641,11 +830,19 @@ def _append_search_log(log_dir: str, call_index: int, op_type, pattern,
             "pattern": pattern,
             "position": position,
             "top_k": top_k,
+            "op_name": op_name,
+            "op_name_keywords": result.get("query", {}).get("op_name_keywords", []),
         },
-        "matched_count": len(result.get("matched_entries", [])),
+        "matched_count": len(matched),
         "checklist_count": len(result.get("checklists", [])),
         "fallback_to_full_load": result.get("fallback_to_full_load", False),
-        "top_titles": [e["title"] for e in result.get("matched_entries", [])[:top_k]],
+        "top_titles": [e["title"] for e in matched[:top_k]],
+        # why-matched: 每条命中的维度, 供 trace 解释 + 离线评估召回质量 (问题7)
+        "match_reasons": [
+            {"title": e["title"], "score": e["score"],
+             "reason": e.get("match_reason", [])}
+            for e in matched[:top_k]
+        ],
     }
     existing_entries.append(entry)
 
@@ -678,6 +875,11 @@ def main():
                           help=f"误差模式 (来自取证 primary_hint, 合法值: {VALID_PATTERNS})")
     p_search.add_argument("--position", default=None,
                           help="误差位置特征 (第二次检索用, 如 tail/boundary/head/scattered)")
+    p_search.add_argument("--op-name", default=None,
+                          help="算子名 (如 023_HyenaFftSizePaddingRfft); 分词后做关键词软匹配, "
+                               "op_type=unknown/pattern=all_wrong 时的主召回通道 (问题7)")
+    p_search.add_argument("--task-dir", default=None,
+                          help="任务目录; --op-name 缺省时从此目录的 events/目录名回退自取")
     p_search.add_argument("--top-k", type=int, default=3)
     p_search.add_argument("--log-path", default=None)
     p_search.add_argument("--call-index", type=int, default=0)
@@ -704,12 +906,18 @@ def main():
     if args.command == "load":
         load_knowledge_base(args.kb_path)
     elif args.command == "search":
+        # op_name: 显式 --op-name 优先; 缺省时从 --task-dir 回退自取 (events.session_started
+        # 或目录名)，使关键词通道在 agent 未传时仍可用 (问题7)。
+        op_name = args.op_name
+        if not op_name and getattr(args, "task_dir", None):
+            op_name = _op_name_from_task_dir(args.task_dir)
         result = search_knowledge_base(
             args.kb_path,
             op_type=args.op_type,
             pattern=args.pattern,
             position=args.position,
             top_k=args.top_k,
+            op_name=op_name,
         )
         if getattr(args, "log_path", None):
             _append_search_log(
@@ -721,6 +929,7 @@ def main():
                 top_k=args.top_k,
                 result=result,
                 attempt=getattr(args, "attempt", None),
+                op_name=op_name,
             )
     elif args.command == "check":
         check_similarity(

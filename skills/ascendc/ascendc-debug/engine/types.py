@@ -65,20 +65,29 @@ AbortSubtype = Literal[
 LoopSignal = Literal["PASS", "CONTINUE", "STOP"]
 
 # ---------------------------------------------------------------------------
-# session 终态闭集 — 统一 schema (8 值)。
+# session 终态闭集 — 统一 schema (11 值)。
 # 取 constructive (8 值) 为基准；discovery 多出的 progressed_to_new_failure_type
 # 是旧「漂移=session 结束」语义的产物，在新「漂移=续跑」模型下不作为单 session 终态
 # (REWRITE_PLAN §2.2)，故不纳入闭集。Step 8 同步修订 discovery.md + 情景总览.md。
+# stopped_by_budget (6.11 修复 4b-B): 跨 attempt 累计 turns 超任务级硬上限而停
+# (用 num_turns 而非 total_cost_usd——turns 模型无关，美元系数随 --model 浮动)。
+# degenerate_no_progress (6.11 N6): 连续 N 轮既无 match_rate 改善、又命中作弊/audit
+# 缺产物兜底 (12a + 修复4 的 CONTINUE 叠加)，退化空转早停，防烧满 branch_cap 预算。
+# provider_api_error: diagnose 步 provider API 错误而 Abort (runner._run_main_loop)，
+# 经 session_aborted.details.session_outcome 落入 debug_status，须在闭集内 (有退出码 8)。
 # ---------------------------------------------------------------------------
 SessionOutcome = Literal[
     "success",                    # 验证全过 (含 .json.bak 全量门)
     "failed",                     # 修复未收敛 (一般兜底)
     "stopped_by_gate",            # Gate 前置/不变量校验失败而停
     "stopped_by_loop_limit",     # 撞全局 MAX_ATTEMPTS 或分支硬上限而停
+    "stopped_by_budget",          # 跨 attempt 累计 turns 撞任务级硬上限而停 (4b-B)
+    "degenerate_no_progress",    # 连续 N 轮退化空转 (作弊/缺产物兜底无改善) 而停 (N6)
     "timeout",                    # wall-clock 超时主动终止
     "skipped_env_issue",          # import_env_side 等环境问题，非 kernel 可修
     "skipped_unsupported_type",  # failure_type 不在白名单
     "crashed",                    # 不可恢复错误 / 必填前置缺失
+    "provider_api_error",         # diagnose 步 provider API 错误而 Abort (退出码 8)
 ]
 
 

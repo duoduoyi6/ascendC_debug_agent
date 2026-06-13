@@ -41,6 +41,127 @@ def _max_attempts() -> int:
         return 5
 
 
+def _max_agent_retries_per_attempt() -> int:
+    try:
+        v = int(os.environ.get("ASCENDC_DEBUG_MAX_AGENT_RETRIES_PER_ATTEMPT", "2"))
+        return v if v >= 0 else 2
+    except (TypeError, ValueError):
+        return 2
+
+
+def _max_forensics_retries_per_attempt() -> int:
+    try:
+        v = int(os.environ.get("ASCENDC_DEBUG_MAX_FORENSICS_RETRIES", "2"))
+        return v if v >= 0 else 2
+    except (TypeError, ValueError):
+        return 2
+
+
+def _max_task_turns() -> Optional[int]:
+    """任务级累计 agentic turn 数硬闸 (修复 4b-B 方案B)。
+
+    默认 None=不启用 (向后兼容)；env ASCENDC_DEBUG_MAX_TASK_TURNS=<N>=启用。
+    用 turns 而非 total_cost_usd: turns 模型无关，而 turns→美元系数随 --model 浮动
+    (批跑切多种模型)，故跨 attempt 累计闸也统一用 turns (与单 attempt --max-turns 同量纲)。
+    """
+    raw = os.environ.get("ASCENDC_DEBUG_MAX_TASK_TURNS")
+    if raw is None or raw == "":
+        return None
+    try:
+        v = int(raw)
+        return v if v >= 1 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _max_degenerate_rounds() -> Optional[int]:
+    """N6 复合早停阈值: 连续 N 轮退化空转 (作弊/audit 缺产物兜底无改善) 即停。
+
+    默认启用 (返回 2)——N6 是 12a/修复4 的「CONTINUE 叠加烧预算」配套防御，二者已
+    默认生效，故其防护也默认生效 (与默认不启用的 turns 闸不同)。
+    env ASCENDC_DEBUG_MAX_DEGENERATE_ROUNDS=<N>: N>=1 设阈值；<=0 (或非法) 视为禁用
+    (返回 None)，留给需要跑满 branch_cap 观察退化全过程的实验。
+    """
+    raw = os.environ.get("ASCENDC_DEBUG_MAX_DEGENERATE_ROUNDS")
+    if raw is None or raw == "":
+        return 2
+    try:
+        v = int(raw)
+        return v if v >= 1 else None
+    except (TypeError, ValueError):
+        return 2
+
+
+def _total_agent_turns(state: DebugState) -> int:
+    """跨所有 attempt 累加 diagnose agent 的 agent_turns (agent_backend 透传的 num_turns)。
+
+    只数 diagnose_and_fix 步的 action_completed.result.agent_turns；缺失/None 按 0 计
+    (timeout/spawn_failed 等早返回路径无此字段，不误杀)。事件流是唯一事实源，重放即得。
+    """
+    total = 0
+    for e in state.events:
+        if e.get("type") != "action_completed":
+            continue
+        if (e.get("action") or {}).get("step") != "diagnose_and_fix":
+            continue
+        turns = (e.get("result") or {}).get("agent_turns")
+        if isinstance(turns, int) and turns > 0:
+            total += turns
+    return total
+
+
+def _is_degenerate_round(result: dict) -> bool:
+    """单轮 validate result 是否「退化空转」(N6)。二者之一即是:
+
+      a. audit 方向评估缺失兜底: stop_reason_code == "stagnant_audit_missing"
+         (12a: mismatch 连续未改善 + audit 缺失 → 保守 CONTINUE)。该 code 本身已隐含
+         「连续未改善」(只在 _count_stagnant >= MAX_STAGNANT_ROUNDS 分支产生)。
+      b. 确证作弊轮 (仅 violation，不含 N5 的 validator-errored warning):
+         anticheat_pass==False 或 (ast_degrade_pass==False 且非 ast_validator_errored)。
+         与 common.run_common 的 confirmed_cheat 同源——fail+cheat 的 A 场景返 CONTINUE，
+         checks 经 to_gate_output→parse_gate_output 落进 events，故纯函数可重建，不读
+         cheat_history.json (恪守 next_action 不碰文件的契约)。
+
+    数据全部取自 events 持久化的 validate result，无文件/子进程 I/O。
+    """
+    checks = result.get("checks") or {}
+    if result.get("stop_reason_code") == "stagnant_audit_missing" or \
+            checks.get("stop_reason_code") == "stagnant_audit_missing":
+        return True
+    anticheat_failed = checks.get("anticheat_pass", True) is False
+    ast_failed = checks.get("ast_degrade_pass", True) is False
+    confirmed_cheat = anticheat_failed or (
+        ast_failed and not checks.get("ast_validator_errored")
+    )
+    return confirmed_cheat
+
+
+def _degenerate_continue_streak(state: DebugState) -> int:
+    """从最近一轮往前数，连续「退化空转」(见 _is_degenerate_round) 的 attempt 数 (N6)。
+
+    按 attempt 分组取每轮最后一个 validate result；某轮无 validate 或非退化即中断计数
+    (退化必须是「连续」的末尾游程，单次退化夹在正常轮间不触发早停)。事件流是唯一事实源。
+    """
+    # 收集各 attempt 末尾的 validate result，按 attempt 出现序。
+    per_attempt: list[Optional[dict]] = []
+    cur_has_attempt = False
+    for e in state.events:
+        t = e.get("type")
+        if t == "attempt_started":
+            per_attempt.append(None)
+            cur_has_attempt = True
+        elif t == "action_completed" and cur_has_attempt and \
+                (e.get("action") or {}).get("step") == "validate":
+            per_attempt[-1] = e.get("result") or {}
+
+    streak = 0
+    for result in reversed(per_attempt):
+        if result is None or not _is_degenerate_round(result):
+            break
+        streak += 1
+    return streak
+
+
 # 分支硬上限: 撞上即停 session (stopped_by_loop_limit)。precision 比其他分支宽，因为
 # 精度调优本就需要更多轮次试探；build/import/runtime/timeout 是确定性错误，3 轮够。
 # env ASCENDC_DEBUG_BRANCH_CAP_<FT>=<N> 可逐分支覆盖。
@@ -100,6 +221,10 @@ _STOP_OUTCOME = {
     "nearly_success": "failed",
     "fp16_precision_ceiling": "failed",
     "validation_failed": "failed",
+    # 修复 4 (6.11 文档): objective success 但作弊 (绕过 kernel 的「假成功」)。
+    # session_outcome 归 failed；reportable_success 由 stop_reason_code 在统计层区分
+    # (clean success 须 anti_cheat_pass，见文档 6.5 成功分层)。
+    "cheat_detected": "failed",
 }
 
 
@@ -121,9 +246,69 @@ def _completed_steps_this_attempt(state: DebugState) -> set:
             break
         if e.get("type") == "action_completed":
             step = (e.get("action") or {}).get("step")
+            result = e.get("result") or {}
+            if step == "diagnose_and_fix" and result.get("success") is False:
+                continue
+            # forensics gate passed=false 不计入 completed，允许重派 (修复 2/3)。
+            if step == "forensics" and result.get("passed") is False:
+                continue
             if step:
                 done.add(step)
     return done
+
+
+def _failed_forensics_calls_this_attempt(state: DebugState) -> int:
+    count = 0
+    for e in reversed(state.events):
+        if e.get("type") == "attempt_started":
+            break
+        if e.get("type") != "action_completed":
+            continue
+        if (e.get("action") or {}).get("step") != "forensics":
+            continue
+        result = e.get("result") or {}
+        if result.get("passed") is False:
+            count += 1
+    return count
+
+
+def _failed_diagnose_calls_this_attempt(state: DebugState) -> int:
+    count = 0
+    for e in reversed(state.events):
+        if e.get("type") == "attempt_started":
+            break
+        if e.get("type") != "action_completed":
+            continue
+        if (e.get("action") or {}).get("step") != "diagnose_and_fix":
+            continue
+        result = e.get("result") or {}
+        if result.get("success") is False:
+            count += 1
+    return count
+
+
+def _has_attempt_started_event(state: DebugState) -> bool:
+    return any(e.get("type") == "attempt_started" for e in state.events)
+
+
+def _budget_limit_decision(state: DebugState, failure_type: str) -> Optional[Done]:
+    if state.total_attempts >= _max_attempts():
+        return Done(session_outcome="stopped_by_loop_limit",
+                    reason=f"达全局 MAX_ATTEMPTS={_max_attempts()}")
+    if state.branch_attempt(failure_type) >= _branch_cap(failure_type):
+        return Done(session_outcome="stopped_by_loop_limit",
+                    reason=f"分支 {failure_type} 撞硬上限 {_branch_cap(failure_type)}")
+    # 修复 4b-B: 任务级累计 turns 闸 (默认 None 不启用)。放在 loop_limit 之后——
+    # 撞轮次上限优先归 stopped_by_loop_limit (更精确)，仅未撞轮次但累计 turns 超标时
+    # 才归 stopped_by_budget。本函数只在续跑路径 (gate CONTINUE / 兜底) 前被调用，
+    # gate PASS/STOP 直接 return 不经此 → 天然满足「终判优先于预算闸」(H1)。
+    max_turns = _max_task_turns()
+    if max_turns is not None:
+        used = _total_agent_turns(state)
+        if used >= max_turns:
+            return Done(session_outcome="stopped_by_budget",
+                        reason=f"任务累计 agentic turns={used} 达上限 {max_turns}")
+    return None
 
 
 def _route_label(failure_type: Optional[str]) -> Optional[str]:
@@ -188,6 +373,26 @@ def debug_next_action(state: DebugState, gate_result: Optional[GateResult] = Non
     # 本轮是终态轮时，gate 的 PASS/STOP 才是真实结局，不能被预算闸覆盖成
     # stopped_by_loop_limit。gate_result 缺失 (crash-resume) 时从事件流重建 (H2)。
     completed = _completed_steps_this_attempt(state)
+
+    if (
+        state.total_attempts > 0
+        and "diagnose_and_fix" not in completed
+        and "validate" not in completed
+    ):
+        failed_agent_calls = _failed_diagnose_calls_this_attempt(state)
+        if failed_agent_calls > _max_agent_retries_per_attempt():
+            return Abort(
+                category="agent_invocation_failed",
+                reason=(
+                    "diagnose agent 连续失败 "
+                    f"{failed_agent_calls} 次，未计入有效修复轮次"
+                ),
+                details={
+                    "session_outcome": "crashed",
+                    "failed_agent_calls": failed_agent_calls,
+                },
+            )
+
     if "validate" in completed:
         gate = _resolve_gate(state, gate_result)
         if gate is not None:
@@ -195,35 +400,67 @@ def debug_next_action(state: DebugState, gate_result: Optional[GateResult] = Non
             if sig in ("PASS", "STOP"):
                 # 终判: 直接收尾，预算闸不介入。
                 return _dispatch_loop_signal(state, gate)
-            # CONTINUE: 落到下方预算闸——想续跑但已达上限则 stopped_by_loop_limit。
+            if sig == "CONTINUE":
+                limited = _budget_limit_decision(state, ft)
+                if limited is not None:
+                    return limited
+                # N6 复合早停: 连续多轮退化空转 (作弊/audit 缺产物兜底无改善) → 早停，
+                # 防 12a/修复4 的 CONTINUE 叠加把退化任务兜到撞满 branch_cap 才停 (实测
+                # $49 量级)。放在 loop_limit/budget 闸之后——撞硬上限优先归更精确的 outcome。
+                # 此刻 events 已含当前轮 validate (runner 先 record_completed 再 reload)，
+                # 故 streak 含当前轮。
+                degen_limit = _max_degenerate_rounds()
+                if degen_limit is not None:
+                    streak = _degenerate_continue_streak(state)
+                    if streak >= degen_limit:
+                        return Done(
+                            session_outcome="degenerate_no_progress",
+                            reason=(f"连续 {streak} 轮退化空转 (作弊/audit 缺产物兜底无"
+                                    f"改善) 达上限 {degen_limit}，早停防烧预算"),
+                        )
+                return _dispatch_loop_signal(state, gate)
+            # sig is None: validate 已完成但 gate 未给 loop_signal = gate 协议错误，
+            # 不能当作「需继续」无脑兜底 continue (问题 3)。gate 为 None (crash-resume
+            # 无法重建) 时不进此分支，仍落到 ---- 5 的兜底 continue。
+            return Abort(
+                category="gate_protocol_error",
+                reason="validate 完成但 gate 未给 loop_signal（gate 实现缺陷）",
+                details={"session_outcome": "crashed"},
+            )
 
-    # ---- 3. 闸 1 全局 MAX_ATTEMPTS ----
-    if state.total_attempts >= _max_attempts():
-        return Done(session_outcome="stopped_by_loop_limit",
-                    reason=f"达全局 MAX_ATTEMPTS={_max_attempts()}")
-
-    # ---- 4. 闸 2 分支硬上限 ----
-    if state.branch_attempt(ft) >= _branch_cap(ft):
-        return Done(session_outcome="stopped_by_loop_limit",
-                    reason=f"分支 {ft} 撞硬上限 {_branch_cap(ft)}")
-
-    # ---- 5. 本轮 validate 已完成且 gate=CONTINUE 且预算未尽 → 进下一轮 ----
-    if "validate" in completed:
-        gate = _resolve_gate(state, gate_result)
-        if gate is not None and gate.loop_signal == "CONTINUE":
-            return _dispatch_loop_signal(state, gate)
-
-    # ---- 6. 尚未开始任何 attempt → 起第一轮 ----
+    # ---- 3. 尚未开始任何 attempt → 起第一轮 ----
     if state.total_attempts == 0:
         return Continue(next_attempt=0, next_failure_type=ft,
                         reason="session 首轮")
 
-    # ---- 7. 轮内推进: 找本轮下一个未完成的 step ----
+    # 人工构造/损坏状态可能只有 counters 没有 attempt_started 事件，此时只能按预算闸收敛。
+    if not _has_attempt_started_event(state):
+        limited = _budget_limit_decision(state, ft)
+        if limited is not None:
+            return limited
+        return Continue(next_attempt=state.total_attempts, next_failure_type=ft,
+                        reason="无当前 attempt 事件，进入下一轮")
+
+    # ---- 4. 轮内推进: 找本轮下一个未完成的 step ----
+    # forensics 失败重试上限 (镜像 diagnose 的 _max_agent_retries)：本轮 forensics
+    # gate 连续 passed=False 超限 → 无法产出取证数据，Done(stopped_by_gate)。
+    # 失败的 forensics 已被 _completed_steps_this_attempt 排除出 completed，故会
+    # 反复重派 (修复 2 dispatcher 每次重跑 run_forensics)，由此计数收敛。
+    failed_forensics = _failed_forensics_calls_this_attempt(state)
+    if failed_forensics > _max_forensics_retries_per_attempt():
+        return Done(
+            session_outcome="stopped_by_gate",
+            reason=f"forensics 连续失败 {failed_forensics} 次，无法产出取证数据",
+        )
+
     for step in _ROUND_SEQUENCE:
         if step not in completed:
             return _make_action_for_step(step, ft, state.total_attempts - 1)
 
-    # ---- 8. 本轮全部 step 完成但无 gate 信号 (异常) → 兜底当作需继续 ----
+    # ---- 5. 本轮全部 step 完成但无 gate 信号 (异常) → 兜底当作需继续 ----
+    limited = _budget_limit_decision(state, ft)
+    if limited is not None:
+        return limited
     return Continue(next_attempt=state.total_attempts, next_failure_type=ft,
                     reason="本轮步骤完成，进入下一轮")
 

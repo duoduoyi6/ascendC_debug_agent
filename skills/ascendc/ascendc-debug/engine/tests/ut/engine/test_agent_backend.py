@@ -70,7 +70,42 @@ class TestCommandConstruction(unittest.TestCase):
         self.assertIn("单个 attempt", prompt)
         self.assertIn("禁止自己跑", prompt)
 
-# PLACEHOLDER_TESTS
+class TestTurnsWiring(unittest.TestCase):
+    """失控治本闸接线: 仅 --max-turns (模型无关)；杜绝任何 usd 量纲闸。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.task_dir = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_max_turns_appended_when_set(self) -> None:
+        cap = {}
+        spawn_diagnose_agent(
+            _diagnose_action("precision_failed", 0), self.task_dir, "add", 0,
+            max_turns="120",
+            _run=_fake_run_factory({"is_error": False}, cap))
+        cmd = cap["cmd"]
+        self.assertIn("--max-turns", cmd)
+        self.assertEqual(cmd[cmd.index("--max-turns") + 1], "120")
+
+    def test_no_turns_flag_when_unset(self) -> None:
+        cap = {}
+        spawn_diagnose_agent(
+            _diagnose_action("precision_failed", 0), self.task_dir, "add", 0,
+            _run=_fake_run_factory({"is_error": False}, cap))
+        self.assertNotIn("--max-turns", cap["cmd"])
+
+    def test_no_usd_budget_flag_ever(self) -> None:
+        # 护栏: usd 闸已彻底移除 (换模型即失效)，命令行永不出现 --max-budget-usd。
+        cap = {}
+        spawn_diagnose_agent(
+            _diagnose_action("precision_failed", 0), self.task_dir, "add", 0,
+            max_turns="120",
+            _run=_fake_run_factory({"is_error": False}, cap))
+        self.assertNotIn("--max-budget-usd", cap["cmd"])
+        self.assertNotIn("--max-budget", " ".join(cap["cmd"]))
 
 
 class TestResultClassification(unittest.TestCase):
@@ -135,6 +170,35 @@ class TestResultClassification(unittest.TestCase):
                                  timeout_sec=1, _run=_slow)
         self.assertFalse(r["success"])
         self.assertEqual(r["claude_state"], "timeout")
+
+    def test_final_response_extracted(self) -> None:
+        # 项 12b: 顶层 `result` 字段透传为 final_response (diagnosis_summary 主数据源)。
+        r = self._spawn({"is_error": False, "stop_reason": "end_turn",
+                         "result": "## 诊断总结\n根因: CAST_NONE 应改 CAST_ROUND"})
+        self.assertEqual(r["final_response"], "## 诊断总结\n根因: CAST_NONE 应改 CAST_ROUND")
+
+    def test_final_response_truncated(self) -> None:
+        from engine.agent_backend import _FINAL_RESPONSE_MAXLEN
+        r = self._spawn({"is_error": False, "result": "x" * (_FINAL_RESPONSE_MAXLEN + 50)})
+        self.assertTrue(r["final_response"].endswith("…(截断)"))
+        self.assertLessEqual(len(r["final_response"]), _FINAL_RESPONSE_MAXLEN + 10)
+
+    def test_final_response_none_when_missing_or_blank(self) -> None:
+        self.assertIsNone(self._spawn({"is_error": False})["final_response"])
+        self.assertIsNone(self._spawn({"is_error": False, "result": "   "})["final_response"])
+
+    def test_final_response_suppressed_on_error(self) -> None:
+        # 真实产物核实 (artifacts 14/20 样例): is_error/stop_sequence 态 result 是
+        # "API Error: 400 ..." 错误串，非诊断 → final_response 必须 None，不污染摘要。
+        r = self._spawn({"is_error": True, "stop_reason": "stop_sequence",
+                         "result": "API Error: 400 Invalid request: token limit"})
+        self.assertIsNone(r["final_response"])
+        # api_error 态同理。
+        r2 = self._spawn({"is_error": True, "api_error_status": 400, "result": "API Error: 400"})
+        self.assertIsNone(r2["final_response"])
+        # pause_turn (本轮未自然结束) 也不取。
+        r3 = self._spawn({"is_error": False, "stop_reason": "pause_turn", "result": "半截"})
+        self.assertIsNone(r3["final_response"])
 
 # PLACEHOLDER_INTEGRATION
 

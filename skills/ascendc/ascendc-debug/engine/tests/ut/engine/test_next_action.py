@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import os
 import unittest
 
 from engine.gate_adapter import GateResult
@@ -157,9 +158,10 @@ class TestLoopSignalDispatch(unittest.TestCase):
 
     def test_stop_nearly_success_to_failed(self) -> None:
         # 用户确认: nearly_success / fp16_ceiling 归 failed (stop_code 区分)。
+        # cheat_detected (修复4: success+作弊) 同样归 failed，不计 clean success。
         for code in ("nearly_success", "fp16_precision_ceiling",
                      "harmful_regression", "stagnant_same_direction",
-                     "validation_failed"):
+                     "validation_failed", "cheat_detected"):
             d = debug_next_action(self._state_after_validate("precision_failed"),
                                   _gate("STOP", code))
             self.assertEqual(d.session_outcome, "failed", code)
@@ -266,6 +268,78 @@ class TestGatePrecedenceOverBudget(unittest.TestCase):
         self.assertEqual(d.session_outcome, "stopped_by_loop_limit")
 
 
+class TestForensicsRetry(unittest.TestCase):
+    """修复 2+3: forensics gate passed=False 不计入 completed → 重派；超限 → Done。"""
+
+    def _forensics_fail_ev(self):
+        return _completed_ev("forensics", {"passed": False,
+                                           "gate": "GATE-FORENSICS-EXEC"})
+
+    def test_forensics_fail_not_completed_reissues(self) -> None:
+        # 本轮 forensics 失败一次 → 不计入 completed → 再次派 forensics。
+        ft = "precision_failed"
+        st = _state(current_ft=ft, total_attempts=1, per_branch={ft: 1},
+                    events=[_attempt_ev(ft), self._forensics_fail_ev()])
+        d = debug_next_action(st)
+        self.assertIsInstance(d, Action)
+        self.assertEqual(d.step, "forensics")
+
+    def test_forensics_fail_within_limit_still_reissues(self) -> None:
+        # 失败 2 次 (= 默认上限)，未超限 → 仍重派，不 Done。
+        ft = "precision_failed"
+        st = _state(current_ft=ft, total_attempts=1, per_branch={ft: 1},
+                    events=[_attempt_ev(ft), self._forensics_fail_ev(),
+                            self._forensics_fail_ev()])
+        d = debug_next_action(st)
+        self.assertIsInstance(d, Action)
+        self.assertEqual(d.step, "forensics")
+
+    def test_forensics_fail_over_limit_stops_by_gate(self) -> None:
+        # 失败 3 次 (> 默认上限 2) → Done(stopped_by_gate)。
+        ft = "precision_failed"
+        st = _state(current_ft=ft, total_attempts=1, per_branch={ft: 1},
+                    events=[_attempt_ev(ft), self._forensics_fail_ev(),
+                            self._forensics_fail_ev(), self._forensics_fail_ev()])
+        d = debug_next_action(st)
+        self.assertIsInstance(d, Done)
+        self.assertEqual(d.session_outcome, "stopped_by_gate")
+
+    def test_forensics_success_then_progresses_to_diagnose(self) -> None:
+        # 失败后又成功一次: 成功的 forensics 计入 completed，失败计数仍 1 (≤2)
+        # 不触发超限 → 推进到 diagnose_and_fix。
+        ft = "precision_failed"
+        st = _state(current_ft=ft, total_attempts=1, per_branch={ft: 1},
+                    events=[_attempt_ev(ft), self._forensics_fail_ev(),
+                            _completed_ev("forensics", {"passed": True})])
+        d = debug_next_action(st)
+        self.assertIsInstance(d, Action)
+        self.assertEqual(d.step, "diagnose_and_fix")
+
+
+class TestValidateNoSignalAborts(unittest.TestCase):
+    """修复 3 ④: validate 完成但 gate loop_signal=None = gate 协议错误 → Abort，
+    不再无脑兜底 continue (问题 3)。
+
+    注: 「gate 为 None → 落 §5 兜底 continue」是防御性死分支——只要 validate 在
+    completed 集合里，_validate_result_this_attempt 至少返回 {}，parse_gate_output({})
+    恒为非 None GateResult，故正常事件流无法把 gate 重建成 None。不为不可达路径写测试。"""
+
+    def test_validate_done_no_signal_aborts(self) -> None:
+        # 事件里 validate 已完成但 result 无 loop_signal (含 gate 字段使其可重建为
+        # loop_signal=None 的 GateResult)。
+        ft = "precision_failed"
+        result = {"gate": "GATE-COMMON-validate", "passed": False,
+                  "loop_signal": None}
+        st = _state(current_ft=ft, total_attempts=1, per_branch={ft: 1},
+                    events=[_attempt_ev(ft), _completed_ev("forensics"),
+                            _completed_ev("diagnose_and_fix"),
+                            _completed_ev("validate", result)])
+        d = debug_next_action(st, None)
+        self.assertIsInstance(d, Abort)
+        self.assertEqual(d.category, "gate_protocol_error")
+        self.assertEqual(d.details["session_outcome"], "crashed")
+
+
 class TestResumeReconstructsGate(unittest.TestCase):
     """H2: gate_result 未传入 (crash-resume) 时，从事件流最后一个 validate result 重建。
 
@@ -296,6 +370,219 @@ class TestResumeReconstructsGate(unittest.TestCase):
         d = debug_next_action(self._state_validate_persisted("CONTINUE"), None)
         self.assertIsInstance(d, Continue)
         self.assertEqual(d.next_failure_type, "precision_failed")
+
+
+class TestTaskTurnsBudget(unittest.TestCase):
+    """修复 4b-B: 跨 attempt 累计 turns 闸 (默认 None 不启用)。
+
+    用 num_turns 累加 (agent_backend 透传的 agent_turns)，而非 total_cost_usd——
+    turns 模型无关，turns→美元系数随 --model 浮动。撞轮次上限优先归 loop_limit，
+    仅未撞轮次但累计 turns 超标才归 stopped_by_budget；gate PASS/STOP 不经此闸 (H1)。
+    """
+
+    _ENV = "ASCENDC_DEBUG_MAX_TASK_TURNS"
+
+    def setUp(self) -> None:
+        self._saved = os.environ.get(self._ENV)
+        os.environ.pop(self._ENV, None)
+
+    def tearDown(self) -> None:
+        if self._saved is None:
+            os.environ.pop(self._ENV, None)
+        else:
+            os.environ[self._ENV] = self._saved
+
+    def _state_continue_with_turns(self, turns_per_attempt, *, ft="precision_failed"):
+        """构造 N 轮已完成、最后一轮 validate 完成的 state；各轮 diagnose 带 agent_turns。
+
+        total_attempts=len(turns) (< 5 全局闸)，per_branch < cap，故不撞 loop_limit；
+        仅 turns 累计可能超阈。最后一轮 validate 已完成 → 配 _gate("CONTINUE") 触发闸。
+        """
+        n = len(turns_per_attempt)
+        evs = []
+        for t in turns_per_attempt:
+            evs.append(_attempt_ev(ft))
+            evs.append(_completed_ev("diagnose_and_fix", {"success": True,
+                                                          "agent_turns": t}))
+        evs += [_completed_ev("forensics"), _completed_ev("validate")]
+        return _state(current_ft=ft, total_attempts=n, per_branch={ft: n}, events=evs)
+
+    def test_disabled_by_default_continues(self) -> None:
+        # env 未设 → 闸不启用，即使累计 turns 巨大也照常 CONTINUE。
+        st = self._state_continue_with_turns([500, 500])
+        d = debug_next_action(st, _gate("CONTINUE"))
+        self.assertIsInstance(d, Continue)
+
+    def test_under_limit_continues(self) -> None:
+        os.environ[self._ENV] = "100"
+        st = self._state_continue_with_turns([30, 40])  # 累计 70 < 100
+        d = debug_next_action(st, _gate("CONTINUE"))
+        self.assertIsInstance(d, Continue)
+
+    def test_at_limit_stops_by_budget(self) -> None:
+        os.environ[self._ENV] = "100"
+        st = self._state_continue_with_turns([60, 50])  # 累计 110 >= 100
+        d = debug_next_action(st, _gate("CONTINUE"))
+        self.assertIsInstance(d, Done)
+        self.assertEqual(d.session_outcome, "stopped_by_budget")
+
+    def test_gate_pass_overrides_budget(self) -> None:
+        # H1: 即使累计 turns 超阈，本轮 gate PASS 仍判 success (终判优先于预算闸)。
+        os.environ[self._ENV] = "50"
+        st = self._state_continue_with_turns([60, 60])  # 累计 120 >> 50
+        d = debug_next_action(st, _gate("PASS"))
+        self.assertIsInstance(d, Done)
+        self.assertEqual(d.session_outcome, "success")
+
+    def test_loop_limit_precedence_over_budget(self) -> None:
+        # 同时撞全局轮次上限 (5) 与 turns 超阈 → 归 loop_limit (更精确)，非 budget。
+        os.environ[self._ENV] = "10"
+        st = self._state_continue_with_turns([40, 40, 40, 40, 40])  # total=5 撞闸
+        d = debug_next_action(st, _gate("CONTINUE"))
+        self.assertIsInstance(d, Done)
+        self.assertEqual(d.session_outcome, "stopped_by_loop_limit")
+
+    def test_missing_turns_counted_as_zero(self) -> None:
+        # diagnose result 缺 agent_turns (timeout/spawn_failed 早返回) → 按 0 计，不误杀。
+        os.environ[self._ENV] = "10"
+        ft = "precision_failed"
+        evs = [_attempt_ev(ft),
+               _completed_ev("diagnose_and_fix", {"success": True}),  # 无 agent_turns
+               _completed_ev("forensics"), _completed_ev("validate")]
+        st = _state(current_ft=ft, total_attempts=1, per_branch={ft: 1}, events=evs)
+        d = debug_next_action(st, _gate("CONTINUE"))
+        self.assertIsInstance(d, Continue)  # 累计 0 < 10，不停
+
+
+def _audit_missing_attempt(ft="precision_failed"):
+    """一轮: diagnose + forensics + validate(stop_reason_code=stagnant_audit_missing)。"""
+    return [
+        _attempt_ev(ft),
+        _completed_ev("forensics"),
+        _completed_ev("diagnose_and_fix", {"success": True}),
+        _completed_ev("validate", {"loop_signal": "CONTINUE",
+                                   "stop_reason_code": "stagnant_audit_missing"}),
+    ]
+
+
+def _cheat_attempt(ft="precision_failed", *, errored=False):
+    """一轮: validate result.checks 带确证作弊 (anticheat_pass=False)。
+
+    errored=True 时改为 AST validator 异常 (ast_degrade_pass=False + ast_validator_errored)
+    = N5 的 warning，N6 不应计入。
+    """
+    if errored:
+        checks = {"ast_degrade_pass": False, "ast_validator_errored": True}
+    else:
+        checks = {"anticheat_pass": False}
+    return [
+        _attempt_ev(ft),
+        _completed_ev("forensics"),
+        _completed_ev("diagnose_and_fix", {"success": True}),
+        _completed_ev("validate", {"loop_signal": "CONTINUE", "checks": checks}),
+    ]
+
+
+def _normal_attempt(ft="precision_failed"):
+    """一轮正常未通过 (无退化标记) validate。"""
+    return [
+        _attempt_ev(ft),
+        _completed_ev("forensics"),
+        _completed_ev("diagnose_and_fix", {"success": True}),
+        _completed_ev("validate", {"loop_signal": "CONTINUE", "stop_reason_code": None}),
+    ]
+
+
+class TestDegenerateEarlyStop(unittest.TestCase):
+    """N6 复合早停: 连续 N 轮退化空转 (作弊/audit 缺产物兜底) → degenerate_no_progress。
+
+    默认启用 (阈值 2)，仅 violation 计入 (N5 的 validator-errored warning 不计)，
+    放在 loop_limit/budget 闸之后。数据全取自 events 持久化的 validate result。
+    """
+
+    _ENV = "ASCENDC_DEBUG_MAX_DEGENERATE_ROUNDS"
+
+    def setUp(self) -> None:
+        self._saved = os.environ.get(self._ENV)
+        os.environ.pop(self._ENV, None)
+
+    def tearDown(self) -> None:
+        if self._saved is None:
+            os.environ.pop(self._ENV, None)
+        else:
+            os.environ[self._ENV] = self._saved
+
+    def _state_of(self, attempts_events, ft="precision_failed"):
+        evs = []
+        for block in attempts_events:
+            evs += block
+        n = len(attempts_events)
+        return _state(current_ft=ft, total_attempts=n, per_branch={ft: n}, events=evs)
+
+    def test_two_audit_missing_stops(self) -> None:
+        # 默认阈值 2: 连续 2 轮 audit 缺失兜底 → 早停。
+        st = self._state_of([_audit_missing_attempt(), _audit_missing_attempt()])
+        d = debug_next_action(st, _gate("CONTINUE"))
+        self.assertIsInstance(d, Done)
+        self.assertEqual(d.session_outcome, "degenerate_no_progress")
+
+    def test_two_cheat_violation_stops(self) -> None:
+        st = self._state_of([_cheat_attempt(), _cheat_attempt()])
+        d = debug_next_action(st, _gate("CONTINUE"))
+        self.assertEqual(d.session_outcome, "degenerate_no_progress")
+
+    def test_mixed_audit_and_cheat_stops(self) -> None:
+        # 退化口径是「二者之一」，混合连续命中同样累计。
+        st = self._state_of([_cheat_attempt(), _audit_missing_attempt()])
+        d = debug_next_action(st, _gate("CONTINUE"))
+        self.assertEqual(d.session_outcome, "degenerate_no_progress")
+
+    def test_one_degenerate_continues(self) -> None:
+        # 仅 1 轮退化 (< 阈值 2) → 照常 CONTINUE。
+        st = self._state_of([_audit_missing_attempt()])
+        d = debug_next_action(st, _gate("CONTINUE"))
+        self.assertIsInstance(d, Continue)
+
+    def test_normal_round_breaks_streak(self) -> None:
+        # 退化轮被正常轮打断 → 末尾游程仅 1，不早停。
+        st = self._state_of([_audit_missing_attempt(), _normal_attempt(),
+                             _audit_missing_attempt()])
+        d = debug_next_action(st, _gate("CONTINUE"))
+        self.assertIsInstance(d, Continue)
+
+    def test_validator_errored_warning_not_counted(self) -> None:
+        # N5: AST validator 异常是 warning，非确证作弊 → 不计退化，不早停。
+        st = self._state_of([_cheat_attempt(errored=True),
+                             _cheat_attempt(errored=True)])
+        d = debug_next_action(st, _gate("CONTINUE"))
+        self.assertIsInstance(d, Continue)
+
+    def test_disabled_by_env_continues(self) -> None:
+        # env<=0 禁用 → 即使连续退化也照常 CONTINUE。
+        os.environ[self._ENV] = "0"
+        st = self._state_of([_audit_missing_attempt(), _audit_missing_attempt(),
+                             _audit_missing_attempt()])
+        d = debug_next_action(st, _gate("CONTINUE"))
+        self.assertIsInstance(d, Continue)
+
+    def test_custom_threshold(self) -> None:
+        os.environ[self._ENV] = "3"
+        # 2 轮退化 < 3 → 继续。
+        st = self._state_of([_audit_missing_attempt(), _audit_missing_attempt()])
+        self.assertIsInstance(debug_next_action(st, _gate("CONTINUE")), Continue)
+
+    def test_pass_overrides_degenerate(self) -> None:
+        # 即便历史连续退化，本轮 gate PASS → success (终判优先)。
+        st = self._state_of([_cheat_attempt(), _cheat_attempt()])
+        d = debug_next_action(st, _gate("PASS"))
+        self.assertEqual(d.session_outcome, "success")
+
+    def test_loop_limit_precedence(self) -> None:
+        # 撞满 5 轮全局闸 + 连续退化 → 归 loop_limit (更精确，在 N6 之前判)。
+        blocks = [_cheat_attempt() for _ in range(5)]
+        st = self._state_of(blocks)
+        d = debug_next_action(st, _gate("CONTINUE"))
+        self.assertEqual(d.session_outcome, "stopped_by_loop_limit")
 
 
 if __name__ == "__main__":

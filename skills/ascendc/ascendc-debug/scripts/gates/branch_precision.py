@@ -74,10 +74,6 @@ class _LegacyPrecisionChecker:
         if gate_result["passed"] and self.attempt == 0 and r is not None:
             self._write_baseline_from_forensics(r)
 
-        # 写入进度检查点
-        if gate_result["passed"]:
-            self._write_progress_checkpoint("forensics_completed")
-
         return gate_result
 
     def _write_baseline_from_forensics(self, forensics: dict) -> None:
@@ -172,7 +168,6 @@ class _LegacyPrecisionChecker:
 
         if gate_result["passed"] and content:
             self._write_audit_index(content)
-            self._write_progress_checkpoint("audit_completed")
 
         return gate_result
 
@@ -233,7 +228,6 @@ class _LegacyPrecisionChecker:
 
         self._write_round_summary(stop_reason_code, forensics_data)
         self._write_tuning_directions(stop_reason_code)
-        self._write_progress_checkpoint("validation_completed", loop_signal=loop_signal)
 
         return gate_result
 
@@ -324,6 +318,13 @@ class _LegacyPrecisionChecker:
                                     f"mismatch 连续 {stagnant} 轮未改善, "
                                     f"但 Agent 已明确换方向，继续探索"
                                 ), "stagnant_new_direction"
+                            elif direction_ok == "missing":
+                                # 12a 兜底: audit 产出缺失，无据判定方向 →
+                                # 不据缺失误判 STOP，保守续跑 (实测 audit 缺失率高)。
+                                return "CONTINUE", (
+                                    f"mismatch 连续 {stagnant} 轮未改善, "
+                                    f"但 audit 方向评估缺失，无据判定，保守续跑"
+                                ), "stagnant_audit_missing"
                             else:
                                 return "STOP", (
                                     f"mismatch 连续 {stagnant} 轮未改善, "
@@ -664,9 +665,15 @@ class _LegacyPrecisionChecker:
             return None
 
     def _check_direction_assessment(self) -> str:
+        """判定本轮方向延续性，返回四态之一 (12a 防御性兜底):
+          - "continue"/"stop": audit 明确给出 否/是
+          - "unknown": audit 产出存在但答案模糊 (非 是/否) → 保守按同方向 STOP
+          - "missing": audit 产出物理缺失 (文件/marker/section 不存在) → CONTINUE 兜底
+            (实测 audit 缺失率高，缺失不应误判 STOP 提前掐断诊断)
+        """
         path = os.path.join(self.tuning_dir, f"precision_audit_{self.attempt}.md")
         if not os.path.exists(path):
-            return "unknown"
+            return "missing"
 
         try:
             with open(path) as f:
@@ -675,13 +682,13 @@ class _LegacyPrecisionChecker:
             marker = "[DIRECTION_ASSESSMENT]"
             start = content.find(marker)
             if start == -1:
-                return "unknown"
+                return "missing"
             start += len(marker)
             next_bracket = content.find("\n[", start)
             section = content[start:next_bracket].strip() if next_bracket != -1 else content[start:].strip()
 
             if not section:
-                return "unknown"
+                return "missing"
 
             for line in section.split("\n"):
                 key = "本轮是否延续上一轮方向"
@@ -698,7 +705,7 @@ class _LegacyPrecisionChecker:
                     return "stop"
             return "unknown"
         except (OSError, UnicodeDecodeError):
-            return "unknown"
+            return "missing"
 
     def _extract_direction_first_word(self, text: str) -> str:
         if not text:
@@ -915,34 +922,6 @@ class _LegacyPrecisionChecker:
 
     def _result(self, gate_name: str, checks: dict) -> dict:
         return {"gate": gate_name, "passed": all(checks.values()), "checks": checks}
-
-    def _write_progress_checkpoint(self, stage: str, loop_signal: str = None) -> None:
-        """写入轮内进度检查点，用于超时恢复和进度追踪。
-
-        Args:
-            stage: forensics_completed / audit_completed / validation_completed
-            loop_signal: 仅 validation_completed 时传入 (PASS/CONTINUE/STOP)
-        """
-        progress_path = os.path.join(self.tuning_dir, f"progress_attempt_{self.attempt}.json")
-        progress = {
-            "attempt": self.attempt,
-            "stage": stage,
-            "timestamp": self._utcnow_iso(),
-        }
-        if loop_signal is not None:
-            progress["loop_signal"] = loop_signal
-
-        try:
-            os.makedirs(self.tuning_dir, exist_ok=True)
-            with open(progress_path, "w", encoding="utf-8") as f:
-                json.dump(progress, f, indent=2, ensure_ascii=False)
-        except OSError:
-            pass
-
-    @staticmethod
-    def _utcnow_iso() -> str:
-        import datetime as dt
-        return dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _legacy_to_outcome(raw: dict) -> GateOutcome:

@@ -44,6 +44,43 @@ def _gate(loop_signal, stop_reason_code=None, import_subtype=None):
     return d
 
 
+class TestChangedFilesDiff(unittest.TestCase):
+    """项 12b: _default_dispatcher 在 spawn_agent 前后快照 kernel，diff 出 changed_files。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.task_dir = Path(self._tmp.name)
+        (self.task_dir / "kernel").mkdir()
+        (self.task_dir / "kernel" / "k.h").write_text("v0", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _dispatch(self, mutate):
+        from engine.runner import _default_dispatcher
+        action = Action(kind="spawn_agent", name="debug_worker",
+                        step="diagnose_and_fix", skill_args={"attempt": 0})
+
+        def _cb(a, td, on, at):
+            mutate()
+            return {"success": True}
+        return _default_dispatcher(action, self.task_dir, "add", _cb)
+
+    def test_changed_files_detected(self) -> None:
+        r = self._dispatch(
+            lambda: (self.task_dir / "kernel" / "k.h").write_text("v1", encoding="utf-8"))
+        self.assertEqual(r["changed_files"], ["kernel/k.h"])
+
+    def test_no_change_empty_list(self) -> None:
+        r = self._dispatch(lambda: None)
+        self.assertEqual(r["changed_files"], [])
+
+    def test_new_file_detected(self) -> None:
+        r = self._dispatch(
+            lambda: (self.task_dir / "kernel" / "new.cpp").write_text("x", encoding="utf-8"))
+        self.assertEqual(r["changed_files"], ["kernel/new.cpp"])
+
+
 class TestValidateAction(unittest.TestCase):
     def test_unknown_py_action_rejected(self) -> None:
         with self.assertRaises(RunnerError):
@@ -126,6 +163,31 @@ class TestFullSession(unittest.TestCase):
             self.task_dir, op_name="add", entry_failure_type="import_failed",
             dispatcher=disp)
         self.assertEqual(status["session_outcome"], "skipped_env_issue")
+
+    def test_kb_finalize_hooked_on_success(self) -> None:
+        # kb_path 传入时 _terminate 接入 finalize_knowledge，status 带 kb_finalize 字段。
+        # 无候选 → skip (不真跑 dump 子进程)，验证 hook 接通即可。
+        status, _ = self._run([_gate("PASS")], kb_path="kb.json")
+        self.assertEqual(status["session_outcome"], "success")
+        self.assertIn("kb_finalize", status)
+        self.assertFalse(status["kb_finalize"]["finalized"])
+
+    def test_kb_finalize_absent_without_kb_path(self) -> None:
+        # 不传 kb_path (默认) → status 无 kb_finalize 字段 (向后兼容)。
+        status, _ = self._run([_gate("PASS")])
+        self.assertNotIn("kb_finalize", status)
+
+    def test_run_summary_written_on_terminate(self) -> None:
+        # 项 11: 终态出口落 run_summary.json，且不含 usd 字段。
+        import json
+        self._run([_gate("CONTINUE"), _gate("PASS")])
+        path = self.task_dir / "run_summary.json"
+        self.assertTrue(path.exists())
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(data["session_outcome"], "success")
+        self.assertEqual(data["attempts_used"], 2)
+        self.assertEqual(data["gate"]["final_loop_signal"], "PASS")
+        self.assertNotIn("usd", json.dumps(data).lower())
 
 
 class TestTimeoutGate(unittest.TestCase):

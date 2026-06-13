@@ -36,6 +36,9 @@ _OUTCOME_EXIT_CODE = {
     "skipped_env_issue": 5,
     "skipped_unsupported_type": 6,
     "crashed": 7,
+    "provider_api_error": 8,
+    "stopped_by_budget": 9,
+    "degenerate_no_progress": 10,
 }
 
 # PLACEHOLDER_MAIN
@@ -72,11 +75,30 @@ def main(argv=None) -> int:
                          "使 agent 能访问 skills/ archive_tasks/ 等参考资料")
     ap.add_argument("--agent-timeout-sec", type=float, default=None,
                     help="单次 diagnose agent 调用超时 (秒)")
-    ap.add_argument("--max-budget-usd", default=None, help="单 session claude 预算上限")
+    # 修复 4b 治本闸: --max-turns 限单 attempt 的 agentic turn 数 (官方 CLI flag,
+    # 模型无关)。实测失控任务 cache_read 30M/cost 烧光全因 turns 累积 (193/180/152),
+    # 而 turns→美元系数随 --model 浮动 (批跑会切多种模型), 故用 turns 而非美元做硬闸。
+    # 默认 120 (文档 7.3 目标 p95<80, 留余量避免误杀正常诊断)。
+    ap.add_argument("--max-turns", default="120",
+                    help="单 attempt agentic turn 数硬上限；默认 120")
+    # 修复 4b-B 治本闸: 跨 attempt 累计 turns 硬上限 (任务级)。单 attempt 闸 (--max-turns)
+    # 压不住「5 轮累计」总成本, 实测单任务跨 attempt 累计 cost $37-49; 此闸累加各 attempt
+    # 的 num_turns, 超阈 Done(stopped_by_budget)。默认 None 不启用 (向后兼容), 与单 attempt
+    # 闸同量纲 (turns, 模型无关), 不用随 --model 浮动的 total_cost_usd。
+    ap.add_argument("--max-task-turns", type=int, default=None,
+                    help="跨 attempt 累计 agentic turn 数硬上限 (任务级)；默认不启用")
+    ap.add_argument("--entry-failure-type", default=None,
+                    help="首次运行时注入入口 failure_type；例如 precision_failed")
+    # 修复问题 6: KB 入库编排。success 且无作弊 (reportable_success) 时把候选知识
+    # (candidate_kb_entry.json) 入库；默认 None 不启用 (向后兼容)。
+    ap.add_argument("--kb-path", default=None,
+                    help="精度知识库 JSON 路径；配置后 success 终态自动入库，默认不启用")
     args = ap.parse_args(argv)
 
     if args.max_attempts is not None:
         os.environ["ASCENDC_DEBUG_MAX_ATTEMPTS"] = str(args.max_attempts)
+    if args.max_task_turns is not None:
+        os.environ["ASCENDC_DEBUG_MAX_TASK_TURNS"] = str(args.max_task_turns)
 
     agent_full = _resolve_agent_name(args.agent)
     workdir = Path(args.workdir) if args.workdir else Path(args.task_dir)
@@ -84,11 +106,13 @@ def main(argv=None) -> int:
         agent_name=agent_full, claude_bin=args.claude_bin, model=args.model,
         allowed_tools=args.allowed_tools, workdir=workdir,
         npu=args.npu, timeout_sec=args.agent_timeout_sec,
-        max_budget_usd=args.max_budget_usd)
+        max_turns=args.max_turns)
 
     status = run_debug_session(
         Path(args.task_dir), op_name=args.op_name, agent=args.agent,
-        agent_callback=agent_callback, deadline_sec=args.deadline_sec)
+        entry_failure_type=args.entry_failure_type,
+        agent_callback=agent_callback, deadline_sec=args.deadline_sec,
+        kb_path=args.kb_path)
 
     outcome = status.get("session_outcome", "crashed")
     print(f"[ENGINE_RESULT] session_outcome={outcome} "
@@ -99,4 +123,3 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

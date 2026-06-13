@@ -90,6 +90,20 @@ class TestClosedSetConsistency(unittest.TestCase):
         self.assertEqual(
             names, {"kind", "name", "step", "skill_args", "expected_artifacts"})
 
+    def test_session_outcome_matches_exit_code_map(self) -> None:
+        # SessionOutcome 闭集 与 __main__._OUTCOME_EXIT_CODE 必须一一对应。
+        # 防回归: provider_api_error 曾有退出码却漏出闭集 (Tier 0-2 审查发现)。
+        from typing import get_args
+        from engine.types import SessionOutcome
+        from engine.__main__ import _OUTCOME_EXIT_CODE
+        outcomes = set(get_args(SessionOutcome))
+        self.assertEqual(
+            outcomes, set(_OUTCOME_EXIT_CODE),
+            "SessionOutcome 闭集与退出码映射不一致 (漏值或编外值)")
+        # 退出码无重复。
+        codes = list(_OUTCOME_EXIT_CODE.values())
+        self.assertEqual(len(codes), len(set(codes)), "退出码有重复")
+
 
 if __name__ == "__main__":
     unittest.main()
