@@ -18,6 +18,7 @@ UT 不真跑 claude。
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import uuid
 from pathlib import Path
@@ -25,10 +26,18 @@ from typing import Callable, Optional
 
 from engine.types import Action
 
+_PROVIDER_LIMIT_STATUSES = {401, 402, 403, 429}
+
+# 项 12b: agent final response 截断上限 (诊断摘要的主数据源——claude --output-format
+# json 的顶层 `result` 字段是 agent 本轮的最终诊断陈述，实测含完整根因/证据链/修复说明，
+# 通常 1~2KB)。透传给 next 层做 diagnosis_summary，超限截断防撑爆事件流/产物。
+_FINAL_RESPONSE_MAXLEN = 4000
+
 # cc 脚本默认值 (utils/run_ascendc_debug_batch_cc.sh L44-47)，保持一致。
 _DEFAULT_CLAUDE_BIN = "claude"
 _DEFAULT_ALLOWED_TOOLS = "Bash,Read,Write,Edit,Glob,Grep,Skill"
 _DEFAULT_AGENT = "ascendc-debug-agent-constructive"  # AAAI 主力 (cc 默认是 discovery，这里默认 constructive)
+_EFFORT_ENV = "ASCENDC_DEBUG_AGENT_EFFORT"
 
 # 单轮约束覆盖层: 方案 C 下 agent 只做一个 attempt，编排归引擎。
 # 不改 agent spec 本体 (留 Step 7)，在 prompt 末尾追加此约束覆盖自驱散文。
@@ -40,7 +49,16 @@ _SINGLE_ROUND_CONSTRAINT = """
 本次调用只负责**一个 attempt 的诊断 + 修复**，循环与终态由外层引擎掌控:
 - 禁止自己跑 MAX_ATTEMPTS 循环；禁止读 Gate loop_signal 自行决定继续/停止/跳 Step5/Step6。
 - 禁止写 debug_status.json / debug_trace.md (退出产物由引擎从事件流确定性重建)。
-- 禁止调用 Gate (forensics/validate)；引擎会在你改完后自己跑 Gate 客观判定本轮效果。
+- 不要把自测/自评结果写成最终结论；最终 build/eval/classify/precision_gate 由引擎
+  在本轮结束后统一执行。诊断中如确有必要，可以运行局部 build/eval/forensics 命令，
+  但其结果只作为本轮根因分析证据，不作为流程终态。
+- 读取上下文采用按需原则: 对 SKILL.md、branch_precision.py、CANN API 文档、build/eval
+  日志或 .json 大文件，优先用 Grep/Read offset+limit/sed/head/tail 定位相关片段；
+  只有诊断必须时才扩大读取范围。
+- Bash 命令应有明确诊断目的；长输出请重定向到文件并查看摘要/关键片段，避免完整递归
+  grep、完整编译/验证输出反复进入上下文。
+- 修复保持聚焦、最小且可解释；可以按根因需要修改 {task_dir}/kernel/ 下相关文件。
+  完成本轮预期修改后停止，把验证交回引擎。
 本次只做: 按当前 failure_type 走对应分支方法论 (精度走 Phase A→B→C 等) → 诊断根因 →
 最小化修改 {task_dir}/kernel/ 下文件 → 完成即停 (不要追加任何收尾动作)。
 SKILL.md 的分支方法论散文仍须遵循 (Read 取方法论)，仅「编排/循环/退出」段落被本约束覆盖。
@@ -48,6 +66,31 @@ SKILL.md 的分支方法论散文仍须遵循 (Read 取方法论)，仅「编排
 """
 
 # PLACEHOLDER_REST
+
+
+def _cheat_warning(task_dir: Path) -> str:
+    """读 cheat_history.json，若上一轮被判作弊则生成警告注入下一轮 prompt (修复4 场景A)。
+
+    仅取最近一条 violation (非 warning——validator 异常不该警告 agent 它作弊)。无则返回空串。
+    """
+    path = task_dir / "precision_tuning" / "cheat_history.json"
+    if not path.exists():
+        return ""
+    try:
+        history = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return ""
+    violations = [e for e in history.get("cheating_attempts", [])
+                  if e.get("severity") != "warning"]
+    if not violations:
+        return ""
+    last = violations[-1]
+    return (
+        f"\n⚠️ 上一轮 (attempt {last.get('attempt')}) 的修复被检测为作弊:\n"
+        f"  - 类型: {last.get('cheat_type')}\n"
+        f"  - 要求: {last.get('instruction')}\n"
+        f"  - 本轮必须用真实 AscendC kernel 实现，禁止用 torch 原生算子绕过。\n"
+    )
 
 
 def _build_prompt(task_dir: Path, op_name: str, failure_type: str,
@@ -66,7 +109,8 @@ def _build_prompt(task_dir: Path, op_name: str, failure_type: str,
         f"  failure_type: {failure_type}\n"
         f"  attempt: {attempt}\n"
     )
-    return head + _SINGLE_ROUND_CONSTRAINT.replace("{task_dir}", str(task_dir))
+    return (head + _cheat_warning(task_dir)
+            + _SINGLE_ROUND_CONSTRAINT.replace("{task_dir}", str(task_dir)))
 
 
 def _classify_claude_result(result_file: Path) -> dict:
@@ -97,19 +141,42 @@ def _classify_claude_result(result_file: Path) -> dict:
         state = "claude_pause_turn"  # 本轮未自然结束 (引擎可据此判断重试/收尾)
     else:
         state = "ok"
-    return {
+    result = {
         "success": state == "ok",
         "claude_state": state,
         "stop_reason": stop_reason,
         "api_error_status": api_status,
         "error": None if state == "ok" else f"claude_state={state}",
     }
+    # 修复 4b-B: 透传本轮 agentic turn 数 (claude --output-format json 顶层 num_turns,
+    # 已实测存在)。next_action 跨 attempt 累加它做任务级 turns 硬闸。非整数/缺失置 None
+    # (累加层按 0 计，不误杀)。turns 模型无关，优于随 --model 浮动的 total_cost_usd。
+    turns = data.get("num_turns")
+    result["agent_turns"] = turns if isinstance(turns, int) else None
+    # 项 12b: 透传 agent 本轮最终诊断陈述 (顶层 `result` 字段)，作为 diagnosis_summary
+    # 的主数据源 (取代 100% 缺失的 precision_audit_N.md)。
+    # 关键: 仅 state=="ok" 才提取——真实产物核实 (artifacts 20 样例) 表明 is_error/
+    # stop_sequence 态的 `result` 是错误串 ("API Error: 400 ... token limit")，非诊断
+    # 内容；error 态恒置 None，避免把 API 错误噪声塞进诊断摘要。非 str/空同样 None；超限截断。
+    final = data.get("result")
+    if state == "ok" and isinstance(final, str) and final.strip():
+        final = final.strip()
+        if len(final) > _FINAL_RESPONSE_MAXLEN:
+            final = final[:_FINAL_RESPONSE_MAXLEN].rstrip() + " …(截断)"
+        result["final_response"] = final
+    else:
+        result["final_response"] = None
+    if api_status in _PROVIDER_LIMIT_STATUSES:
+        result["fatal"] = True
+        result["provider_error"] = True
+    return result
 
 
 def _build_claude_cmd(prompt: str, *, claude_bin: str, model: Optional[str],
                       agent_name: str, session_id: str, workdir: Path,
                       allowed_tools: str, result_file: Path,
-                      max_budget_usd: Optional[str]) -> list:
+                      max_turns: Optional[str] = None,
+                      effort: Optional[str] = None) -> list:
     """构造 `claude --bare -p` 命令 (命令形态对齐 cc 脚本 run_claude_turn 的 turn=0 分支)。
 
     输出写 result_file (--output-format json)；调用方负责把 stdout 重定向到该文件。
@@ -117,8 +184,14 @@ def _build_claude_cmd(prompt: str, *, claude_bin: str, model: Optional[str],
     cmd = [claude_bin, "--bare", "-p"]
     if model:
         cmd += ["--model", model]
-    if max_budget_usd:
-        cmd += ["--max-budget-usd", str(max_budget_usd)]
+    if effort:
+        cmd += ["--effort", effort]
+    # 失控治本闸: --max-turns 限制单 attempt 的 agentic turn 数 (官方 CLI flag)。
+    # turns 是模型无关指标——实测失控任务 cache_read 30M/cost 烧光全因 turns 累积
+    # (193/180/152)，而 turns→美元的系数随 --model 浮动，故只用 turns 做硬闸，
+    # 不引入随模型浮动的美元预算闸。
+    if max_turns:
+        cmd += ["--max-turns", str(max_turns)]
     cmd += [
         "--agent", agent_name,
         "--session-id", session_id,
@@ -143,7 +216,8 @@ def spawn_diagnose_agent(
     workdir: Optional[Path] = None,
     npu: Optional[str] = None,
     timeout_sec: Optional[float] = None,
-    max_budget_usd: Optional[str] = None,
+    max_turns: Optional[str] = None,
+    effort: Optional[str] = None,
     _run: Callable = subprocess.run,
 ) -> dict:
     """把 diagnose_and_fix Action 翻译成一次 claude 调用，返回本轮 result dict。
@@ -158,10 +232,14 @@ def spawn_diagnose_agent(
     result_file = Path(task_dir) / f"_claude_result_attempt{attempt}.json"
 
     prompt = _build_prompt(Path(task_dir), op_name, failure_type, attempt, npu)
+    effort = effort if effort is not None else os.environ.get(_EFFORT_ENV)
+    if effort == "":
+        effort = None
     cmd = _build_claude_cmd(
         prompt, claude_bin=claude_bin, model=model, agent_name=agent_name,
         session_id=session_id, workdir=wd, allowed_tools=allowed_tools,
-        result_file=result_file, max_budget_usd=max_budget_usd)
+        result_file=result_file,
+        max_turns=max_turns, effort=effort)
 
     try:
         with result_file.open("w", encoding="utf-8") as out:
@@ -188,7 +266,8 @@ def make_agent_callback(
     workdir: Optional[Path] = None,
     npu: Optional[str] = None,
     timeout_sec: Optional[float] = None,
-    max_budget_usd: Optional[str] = None,
+    max_turns: Optional[str] = None,
+    effort: Optional[str] = None,
     _run: Callable = subprocess.run,
 ) -> Callable[[Action, Path, str, int], dict]:
     """造一个符合 runner AgentCallback 签名 (action, task_dir, op_name, attempt)->dict
@@ -198,7 +277,7 @@ def make_agent_callback(
             action, task_dir, op_name, attempt,
             agent_name=agent_name, claude_bin=claude_bin, model=model,
             allowed_tools=allowed_tools, workdir=workdir, npu=npu,
-            timeout_sec=timeout_sec, max_budget_usd=max_budget_usd, _run=_run)
+            timeout_sec=timeout_sec,
+            max_turns=max_turns,
+            effort=effort, _run=_run)
     return _cb
-
-

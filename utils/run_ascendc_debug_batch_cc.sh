@@ -38,7 +38,8 @@ MODEL=""
 TIMEOUT_SEC="5400"          # 单任务超时（秒），默认 1.5 小时
 MAX_ATTEMPTS="5"            # ASCENDC_DEBUG_MAX_ATTEMPTS 默认值
 MAX_RESUMES="3"             # pause_turn 最大恢复次数
-MAX_BUDGET_USD=""           # 单任务预算上限（空=不限）
+MAX_BUDGET_USD=""           # 单 attempt 预算上限（USD）；空=不启用（--max-budget-usd 未列于官方 CLI reference，可能不被识别）。失控治本闸用 MAX_TURNS
+MAX_TURNS=""                # 单 attempt agentic turn 数硬上限；空=用引擎默认 120（见 engine/__main__.py）。模型无关，是失控（cache_read/cost 累积）的治本闸
 AGENT_TIMEOUT_SEC=""        # 单次 diagnose agent 调用超时（秒，空=不限）；引擎管 wall-clock
 STALE_AFTER_FAILURE_SEC="3600"   # 失败后停滞多久判定为 stale
 STALE_CHECK_INTERVAL_SEC="60"    # 停滞检测间隔
@@ -48,6 +49,7 @@ CLAUDE_ENV_SH=""            # API 凭证脚本路径（可选）
 CLAUDE_BIN="claude"
 AGENT="constructive"        # 引擎 CLI 接受 constructive(AAAI 主力)/discovery 短名或完整 spec 名
 ALLOWED_TOOLS="Bash,Read,Write,Edit,Glob,Grep,Skill"
+ENTRY_FAILURE_TYPE=""       # 首次 session 入口 failure_type；precision_failed 等
 ANTICHEAT_SCRIPT="skills/ascendc/ascendc-debug/scripts/anticheat.py"
 
 # ── 参数解析 ──
@@ -64,6 +66,7 @@ while [[ $# -gt 0 ]]; do
         --max-resumes)            MAX_RESUMES="$2"; shift 2 ;;
         --agent-timeout)          AGENT_TIMEOUT_SEC="$2"; shift 2 ;;
         --max-budget-usd)         MAX_BUDGET_USD="$2"; shift 2 ;;
+        --max-turns)              MAX_TURNS="$2"; shift 2 ;;
         --stale-after-failure)    STALE_AFTER_FAILURE_SEC="$2"; shift 2 ;;
         --stale-check-interval)   STALE_CHECK_INTERVAL_SEC="$2"; shift 2 ;;
         --workdir)                WORKDIR_IN_CONTAINER="$2"; shift 2 ;;
@@ -72,6 +75,7 @@ while [[ $# -gt 0 ]]; do
         --claude-bin)             CLAUDE_BIN="$2"; shift 2 ;;
         --agent)                  AGENT="$2"; shift 2 ;;
         --allowed-tools)          ALLOWED_TOOLS="$2"; shift 2 ;;
+        --entry-failure-type)     ENTRY_FAILURE_TYPE="$2"; shift 2 ;;
         -h|--help)
             sed -n '1,30p' "$0"
             exit 0
@@ -120,6 +124,7 @@ mkdir -p "$OUTPUT_DIR"
 QUEUE="$OUTPUT_DIR/.queue"
 LOCK="$OUTPUT_DIR/.lock"
 REPORT="$OUTPUT_DIR/batch_report.md"
+TASK_ELAPSED="$OUTPUT_DIR/task_elapsed.tsv"
 FATAL="$OUTPUT_DIR/.fatal"
 
 # ── 初始化队列（按原始顺序写入） ──
@@ -140,6 +145,7 @@ done
     echo "- max_attempts: $MAX_ATTEMPTS"
     echo "- max_resumes: $MAX_RESUMES"
     echo "- agent: $AGENT"
+    echo "- entry_failure_type: ${ENTRY_FAILURE_TYPE:-<auto/resume>}"
     echo "- model: ${MODEL:-<env default>}"
     echo "- claude env: ${CLAUDE_ENV_SH:-<none>}"
     echo "- tilelang env: $TILELANG_ENV_SH"
@@ -147,9 +153,10 @@ done
     echo "- stale_after_failure: ${STALE_AFTER_FAILURE_SEC}s"
     echo "- start: $(date '+%F %T')"
     echo
-    echo "| # | task_dir | session_outcome | 耗时(s) | 容器@NPU |"
-    echo "|---|----------|-----------------|---------|----------|"
+    echo "| # | task_dir | session_outcome | 耗时(s) | 容器@NPU | started_at | ended_at |"
+    echo "|---|----------|-----------------|---------|----------|------------|----------|"
 } > "$REPORT"
+printf "idx\ttask_dir\top_name\tsession_outcome\telapsed_sec\tstarted_at\tended_at\tworker\tengine_rc\n" > "$TASK_ELAPSED"
 
 TOTAL=${#TASK_LIST[@]}
 echo "================================================================"
@@ -193,6 +200,12 @@ try:
 except Exception:
     print(0)
 PY
+}
+
+grep_count() {
+    local pattern="$1"
+    local file="$2"
+    grep -c "$pattern" "$file" 2>/dev/null || true
 }
 
 # 读 Claude Code 输出的 JSON result 文件，判断是否有致命错误
@@ -502,9 +515,7 @@ run_claude_turn() {
 
     wait "$cmd_pid"
     turn_status=$?
-    if [[ "$stale_stop" -eq 1 ]]; then
-        turn_status=86
-    fi
+    [[ "$stale_stop" -eq 1 ]] && turn_status=86
     return "$turn_status"
 }
 
@@ -517,11 +528,14 @@ run_engine_turn() {
     local container="$1" npu="$2" task_dir="$3" op_name="$4" wlog="$5"
     local skill_dir="$WORKDIR_IN_CONTAINER/skills/ascendc/ascendc-debug"
     local agent_short="$AGENT"
+    local engine_start engine_start_human
+    engine_start=$(date +%s)
+    engine_start_human=$(date '+%F %T')
     # AGENT 可能是完整 spec 名，引擎 CLI 接受 constructive/discovery 短名或完整名，原样透传。
 
     {
         echo "[engine] task_dir=$task_dir op=$op_name agent=$agent_short npu=$npu"
-        echo "[engine] start=$(date '+%F %T')"
+        echo "[engine] start=$engine_start_human"
     } >> "$wlog"
 
     set +e
@@ -535,6 +549,7 @@ run_engine_turn() {
                 task_dir="$5"; op_name="$6"; agent="$7"; npu="$8"
                 model="$9"; claude_bin="${10}"; allowed_tools="${11}"
                 max_budget="${12}"; agent_timeout="${13}"
+                entry_failure_type="${14}"; max_turns="${15}"
 
                 [ -n "$claude_env" ] && [ -f "$claude_env" ] && source "$claude_env"
                 [ -f "$tilelang_env" ] && source "$tilelang_env"
@@ -543,6 +558,8 @@ run_engine_turn() {
                 model_arg=""; [ -n "$model" ] && model_arg="--model $model"
                 budget_arg=""; [ -n "$max_budget" ] && budget_arg="--max-budget-usd $max_budget"
                 atimeout_arg=""; [ -n "$agent_timeout" ] && atimeout_arg="--agent-timeout-sec $agent_timeout"
+                entry_arg=""; [ -n "$entry_failure_type" ] && entry_arg="--entry-failure-type $entry_failure_type"
+                mt_arg=""; [ -n "$max_turns" ] && mt_arg="--max-turns $max_turns"
 
                 PYTHONPATH="$skill_dir${PYTHONPATH:+:$PYTHONPATH}" \
                 python3 -m engine "$task_dir" \
@@ -552,11 +569,11 @@ run_engine_turn() {
                     --workdir "$workdir" \
                     --claude-bin "$claude_bin" \
                     --allowed-tools "$allowed_tools" \
-                    $model_arg $budget_arg $atimeout_arg
+                    $model_arg $budget_arg $atimeout_arg $entry_arg $mt_arg
             ' _ "$CLAUDE_ENV_SH" "$TILELANG_ENV_SH" "$WORKDIR_IN_CONTAINER" "$skill_dir" \
                 "$task_dir" "$op_name" "$agent_short" "$npu" \
                 "${MODEL:-}" "$CLAUDE_BIN" "$ALLOWED_TOOLS" \
-                "$MAX_BUDGET_USD" "${AGENT_TIMEOUT_SEC:-}" >> "$wlog" 2>&1 &
+                "$MAX_BUDGET_USD" "${AGENT_TIMEOUT_SEC:-}" "$ENTRY_FAILURE_TYPE" "$MAX_TURNS" >> "$wlog" 2>&1 &
     local cmd_pid=$!
     local turn_status=0 stale_stop=0
 
@@ -577,8 +594,12 @@ run_engine_turn() {
 
     wait "$cmd_pid"
     turn_status=$?
-    set -e
     [[ "$stale_stop" -eq 1 ]] && turn_status=86
+    local engine_end engine_end_human engine_elapsed
+    engine_end=$(date +%s)
+    engine_end_human=$(date '+%F %T')
+    engine_elapsed=$((engine_end - engine_start))
+    echo "[engine] end=$engine_end_human elapsed=${engine_elapsed}s rc=$turn_status stale_stop=$stale_stop" >> "$wlog"
     return "$turn_status"
 }
 
@@ -611,12 +632,13 @@ run_worker() {
         [[ -z "$task_dir" ]] && break
         local op_name; op_name=$(basename "$task_dir")
 
-        local start end elapsed status
+        local start end elapsed status start_human end_human
         start=$(date +%s)
+        start_human=$(date '+%F %T')
 
         {
             echo "[task] op=$op_name task_dir=$task_dir"
-            echo "[task] start=$(date '+%F %T')"
+            echo "[task] start=$start_human"
         } >> "$wlog"
 
         # ── 单次引擎调用（方案 C：引擎自管 attempt 循环 / 漂移 / 退出产物） ──
@@ -626,7 +648,9 @@ run_worker() {
         status=$?
         set -e
 
-        end=$(date +%s); elapsed=$((end - start))
+        end=$(date +%s)
+        end_human=$(date '+%F %T')
+        elapsed=$((end - start))
 
         # 超时后清理残留进程（runner + 其 spawn 的 claude/编译子进程）
         if [[ "$status" -eq 124 || "$status" -eq 137 || "$status" -eq 143 ]]; then
@@ -635,6 +659,9 @@ run_worker() {
 
         local session_outcome
         session_outcome=$(read_debug_outcome "$task_dir" 2>/dev/null || echo "unknown")
+        if [[ "$status" -eq 8 || "$session_outcome" == "provider_api_error" ]]; then
+            mark_fatal_error "provider_api_error task=${op_name} container=${container} npu=${npu}" "$wlog"
+        fi
 
         # 注: 旧 codex 语义的 progressed_to_new_failure_type 跨分支重入逻辑已移除——
         # 方案 C 下 failure_type 漂移 = 单 session 内引擎自动续跑 (不结束 session)，
@@ -686,17 +713,24 @@ except Exception:
         elif [[ "$status" -eq 86 ]]; then
             icon="🧊 stale_after_failure${cheat_mark}"
             echo "[${container}@npu${npu}] 🧊 ${op_name} STALE (${elapsed}s)"
+        elif [[ "$status" -eq 8 || "$session_outcome" == "provider_api_error" ]]; then
+            icon="🚧 provider_api_error${cheat_mark}"
+            echo "[${container}@npu${npu}] 🚧 ${op_name} PROVIDER_API_ERROR (${elapsed}s)"
         else
             icon="❌ engine_rc=$status${cheat_mark}"
             echo "[${container}@npu${npu}] ❌ ${op_name} engine_rc=$status (${elapsed}s)"
         fi
+        echo "[task] end=$end_human elapsed=${elapsed}s rc=$status outcome=$session_outcome" >> "$wlog"
 
         local idx row
         exec 9>"$LOCK"; flock -x 9
-        idx=$(grep -c '^| [0-9]' "$REPORT" 2>/dev/null || echo 0)
+        idx=$(grep_count '^| [0-9]' "$REPORT")
         idx=$((idx + 1))
-        row="| $idx | $op_name | $icon | $elapsed | ${container}@npu${npu} |"
+        row="| $idx | $op_name | $icon | $elapsed | ${container}@npu${npu} | $start_human | $end_human |"
         echo "$row" >> "$REPORT"
+        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+            "$idx" "$task_dir" "$op_name" "$session_outcome" "$elapsed" \
+            "$start_human" "$end_human" "${container}@npu${npu}" "$status" >> "$TASK_ELAPSED"
         # 增量生成汇总报告（若工具存在）
         GEN_REPORT="$(dirname "$0")/generate_report_dynamic.py"
         if [[ -f "$GEN_REPORT" ]]; then
@@ -717,13 +751,14 @@ done
 for p in "${pids[@]}"; do wait "$p" || true; done
 
 # ── 汇总 ──
-SUCCESS=$(grep -c "✅ success" "$REPORT" || echo 0)
-STOPPED_LOOP=$(grep -c "⛔ stopped_by_loop_limit" "$REPORT" || echo 0)
-SKIPPED=$(grep -c "⊘ skipped" "$REPORT" || echo 0)
-TIMEOUT_CNT=$(grep -c "⏱ 超时" "$REPORT" || echo 0)
-STALE_CNT=$(grep -c "🧊 stale" "$REPORT" || echo 0)
-FAIL=$(grep -c "❌ " "$REPORT" || echo 0)
-CHEAT=$(grep -c "🚨 CHEAT" "$REPORT" || echo 0)
+SUCCESS=$(grep_count "✅ success" "$REPORT")
+STOPPED_LOOP=$(grep_count "⛔ stopped_by_loop_limit" "$REPORT")
+SKIPPED=$(grep_count "⊘ skipped" "$REPORT")
+TIMEOUT_CNT=$(grep_count "⏱ 超时" "$REPORT")
+STALE_CNT=$(grep_count "🧊 stale" "$REPORT")
+FAIL=$(grep_count "❌ " "$REPORT")
+PROVIDER_API=$(grep_count "🚧 provider_api_error" "$REPORT")
+CHEAT=$(grep_count "🚨 CHEAT" "$REPORT")
 
 {
     echo
@@ -735,11 +770,13 @@ CHEAT=$(grep -c "🚨 CHEAT" "$REPORT" || echo 0)
     echo "- skipped_*: $SKIPPED"
     echo "- engine timeout: $TIMEOUT_CNT"
     echo "- stale_after_failure: $STALE_CNT"
+    echo "- provider_api_error: $PROVIDER_API"
     echo "- failed / crashed / stopped_* / engine_rc!=0: $FAIL"
     echo "- 作弊 (🚨 CHEAT, 与 outcome 正交): $CHEAT"
     if [[ -s "$FATAL" ]]; then
         echo "- 全局熔断: $(cat "$FATAL")"
     fi
+    echo "- 任务耗时明细: task_elapsed.tsv"
     echo "- 结束: $(date '+%F %T')"
 } >> "$REPORT"
 

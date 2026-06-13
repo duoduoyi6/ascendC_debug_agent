@@ -6,7 +6,7 @@
   - task_dir 目录结构完整
   - verify_status.json 产出存在且 schema_version 正确
   - {op}.json.bak 未被破坏
-  - audit_{attempt}.md 文件存在（section schema 由分支层各自定义）
+  - audit_{attempt}.md 文件存在（audit/fix 步 gating；validate 步只作为诊断）
 
 不检查 audit section 格式；不在 fix 步骤单独加 Gate——由下一轮 Gate-V 通过 verify_status 差分间接验证。
 """
@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -155,22 +156,99 @@ def check_audit_file_present(task_dir: Path, attempt: int) -> dict:
 
 # 这些是"必须为 True 才视为通过"的 gating key；其余为纯诊断信息不参与 ok 判定。
 # 设计契约（findings.md §3.3 ② / §7.6）：只有明确反映"前置 / 不变量"失败的 key 才 gating。
-_GATING_KEYS = {
-    # anticheat: 只有 pass 参与，baseline_present/hash_* 是诊断
-    "anticheat_pass",
-    # ast: 只看 degrade_pass；validator_present 是诊断
-    "ast_degrade_pass",
+#
+# 修复4 (6.11 文档 §5.1): anticheat_pass / ast_degrade_pass 已**移出** gating——作弊不再
+# 通过 ok=False 硬阻断 (会触发问题3的兜底 + 让 batch1 的 forensics 重试在下一轮把仍带
+# 作弊的 kernel 反复判失败而耗尽重试)。改由 run_common 的 validate step 结合 objective
+# 结果分场景给 loop_signal (success+作弊→STOP cheat_detected / fail+作弊→CONTINUE)，
+# 见下方 run_common。两者保留在 checks 里作纯诊断 + 触发 cheat_history 记录。
+_BASE_GATING_KEYS = {
     # structure
     "has_kernel_dir",
     "has_model_new_ascendc",
     "json_bak_preserved_if_exists",
-    # verify_status (validate step)
+}
+
+_VALIDATE_GATING_KEYS = {
     "verify_status_latest_present",
     "verify_status_schema_ok",
-    # audit file (audit/fix/validate steps)
+}
+
+_AUDIT_GATING_KEYS = {
     "audit_file_present",
     "audit_file_nonempty",
 }
+
+
+def _gating_keys_for_step(step: str) -> set[str]:
+    keys = set(_BASE_GATING_KEYS)
+    if step == "validate":
+        keys.update(_VALIDATE_GATING_KEYS)
+    if step in ("audit", "fix"):
+        keys.update(_AUDIT_GATING_KEYS)
+    return keys
+
+
+def _read_correctness_passed(task_dir: Path, attempt: int) -> bool:
+    """读 validation_result_attempt_{N}.json 的 correctness_passed；缺失/不可解析→False。
+
+    修复4 A/B 判定靠它区分 objective success/fail。dispatcher 在 validate step 先跑
+    run_objective_validation 写好该文件再跑 gate，故此处可读到当轮结果。保守缺省 False
+    (读不到时按 objective 未过处理 → 作弊走 CONTINUE 而非误判 success terminal)。
+    """
+    path = task_dir / "precision_tuning" / f"validation_result_attempt_{attempt}.json"
+    if not path.exists():
+        return False
+    try:
+        return bool(json.loads(path.read_text(encoding="utf-8")).get("correctness_passed", False))
+    except (ValueError, OSError):
+        return False
+
+
+def _record_cheat_attempt(task_dir: Path, attempt: int, checks: dict, *, cheat_type: str) -> None:
+    """把作弊轮记入 precision_tuning/cheat_history.json，按 (attempt, cheat_type) 去重。
+
+    修复4 + N5: 同一 attempt 内 forensics/validate 两次 run_common 都会检测到作弊，去重防
+    重复记录。AST_VALIDATOR_ERROR (validator 超时/缺失 fail-open) 单独记为 warning，不静默
+    吞 (N5)，供 exit_artifacts 区分"真作弊"与"未检测"。
+    """
+    path = task_dir / "precision_tuning" / "cheat_history.json"
+    data = {"cheating_attempts": []}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict) and isinstance(loaded.get("cheating_attempts"), list):
+                data = loaded
+        except (ValueError, OSError):
+            pass
+
+    for e in data["cheating_attempts"]:
+        if e.get("attempt") == attempt and e.get("cheat_type") == cheat_type:
+            return  # 已记录 (去重)
+
+    is_warning = cheat_type == "AST_VALIDATOR_ERROR"
+    entry = {
+        "attempt": attempt,
+        "cheat_type": cheat_type,
+        "severity": "warning" if is_warning else "violation",
+        "detected_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "evidence": {
+            "ast_degrade_pass": checks.get("ast_degrade_pass"),
+            "ast_validator_errored": checks.get("ast_validator_errored", False),
+            "anticheat_pass": checks.get("anticheat_pass"),
+        },
+        "instruction": (
+            "AST validator 异常 (超时/缺失)，本轮反作弊未能确证，按未检测处理"
+            if is_warning else
+            "禁止用 torch 原生算子绕过 AscendC kernel；只能修改 kernel/ 下的 .cpp/.h"
+        ),
+    }
+    data["cheating_attempts"].append(entry)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def run_common(step: str, task_dir: Path, op_name: str, attempt: int) -> GateOutcome:
@@ -179,9 +257,9 @@ def run_common(step: str, task_dir: Path, op_name: str, attempt: int) -> GateOut
     - forensics: 结构 / 反作弊 / AST
     - audit:     +audit 文件存在
     - fix:       +audit 文件存在（fix 不单独 Gate，此处复用 audit）
-    - validate:  +verify_status + audit 文件
+    - validate:  +verify_status；audit 文件只作为诊断信息
 
-    只有 `_GATING_KEYS` 中的键参与 ok 判定；其它 (baseline_present / validator_present 等)
+    只有当前 step 的 gating keys 参与 ok 判定；其它 (baseline_present / validator_present 等)
     为纯诊断信息。
     """
     checks: dict = {}
@@ -195,7 +273,56 @@ def run_common(step: str, task_dir: Path, op_name: str, attempt: int) -> GateOut
 
     ok = all(
         checks.get(k, True) is True
-        for k in _GATING_KEYS
+        for k in _gating_keys_for_step(step)
         if k in checks
     )
+
+    # ---- 修复 4 (6.11 文档): anti-cheat 分场景 ----
+    # ast_degrade_pass / anticheat_pass 已移出 gating keys (纯诊断)，作弊不再硬阻断
+    # step (否则 fail+cheat→CONTINUE 后下一轮 forensics 会被批次1的重试逻辑误判耗尽)。
+    # 作弊判定与 A/B 派信号在此集中处理:
+    #   - 检测到 ast_degrade fail → 记录 cheat_history (按 (attempt,cheat_type) 去重)。
+    #   - validate step 能拿到 objective 结果 (dispatcher 已先跑 run_objective_validation
+    #     写好 validation_result)，据此分 A/B:
+    #       success + cheat → STOP + stop_reason_code=cheat_detected (靠作弊绕过 kernel 的
+    #         「假成功」，终止并标记，不计 clean success；继续修会以作弊态为基础污染状态)。
+    #       fail + cheat    → CONTINUE (数值本就没过，作弊只是一次失败尝试；保留诊断成本，
+    #         下一轮 prompt 注入警告告知 agent)。
+    #   - 非 validate step (forensics/audit) 无 objective 结论 → 仅记录，不在此派终判信号
+    #     (保守不阻断，等 validate step 统一裁决)。
+    # cheat 路径显式给出 loop_signal (非 None)，规避批次1「validate 无信号 → Abort」误触。
+    ast_failed = checks.get("ast_degrade_pass", True) is False
+    anticheat_failed = checks.get("anticheat_pass", True) is False
+    if ast_failed or anticheat_failed:
+        if ast_failed:
+            # N5: validator 异常 (超时/缺失 fail-open) 与真作弊区分，单独记 warning，
+            # 不静默当 pass，也不等价真作弊 (避免误杀)。
+            cheat_type = ("AST_VALIDATOR_ERROR"
+                          if checks.get("ast_validator_errored") else "AST_DEGRADE")
+            _record_cheat_attempt(task_dir, attempt, checks, cheat_type=cheat_type)
+        if anticheat_failed:
+            _record_cheat_attempt(task_dir, attempt, checks, cheat_type="WRAPPER_HASH")
+
+        # validator 异常 (errored) 不等同确证作弊，不据此终止/续跑；按原 ok 判定走。
+        confirmed_cheat = anticheat_failed or (
+            ast_failed and not checks.get("ast_validator_errored")
+        )
+        if confirmed_cheat and step == "validate":
+            if _read_correctness_passed(task_dir, attempt):
+                # stop_reason_code 经 checks 透传 (与 branch 层 _legacy_to_outcome 同路径:
+                # GateOutcome 无该字段，to_gate_output 输出 checks，parse_gate_output 再提升)。
+                checks["stop_reason_code"] = "cheat_detected"
+                return GateOutcome(
+                    gate=f"GATE-COMMON-{step}", ok=False, checks=checks,
+                    loop_signal="STOP",
+                    reason=("objective success 但检测到作弊 (绕过 AscendC kernel)，"
+                            "终止并标记 cheat_detected，不计 clean success"),
+                )
+            return GateOutcome(
+                gate=f"GATE-COMMON-{step}", ok=False, checks=checks,
+                loop_signal="CONTINUE",
+                reason=("检测到作弊但 objective 未通过，已记录 cheat_history，"
+                        "下一轮告知 agent"),
+            )
+
     return GateOutcome(gate=f"GATE-COMMON-{step}", ok=ok, checks=checks)

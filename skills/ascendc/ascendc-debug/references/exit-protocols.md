@@ -52,7 +52,11 @@ cp "{task_dir}/model_new_ascendc.py" \
 
 ### Step 7: 退出前强制产物（所有分支 / 所有结局共用）
 
-> **退出前最后一步（所有结局共用）**：无论 session 以 `success` / `failed` / `stopped_by_gate` / `stopped_by_loop_limit` / `timeout` / `skipped_env_issue` / `skipped_unsupported_type` / `crashed` 中哪种结局退出，**必须**在退出前产出以下两份文件。任一缺失将导致本次 debug 叙事丢失、下游无法判定结果。
+> **⚙️ 所有权（方案 B：runner = owner）**：`debug_trace.md` + `debug_status.json` 这两份退出产物由**引擎**在终态从事件流 `.debug_events/events.jsonl` 确定性重建（`engine/exit_artifacts.py` 的 `write_exit_artifacts`），**agent / worker 不手写**（worker prompt 已硬约束「禁止写 debug_status.json / debug_trace.md」，见 `engine/agent_backend.py`）。下文 7.1 / 7.2 的 schema 是引擎产出的**契约规格**（供下游消费者与维护者对照），不是给 agent 的手写模板。
+>
+> 本 Step 描述的「产出时机 / 顺序」由引擎主循环保证：Step 5/6 的实质动作（归档/全量验证/知识库写入）先完成，引擎抵达终态时最后重建退出产物。
+
+> **退出前最后一步（所有结局共用）**：无论 session 以 `success` / `failed` / `stopped_by_gate` / `stopped_by_loop_limit` / `stopped_by_budget` / `degenerate_no_progress` / `timeout` / `skipped_env_issue` / `skipped_unsupported_type` / `crashed` / `provider_api_error` 中哪种结局退出，引擎**必须**在退出前产出以下两份文件。任一缺失将导致本次 debug 叙事丢失、下游无法判定结果。
 >
 > 执行顺序：Step 5/6 的实质动作（归档/全量验证/知识库写入）先完成，Step 7 最后执行（需要其产出的数值写入 `debug_trace.md`），然后再输出 Step 5/6 的最终报告。
 
@@ -75,7 +79,7 @@ cp "{task_dir}/model_new_ascendc.py" \
 
 ### Attempt 0
 - 进入时 verify_status 关键字段: failure_type, failed_step, duration_sec, exit_code
-- 诊断摘要: 引用 audit_0.md（或对应分支 audit 文件）的摘要 section
+- 诊断摘要: engine 每轮 validate 后产出独立的 `precision_tuning/diagnosis_summary_attempt_{attempt}.json` 并注入 trace，agent **无需手写**。来源 = agent final response（`_claude_result_attempt{N}.json` 顶层 `result`）+ changed_files（engine diagnose 派发前后 kernel 快照 diff）+ validation summary（`validation_result_attempt_{N}.json`）；`precision_audit_{N}.md` 若存在则降级为可选 enrichment（折叠 `[ROOT_CAUSE]`/`[FIX_PLAN]`），不依赖它（实测缺失率 100%）。三源全缺时降级为「(无)」
 - 修复代码改动: 修改文件列表 + 函数 / 行号级 diff 摘要（不贴全文）
 - Gate-通用: PASS / FAIL + 未通过项
 - Gate-分支 (F/A/V): PASS / FAIL + 关键数值
@@ -90,13 +94,14 @@ cp "{task_dir}/model_new_ascendc.py" \
 ### Attempt 1 ... N（同上）
 
 ## 3. 最终 Verdict（强制）
-- session_outcome: success / failed / stopped_by_gate / stopped_by_loop_limit / timeout / skipped_env_issue / skipped_unsupported_type / crashed
+- session_outcome: success / failed / stopped_by_gate / stopped_by_loop_limit / stopped_by_budget / degenerate_no_progress / timeout / skipped_env_issue / skipped_unsupported_type / crashed / provider_api_error
 - 退出时 verify_status 快照
 - 若 success: 确认全量 `.json.bak` 恢复后 verify 通过
 - 若 failed / stopped_*: 明确原因
 
 ## 4. 产物清单（强制）
-- 各轮 audit 文件相对 {task_dir} 路径
+- 各轮 `diagnosis_summary_attempt_{N}.json`（engine 每轮 validate 后产出）
+- 各轮 audit 文件相对 {task_dir} 路径（可选详细产物，缺失不影响诊断摘要）
 - tuning_directions.json（精度分支）或对应分支的方向记录文件
 - history/baseline/code_snapshot/ 和各轮 attempt_N/code_snapshot/
 - .verify_status/phase8_attempt_*.json
@@ -127,7 +132,7 @@ cp "{task_dir}/model_new_ascendc.py" \
 ```json
 {
   "schema_version": 1,
-  "session_outcome": "success | failed | stopped_by_gate | stopped_by_loop_limit | timeout | skipped_env_issue | skipped_unsupported_type | crashed",
+  "session_outcome": "success | failed | stopped_by_gate | stopped_by_loop_limit | stopped_by_budget | degenerate_no_progress | timeout | skipped_env_issue | skipped_unsupported_type | crashed | provider_api_error",
   "session_branch": "1-P | 1-B | 1-I | 1-R | 1-T",
   "started_at": "<ISO>",
   "ended_at": "<ISO>",
@@ -141,7 +146,7 @@ cp "{task_dir}/model_new_ascendc.py" \
 
 **字段约束**：
 - `schema_version = 1`（本版本固定）
-- `session_outcome` 必须是上列 8 种之一；其他值视为未知结局，下游消费者应视同 `crashed`
+- `session_outcome` 必须是上列 11 种之一；其他值视为未知结局，下游消费者应视同 `crashed`
 - `session_branch` 填写 session 入口 failure_type 对应的分支标签（与 `entry_failure_type` 一致，failure_type 后续变化后不更新此字段）
 - `started_at` / `ended_at` 用 ISO 8601（带 UTC 时区）
 - `final_failure_type` 从**最后一次**本 session 内触发的 `utils/verification_ascendc.py` + `utils/classify_verify_result.py` 产出读取；若一次都没跑（例如 `skipped_*`），与 `entry_failure_type` 一致
@@ -152,7 +157,7 @@ cp "{task_dir}/model_new_ascendc.py" \
 - ⛔ **禁止 append 或重写 `{task_dir}/trace.md`** —— 主 agent 产物，本 skill 全程只读；所有 debug 叙事 / verdict 都落到 `debug_trace.md` + `debug_status.json`
 - ⛔ **禁止修改 `utils/` / `CMakeLists.txt` / `setup.py` / `agents/` / `skills/`** —— 只能改 `{task_dir}/kernel/` 下文件，`{task_dir}/precision_tuning/` 下写 skill 产物
 - ⛔ **禁止删除或重写 `{task_dir}/.verify_status/latest.json`、`{task_dir}/{op_name}.json.bak`** —— 上游 artefact / 全量用例备份，只读
-- Step 7 是退出前的最后一步，只负责产出 `debug_trace.md` + `debug_status.json`；Step 5/6 里的"归档/更新 current_best/全量验证/知识库写入"等实质动作需在 Step 7 之前完成（Step 7 的 debug_trace 要引用这些结果）；Step 5/6 的最终报告输出（如 `[PRECISION_TUNING_RESULT]`）在 Step 7 产出后再输出
+- Step 7 是退出前的最后一步，由引擎产出 `debug_trace.md` + `debug_status.json`；Step 5/6 里的"归档/更新 current_best/全量验证/知识库写入"等实质动作需在引擎抵达终态之前完成（debug_trace 要引用这些结果）；Step 5/6 的最终报告输出（如 `[PRECISION_TUNING_RESULT]`）在退出产物重建后再输出
 
 ---
 
@@ -239,6 +244,8 @@ echo "精度通过，current_best 已更新为 100.0"
 - `patterns` 是**数组**，从以下枚举选取（可多选，无明显 pattern 时写 `[]`）：
   `tail_spike` / `uniform_offset` / `scattered` / `magnitude_correlated` / `nan_inf_contamination` / `dimension_concentration` / `boundary_concentration` / `all_wrong`
 - `op_types` 是**数组**，填写算子类型标识符（如 `["reduction"]` / `["matmul"]`），不限定枚举；与具体算子无关的通用问题写 `[]`
+  - 留空 `[]` 时，`dump` 会自动从 op_name 派生 `derived_keywords`（检索辅助词，写读对称），保证该经验仍可被同类算子的 op_name 召回——故通用经验可放心留空，无需硬凑 op_type
+  - 但 `title` 应尽量含英文算子/机制关键词：`dump` 入库前做可检索性自检，若条目无 op_types、无派生词、title 也无英文特征词，会告警"难被检索召回"
 - `fix` 要通用，不要引用具体代码行号或变量名
 - `type` 必须从以下枚举中选择：FIX_PRECISION_PADDING / FIX_PRECISION_TAIL / FIX_PRECISION_REDUCTION / FIX_PRECISION_TYPECAST / FIX_PRECISION_LAYOUT / FIX_PRECISION_SYNC / FIX_PRECISION_OVERFLOW / FIX_PRECISION_LOGIC / FIX_PRECISION_OTHER
 
@@ -265,6 +272,8 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_knowledge.py check \
 | `review_needed` | 关键词重叠但根因/场景本质不同 | `new` | 无 |
 
 > **merge 操作前 Agent 必须先丰富 `candidate_kb_entry.json`**：将相似条目的已有内容与新候选内容合并，形成更完整的条目（保留旧条目的核心知识，补充新触发场景或 fix 细节），再写回 `{task_dir}/precision_tuning/candidate_kb_entry.json`。Python 脚本只负责将该文件内容替换到知识库对应位置，合并本身由 Agent 完成。
+
+> **兜底**：即便跳过 5.2.5 的 check 直接 `--action new`，`dump` 也会在写入前与现有条目比对相似度，若 Jaccard ≥ 0.55（疑似重复）会告警建议改用 merge。此为防近重复膨胀的最后一道提示，不阻断写入。
 
 **5.3 写入知识库 (Python 执行):**
 ```bash

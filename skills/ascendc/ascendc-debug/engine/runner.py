@@ -27,6 +27,7 @@ from engine.gate_adapter import GateResult, parse_gate_output, run_gate
 from engine.next_action import debug_next_action
 from engine.state import DebugState
 from engine.types import Abort, Action, Continue, Done
+from engine.validate_runner import run_objective_validation
 
 # agent_callback 签名: (action, task_dir, op_name, attempt) -> result dict。
 AgentCallback = Callable[[Action, Path, str, int], dict]
@@ -73,13 +74,46 @@ def _default_dispatcher(
     if action.kind == "py_action":
         gate_step = args.get("gate_step", "validate")
         attempt = int(args.get("attempt", 0))
+        # 修复 2 (6.11 文档): forensics step 先由 engine 主动产出 report，使下一拍
+        # Gate-F 当轮可读到。执行失败只落 passed=False (方案 3 统一路径)——由
+        # next_action 的 _completed_steps_this_attempt 排除出 completed → 重派，
+        # 连续失败超限才 Done(stopped_by_gate)。不在此直接终止。
+        if gate_step == "forensics":
+            from engine.validate_runner import run_forensics
+            fr = run_forensics(task_dir, attempt=attempt)
+            if not fr["success"]:
+                return {"passed": False, "error": fr.get("error"),
+                        "gate": "GATE-FORENSICS-EXEC"}
+        objective = None
+        if gate_step == "validate":
+            objective = run_objective_validation(task_dir, attempt=attempt)
         gr = run_gate(task_dir, step=gate_step, op_name=op_name, attempt=attempt)
-        return _gate_result_to_dict(gr)
+        result = _gate_result_to_dict(gr)
+        if objective is not None:
+            result["objective_validation"] = objective
+            result["failure_type"] = objective.get("failure_type")
+            result["verification_exit_code"] = objective.get("verification_exit_code")
+        return result
     if action.kind == "spawn_agent":
         if agent_callback is None:
             raise RunnerError("spawn_agent 需要 agent_callback，但未提供")
         attempt = int(args.get("attempt", 0))
-        return agent_callback(action, task_dir, op_name, attempt)
+        # 项 12b: diagnose 派发前后各取 kernel 快照，diff 出本轮真实改动文件名 →
+        # result.changed_files (diagnosis_summary 的来源之一)。best-effort: 快照失败
+        # 不阻断诊断本身。
+        from engine.exit_artifacts import _kernel_file_hashes, diff_changed_files
+        try:
+            before = _kernel_file_hashes(task_dir)
+        except Exception:  # noqa: BLE001
+            before = None
+        result = agent_callback(action, task_dir, op_name, attempt)
+        if before is not None:
+            try:
+                result["changed_files"] = diff_changed_files(
+                    before, _kernel_file_hashes(task_dir))
+            except Exception:  # noqa: BLE001
+                pass
+        return result
     raise RunnerError(f"无法派发 action.kind={action.kind!r}")
 
 
@@ -120,6 +154,7 @@ def run_debug_session(
     agent_callback: Optional[AgentCallback] = None,
     dispatcher: Optional[Dispatcher] = None,
     deadline_sec: Optional[float] = None,
+    kb_path: Optional[str] = None,
     _now: Callable[[], float] = time.monotonic,
 ) -> dict:
     """驱动一个 debug session 到终态。返回 debug_status dict。
@@ -131,6 +166,8 @@ def run_debug_session(
     agent_callback: spawn_agent 的执行体 (NPU 上拉起 agent)；mock 时注入。
     dispatcher: 自定义派发器 (UT 注入 mock)；默认 _default_dispatcher。
     deadline_sec: wall-clock 总时长上限 (秒)；None 不限。超时主动 emit timeout 终态。
+    kb_path: 知识库 JSON 路径；非空时在成功终态把候选知识入库 (修复问题 6)。None
+        (默认) 不启用。入库前置见 knowledge_finalize (outcome==success 且无作弊)。
     _now: 单调时钟注入点 (UT 控制时间)。
 
     幂等/resume: 若 events.jsonl 已有 session_started，不重复写 (据已有事件续跑)。
@@ -138,6 +175,10 @@ def run_debug_session(
     task_dir = Path(task_dir)
     dispatcher = dispatcher or _default_dispatcher
     start = _now()
+
+    # 5 处终态出口统一固化 op_name/kb_path (KB finalize 用)，避免逐处传参。
+    def _term(decision) -> dict:
+        return _terminate(task_dir, decision, op_name=op_name, kb_path=kb_path)
 
     # 初始化 / resume。
     existing = DebugState.load(task_dir)
@@ -162,14 +203,14 @@ def run_debug_session(
     while True:
         tick += 1
         if tick > _MAX_TICKS:
-            return _terminate(task_dir, Abort(
+            return _term(Abort(
                 category="state_machine_stuck",
                 reason=f"超过最大 tick 数 {_MAX_TICKS}，疑似决策不收敛",
                 details={"session_outcome": "crashed"}))
 
         # 闸 3: wall-clock timeout。超时主动 emit 终态，不裸死。
         if deadline_sec is not None and (_now() - start) >= deadline_sec:
-            return _terminate(task_dir, Done(
+            return _term(Done(
                 session_outcome="timeout",
                 reason=f"wall-clock 超时 (>{deadline_sec}s)"))
 
@@ -177,7 +218,7 @@ def run_debug_session(
         decision = debug_next_action(state, gate_result)
 
         if isinstance(decision, (Done, Abort)):
-            return _terminate(task_dir, decision)
+            return _term(decision)
 
         if isinstance(decision, Continue):
             transition.record_attempt_started(task_dir, decision)
@@ -194,14 +235,35 @@ def run_debug_session(
                 transition.record_action_completed(
                     task_dir, decision, action_id,
                     {"success": False, "error": str(exc), "fatal": True})
-                return _terminate(task_dir, Abort(
+                return _term(Abort(
                     category="dispatch_error",
                     reason=f"派发 {decision.kind}:{decision.name} 失败: {exc}",
                     details={"session_outcome": "crashed"}))
             transition.record_action_completed(task_dir, decision, action_id, result)
+            if (
+                decision.step == "diagnose_and_fix"
+                and result.get("provider_error")
+            ):
+                return _term(Abort(
+                    category="provider_api_error",
+                    reason=(
+                        f"provider API error during diagnose: "
+                        f"{result.get('claude_state')}"
+                    ),
+                    details={
+                        "session_outcome": "provider_api_error",
+                        "claude_state": result.get("claude_state"),
+                        "api_error_status": result.get("api_error_status"),
+                    }))
             # validate 步: 缓存 GateResult 喂下一拍；其余步清空。
             if decision.step == "validate":
                 gate_result = _result_to_gate(result)
+                # 项 12b: 本轮 validate 完成 (final_response/changed_files/validation
+                # 三源齐备) → 归档 diagnosis_summary_attempt_N.json。每轮即写，CONTINUE
+                # 也留档。best-effort，绝不影响主循环。
+                from engine.exit_artifacts import write_diagnosis_summary
+                attempt = int((decision.skill_args or {}).get("attempt", 0))
+                write_diagnosis_summary(task_dir, attempt)
             else:
                 gate_result = None
             continue
@@ -230,9 +292,27 @@ def _reconcile_dangling(task_dir: Path, state: DebugState) -> None:
             {"success": False, "reason": "crash-recovery: 上次进程在此步崩溃，已收尾"})
 
 
-def _terminate(task_dir: Path, decision) -> dict:
-    """落终态事件 + 生成退出产物 + 返回 debug_status dict。"""
+def _terminate(task_dir: Path, decision, *,
+               op_name: Optional[str] = None,
+               kb_path: Optional[str] = None) -> dict:
+    """落终态事件 + 生成退出产物 + (成功时) KB 入库 + 返回 debug_status dict。
+
+    KB finalize (修复问题 6): kb_path 配置且 outcome==success 且无作弊时把候选知识
+    入库；默认 kb_path=None 不启用。best-effort，绝不抛异常 (finalize_knowledge 内部
+    已吞所有异常)，不影响 session 终态。在终态出口统一调用，H4 已终态早返回路径不经此
+    (上次终态时已 finalize)，天然不重复入库。
+    """
     transition.record_decision(task_dir, decision)
     write_exit_artifacts(task_dir)
     from engine.exit_artifacts import build_debug_status
-    return build_debug_status(task_dir)
+    status = build_debug_status(task_dir)
+    if kb_path:
+        from engine.knowledge_finalize import finalize_knowledge
+        status["kb_finalize"] = finalize_knowledge(
+            task_dir, kb_path=kb_path,
+            session_outcome=status.get("session_outcome"), op_name=op_name)
+    # run_summary (项 11): kb_finalize 挂好后产出，供 batch report 直接消费。
+    # best-effort，失败不影响终态。
+    from engine.exit_artifacts import write_run_summary
+    write_run_summary(task_dir, status)
+    return status

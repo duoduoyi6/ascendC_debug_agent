@@ -375,19 +375,28 @@ Gate-A 通过后，`precision_gate.py` 自动将以上 section 提取为独立�
 
 #### `validation_result_attempt_{N}.json` — Step 4.4 写入
 
-**创建者**：Agent（Step 4.4 从 `utils/verification_ascendc.py` 的 stdout 解析后写入）
+**创建者**：engine（`validate_runner._write_validation_result`，方案 C 下 validate step 由引擎 owned；旧版曾由 Agent 在 Step 4.4 写入）
 
-**创建时机**：每轮 Step 4.3 精度验证完成后，Agent 立即写入。Gate-V 读取此文件判断精度是否通过。
+**创建时机**：每轮引擎跑完 build+verify 后写入。Gate-V（`branch_precision.check_precision`）读取此文件判断精度是否通过。
 
 ```json
 {
   "attempt": 0,
   "correctness_passed": true,
-  "evaluate_stdout": "INFO - Evaluation correctness: [PASS]\nOutput 0: shape=[16, 32, 64], match_rate=100.00% (32768/32768), max_diff=0.00000e+00, ...",
   "match_rate": "100.00",   // 字符串，百分比数值（不带 % 号）
-  "max_diff": "0.0"
+  "max_diff": "0.0",
+  "match_rate_source": "verification_exit_code",
+  "passed_cases": 32,
+  "total_cases": 32,
+  "case_pass_rate": 1.0,
+  "source": "engine_objective_validate",
+  "first_error_lines": ["<首个错误行起最多 30 行>"],
+  "stdout_path": "<.verify_logs/phase8_attempt0.stdout 绝对路径>",
+  "stderr_path": "<.verify_logs/phase8_attempt0.stderr 绝对路径>"
 }
 ```
+
+> 修复 4a：不再内嵌 `evaluate_stdout`/`evaluate_stderr` 全文（数千行），改 `first_error_lines` 紧凑摘要 + `stdout_path`/`stderr_path` 路径指针；需全文时按指针读盘。`correctness_passed`/`match_rate` 是 Gate-V 消费字段，必留。
 
 > `match_rate` 在此文件中是**百分比字符串**（如 `"100.00"`），与 `forensics_report_{attempt}.json` 中的 0\~1 比例不同。`_write_round_summary()` 读取时用 `float(mr_str)` 直接得到百分比数值。
 

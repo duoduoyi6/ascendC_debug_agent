@@ -14,8 +14,13 @@ from engine.exit_artifacts import (
     build_debug_status,
     build_debug_trace,
     write_exit_artifacts,
+    _extract_audit_section,
+    build_diagnosis_summary,
+    write_diagnosis_summary,
+    _kernel_file_hashes,
+    diff_changed_files,
 )
-from engine.types import Abort, Continue, Done
+from engine.types import Abort, Action, Continue, Done
 
 
 class TestDebugStatus(unittest.TestCase):
@@ -140,6 +145,263 @@ class TestDebugTrace(unittest.TestCase):
         self.assertTrue(trace_path.exists())
         # status 是合法 JSON。
         json.loads(status_path.read_text(encoding="utf-8"))
+
+
+_REAL_AUDIT = """# Precision Audit — Attempt 1
+
+## [FORENSICS_SUMMARY]
+- 9/10 cases pass.
+
+## [ROOT_CAUSE]
+CANN fp16 cumsum uses stepwise fp16 accumulation.
+Residual 0.69% mismatch is platform rounding noise.
+
+## [FIX_PLAN]
+FIX_PRECISION_TYPECAST: applied per-step fp16 rounding.
+
+## [TARGET_FILES]
+- kernel/cumsum_kernel.h
+
+## [DIRECTION_ASSESSMENT]
+本轮是否延续上一轮方向: 是
+
+=== END AUDIT ===
+"""
+
+# 裸 marker 格式 (无 ## 前缀) — SKILL.md 模板规定的主格式，真实产物如 010_LayerNorm。
+_BARE_AUDIT = """# Precision Audit — Attempt 0
+
+[FORENSICS_SUMMARY]
+- baseline mismatch.
+
+[ROOT_CAUSE]
+Reduction axis mismatch in LayerNorm mean computation.
+
+[FIX_PLAN]
+FIX_PRECISION_REDUCE: fixed reduce axis.
+
+[TARGET_FILES]
+- kernel/layernorm_kernel.h
+
+=== END AUDIT ===
+"""
+
+
+class TestExtractAuditSection(unittest.TestCase):
+    def test_extract_root_cause(self) -> None:
+        sec = _extract_audit_section(_REAL_AUDIT, "ROOT_CAUSE")
+        self.assertIsNotNone(sec)
+        self.assertIn("stepwise fp16 accumulation", sec)
+        # 边界: 不串到下一 section。
+        self.assertNotIn("FIX_PRECISION_TYPECAST", sec)
+        self.assertNotIn("[FIX_PLAN]", sec)
+
+    def test_extract_fix_plan_stops_at_next_section(self) -> None:
+        sec = _extract_audit_section(_REAL_AUDIT, "FIX_PLAN")
+        self.assertIsNotNone(sec)
+        self.assertIn("FIX_PRECISION_TYPECAST", sec)
+        self.assertNotIn("TARGET_FILES", sec)
+
+    def test_last_section_stops_at_end_audit(self) -> None:
+        sec = _extract_audit_section(_REAL_AUDIT, "DIRECTION_ASSESSMENT")
+        self.assertIsNotNone(sec)
+        self.assertIn("延续", sec)
+        self.assertNotIn("END AUDIT", sec)
+
+    def test_missing_tag_returns_none(self) -> None:
+        self.assertIsNone(_extract_audit_section(_REAL_AUDIT, "NONEXISTENT"))
+
+    def test_empty_body_returns_none(self) -> None:
+        self.assertIsNone(_extract_audit_section("## [ROOT_CAUSE]\n## [FIX_PLAN]\nx", "ROOT_CAUSE"))
+
+    def test_bare_marker_root_cause(self) -> None:
+        # 裸格式 (无 ##) 是 SKILL 模板主格式，必须能抽取 (旧实现只认 ## 会漏)。
+        sec = _extract_audit_section(_BARE_AUDIT, "ROOT_CAUSE")
+        self.assertIsNotNone(sec)
+        self.assertIn("Reduction axis mismatch", sec)
+        self.assertNotIn("FIX_PRECISION_REDUCE", sec)
+
+    def test_bare_marker_fix_plan_stops_at_next(self) -> None:
+        sec = _extract_audit_section(_BARE_AUDIT, "FIX_PLAN")
+        self.assertIsNotNone(sec)
+        self.assertIn("FIX_PRECISION_REDUCE", sec)
+        self.assertNotIn("TARGET_FILES", sec)
+        self.assertNotIn("kernel/layernorm", sec)
+
+
+def _record_diagnose(task_dir: Path, attempt: int, result: dict) -> None:
+    """落一条 attempt_started + diagnose_and_fix action_completed (12b 数据源)。"""
+    tr.record_attempt_started(task_dir, Continue(attempt, "precision_failed"))
+    action = Action(kind="spawn_agent", name="debug_worker", step="diagnose_and_fix")
+    aid = tr.new_action_id()
+    tr.record_action_started(task_dir, action, aid)
+    tr.record_action_completed(task_dir, action, aid, result)
+
+
+def _write_validation(task_dir: Path, attempt: int, payload: dict) -> None:
+    tuning = task_dir / "precision_tuning"
+    tuning.mkdir(exist_ok=True)
+    (tuning / f"validation_result_attempt_{attempt}.json").write_text(
+        json.dumps(payload), encoding="utf-8")
+
+
+class TestKernelHashDiff(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.task_dir = Path(self._tmp.name)
+        (self.task_dir / "kernel").mkdir()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_diff_modified_added_deleted(self) -> None:
+        k = self.task_dir / "kernel" / "k.h"
+        k.write_text("v0", encoding="utf-8")
+        before = _kernel_file_hashes(self.task_dir)
+        k.write_text("v1", encoding="utf-8")
+        (self.task_dir / "kernel" / "n.cpp").write_text("x", encoding="utf-8")
+        after = _kernel_file_hashes(self.task_dir)
+        self.assertEqual(diff_changed_files(before, after), ["kernel/k.h", "kernel/n.cpp"])
+        # 删除也算变化。
+        self.assertEqual(diff_changed_files(after, before), ["kernel/k.h", "kernel/n.cpp"])
+
+    def test_posix_paths(self) -> None:
+        (self.task_dir / "kernel" / "sub").mkdir()
+        (self.task_dir / "kernel" / "sub" / "a.cpp").write_text("y", encoding="utf-8")
+        h = _kernel_file_hashes(self.task_dir)
+        self.assertIn("kernel/sub/a.cpp", h)
+
+    def test_dotfiles_excluded(self) -> None:
+        # 真实产物核实 (hyena 快照): macOS AppleDouble ._foo.cpp 残留须排除，
+        # 否则污染 changed_files 文件名列表。
+        (self.task_dir / "kernel" / "real.cpp").write_text("v", encoding="utf-8")
+        (self.task_dir / "kernel" / "._real.cpp").write_text("junk", encoding="utf-8")
+        (self.task_dir / "kernel" / ".hidden.h").write_text("junk", encoding="utf-8")
+        h = _kernel_file_hashes(self.task_dir)
+        self.assertEqual(list(h), ["kernel/real.cpp"])
+
+
+class TestDiagnosisSummary(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.task_dir = Path(self._tmp.name)
+        tr.record_session_started(self.task_dir, op_name="cumsum", agent="constructive",
+                                  entry_failure_type="precision_failed")
+        self.tuning = self.task_dir / "precision_tuning"
+        self.tuning.mkdir()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_full_summary(self) -> None:
+        _record_diagnose(self.task_dir, 0, {
+            "success": True, "final_response": "根因: CAST_NONE 应改 CAST_ROUND",
+            "changed_files": ["kernel/cumsum_kernel.h"]})
+        _write_validation(self.task_dir, 0, {
+            "correctness_passed": True, "match_rate": "99.31", "max_diff": "0.0625",
+            "first_error_lines": ["x"]})
+        (self.tuning / "precision_audit_0.md").write_text(_REAL_AUDIT, encoding="utf-8")
+        d = build_diagnosis_summary(self.task_dir, 0)
+        self.assertIsNotNone(d)
+        self.assertEqual(d["final_response"], "根因: CAST_NONE 应改 CAST_ROUND")
+        self.assertEqual(d["changed_files"], ["kernel/cumsum_kernel.h"])
+        self.assertEqual(d["validation"]["match_rate"], "99.31")
+        self.assertIn("stepwise fp16", d["root_cause"])  # audit enrichment
+        self.assertEqual(d["attempt"], 0)
+
+    def test_final_response_only(self) -> None:
+        # 无 validation 文件、无 audit: 仅 final_response/changed_files 也成摘要。
+        _record_diagnose(self.task_dir, 0, {
+            "success": True, "final_response": "诊断文本", "changed_files": []})
+        d = build_diagnosis_summary(self.task_dir, 0)
+        self.assertIsNotNone(d)
+        self.assertEqual(d["final_response"], "诊断文本")
+        self.assertEqual(d["changed_files"], [])
+        self.assertNotIn("validation", d)
+        self.assertNotIn("root_cause", d)
+
+    def test_validation_only(self) -> None:
+        # diagnose result 无 final_response (timeout 早返回路径)，但 validation 已产出。
+        _record_diagnose(self.task_dir, 0, {"success": False, "claude_state": "timeout"})
+        _write_validation(self.task_dir, 0, {"correctness_passed": False, "match_rate": "0.00"})
+        d = build_diagnosis_summary(self.task_dir, 0)
+        self.assertIsNotNone(d)
+        self.assertNotIn("final_response", d)
+        self.assertEqual(d["validation"]["correctness_passed"], False)
+
+    def test_no_content_returns_none(self) -> None:
+        # 无 diagnose 事件、无 validation、无 audit → 仅骨架键 → None。
+        self.assertIsNone(build_diagnosis_summary(self.task_dir, 0))
+
+    def test_corrupt_validation_best_effort(self) -> None:
+        _record_diagnose(self.task_dir, 0, {"final_response": "x", "changed_files": []})
+        (self.tuning / "validation_result_attempt_0.json").write_text("{bad", encoding="utf-8")
+        d = build_diagnosis_summary(self.task_dir, 0)
+        self.assertIsNotNone(d)
+        self.assertNotIn("validation", d)  # 损坏静默跳过
+        self.assertEqual(d["final_response"], "x")
+
+    def test_invalid_utf8_audit_best_effort(self) -> None:
+        _record_diagnose(self.task_dir, 0, {"final_response": "x", "changed_files": []})
+        (self.tuning / "precision_audit_0.md").write_bytes(b"[ROOT_CAUSE]\n\xff\xfe bad")
+        d = build_diagnosis_summary(self.task_dir, 0)  # 不抛
+        self.assertIsNotNone(d)
+        self.assertNotIn("root_cause", d)
+
+    def test_audit_root_cause_truncated(self) -> None:
+        _record_diagnose(self.task_dir, 0, {"final_response": "x", "changed_files": []})
+        (self.tuning / "precision_audit_0.md").write_text(
+            "[ROOT_CAUSE]\n" + ("A" * 1000) + "\n[FIX_PLAN]\ny", encoding="utf-8")
+        d = build_diagnosis_summary(self.task_dir, 0)
+        self.assertIn("…(截断)", d["root_cause"])
+        self.assertLess(len(d["root_cause"]), 700)
+
+    def test_multi_attempt_isolation(self) -> None:
+        _record_diagnose(self.task_dir, 0, {"final_response": "轮0", "changed_files": ["a"]})
+        _record_diagnose(self.task_dir, 1, {"final_response": "轮1", "changed_files": ["b"]})
+        self.assertEqual(build_diagnosis_summary(self.task_dir, 0)["final_response"], "轮0")
+        self.assertEqual(build_diagnosis_summary(self.task_dir, 1)["final_response"], "轮1")
+
+    def test_write_produces_json(self) -> None:
+        _record_diagnose(self.task_dir, 0, {"final_response": "x", "changed_files": []})
+        path = write_diagnosis_summary(self.task_dir, 0)
+        self.assertIsNotNone(path)
+        self.assertEqual(path.name, "diagnosis_summary_attempt_0.json")
+        json.loads(path.read_text(encoding="utf-8"))
+
+    def test_write_none_when_empty(self) -> None:
+        self.assertIsNone(write_diagnosis_summary(self.task_dir, 0))
+
+
+class TestDebugTraceDiagnosisInjection(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.task_dir = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_trace_injects_diagnosis(self) -> None:
+        tr.record_session_started(self.task_dir, op_name="cumsum", agent="constructive",
+                                  entry_failure_type="precision_failed")
+        _record_diagnose(self.task_dir, 0, {
+            "final_response": "根因 CAST_NONE", "changed_files": ["kernel/cumsum_kernel.h"]})
+        _write_validation(self.task_dir, 0, {"correctness_passed": False, "match_rate": "99.31"})
+        write_diagnosis_summary(self.task_dir, 0)
+        tr.record_decision(self.task_dir, Done(session_outcome="failed", reason="x"))
+        trace = build_debug_trace(self.task_dir)
+        self.assertIn("诊断摘要", trace)
+        self.assertIn("kernel/cumsum_kernel.h", trace)
+        self.assertIn("99.31", trace)
+        self.assertIn("根因 CAST_NONE", trace)
+
+    def test_trace_degrades_without_summary(self) -> None:
+        tr.record_session_started(self.task_dir, op_name="add", agent="constructive",
+                                  entry_failure_type="build_failed")
+        tr.record_attempt_started(self.task_dir, Continue(0, "build_failed"))
+        tr.record_decision(self.task_dir, Done(session_outcome="failed", reason="x"))
+        trace = build_debug_trace(self.task_dir)
+        self.assertIn("诊断摘要: (无)", trace)
 
 
 if __name__ == "__main__":

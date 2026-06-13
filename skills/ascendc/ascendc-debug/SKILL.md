@@ -21,7 +21,7 @@ subagent:
 2. Agent 结合上下文 + 代码 + 日志 / 数值证据 + 知识库做深度分析, 定位根因并制定修复计划
 3. Agent 修复代码（只能改 `{task_dir}/kernel/` 下文件）
 4. 重新编译 + 验证（通过 `utils/verification_ascendc.py` + `utils/classify_verify_result.py`）
-5. 根据 Gate 循环控制信号决定继续或停止
+5. 引擎根据 Gate 循环控制信号决定继续或停止（agent 不自决）
 
 ## When to use me
 
@@ -56,11 +56,13 @@ subagent:
 
 **核心原则: Python 脚本做确定性操作 (取证、Gate、知识库), Agent 做需要推理的工作 (分析、修复)。**
 
+> **职责边界（方案 C，引擎驱动）**：本 Workflow 描述的是**单个 attempt 内**「取证 → 分析 → 修复 → 验证」的分支方法论，agent 须遵循。但**循环编排（轮次推进、`MAX_ATTEMPTS`、根据 `loop_signal` 决定继续/停止、退出产物 `debug_status.json`/`debug_trace.md` 重建）归确定性引擎**，agent 不自行管理轮次计数、不读 `loop_signal` 自决、不写退出产物。下文凡涉及「继续/停止」「下一轮」的表述均为方法论说明，实际由引擎控制。
+
 ---
 
 ### Step 0: 初始化
 
-设置轮次计数器 `attempt = 0`。
+轮次计数 `attempt` 由引擎注入（本轮值见调用上下文），agent 不自行递增。
 
 **0.1 保存不可变基线快照（原始代码，仅首次执行）:**
 ```bash
@@ -112,7 +114,7 @@ python3 skills/ascendc/ascendc-debug/scripts/verify_status.py \
 - 首轮调用任何 Gate 时，`session_branch.json` 自动记录起始 failure_type（仅供 `debug_status.json` 的 `entry_failure_type` / `session_branch` 字段使用，不限制后续路由）
 - `import_failed` 还要读 `verify_status.latest.json.import_subtype`：
   - `import_kernel_side` → 进入 Step 1-I
-  - `import_env_side` → 环境库 / LD_LIBRARY_PATH 问题，本 skill 不处理；直接写 `debug_trace.md` + `debug_status.json` 标 `session_outcome: skipped_env_issue` 后退出
+  - `import_env_side` → 环境库 / LD_LIBRARY_PATH 问题，本 skill 不处理；引擎直接判 `session_outcome: skipped_env_issue` 并由 Step 7 重建退出产物（`debug_trace.md` + `debug_status.json`，agent 不手写）
 
 **Step 1 分支路由表（每轮按当前 failure_type 查表，CONTINUE 后同样适用）**：
 
@@ -123,7 +125,7 @@ python3 skills/ascendc/ascendc-debug/scripts/verify_status.py \
 | `1-I` | `import_failed` + `import_kernel_side` | Step 1-I |
 | `1-R` | `runtime_error` | Step 1-R |
 | `1-T` | `timeout` | Step 1-T |
-| — | 其他（`success` / `degraded` / `no_kernel` / `tilelang_only_failed` / `execution_aborted`） | 执行 Step 7（写 `debug_trace.md` + `debug_status.json` 标 `session_outcome: skipped_unsupported_type`），退出 |
+| — | 其他（`success` / `degraded` / `no_kernel` / `tilelang_only_failed` / `execution_aborted`） | 引擎判 `session_outcome: skipped_unsupported_type`，由 Step 7 重建退出产物（`debug_trace.md` + `debug_status.json`，agent 不手写），退出 |
 
 ---
 
@@ -145,7 +147,7 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_gate.py \
 ⛔ **Gate-F 未通过 → 停止, 检查错误输出。不要在没有取证数据的情况下分析代码。**
 如果报错含 `FileNotFoundError`，先确认 `{task_dir}/kernel/pybind11.cpp` 存在，再检查 `utils/verification_ascendc.py` 路径。
 
-> 1-P 分支继续走 Step 2（精度深度分析 6 Sub-step）→ Step 3（修复）→ Step 4（重编译+验证，走 Gate-V 的精度语义）→ Step 5/6。
+> 1-P 分支继续走 Step 2（精度深度分析 6 Sub-step）→ Step 3（修复）→ Step 4（重编译+验证，走 Gate-V 的精度语义）。本轮到此结束，后续循环/退出由引擎控制。
 
 ---
 
@@ -317,6 +319,7 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_knowledge.py search \
     --kb-path skills/ascendc/ascendc-debug/references/precision_knowledge_base.json \
     --op-type <L8_operator.op_type> \
     --pattern <primary_hint> \
+    --op-name <算子名, 如 023_HyenaFftSizePaddingRfft> \
     --top-k 3 \
     --log-path "{task_dir}/precision_tuning" \
     --attempt {attempt} \
@@ -325,6 +328,8 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_knowledge.py search \
 
 记住检索到的 `matched_entries` 和 `checklists`, 后续分析时参考。
 如果输出 `fallback_to_full_load: true`, 说明无精确匹配, 已返回全量条目。
+`--op-name` 提供关键词软匹配通道: 当 op_type=unknown 或 pattern=all_wrong (无区分度)
+时, 算子名分词 (如 rfft/fft) 仍能召回算子专项条目, 是检索的关键兜底信号。
 
 **取证 hint 快速跳转表**（按 `primary_hint` 确定 Sub-step 2.3 重点方向，以及 Sub-step 2.5 对应实验）：
 
@@ -554,6 +559,7 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_knowledge.py search \
     --op-type <L8_operator.op_type> \
     --pattern <primary_hint> \
     --position <tail/boundary/scattered 或不传> \
+    --op-name <算子名, 如 023_HyenaFftSizePaddingRfft> \
     --top-k 3 \
     --log-path "{task_dir}/precision_tuning" \
     --attempt {attempt} \
@@ -997,16 +1003,19 @@ python3 utils/classify_verify_result.py --exit-code $rc --stdout-path "$STDOUT" 
 }
 ```
 
-**保存验证结果**（从 stdout 解析，写入 `{task_dir}/precision_tuning/validation_result_attempt_{attempt}.json`）：
+**验证结果产物**（方案 C 下由引擎 `validate_runner._write_validation_result` 产出，agent 无需手写；`{task_dir}/precision_tuning/validation_result_attempt_{attempt}.json`）：
 ```json
 {
   "attempt": <N>,
   "correctness_passed": true/false,
-  "evaluate_stdout": "<evaluate_ascendc.sh 完整输出>",
-  "match_rate": "<从 stdout 提取，如 87.50 或 100.00>",
-  "max_diff": "<从 stdout 提取，如 1.23e-04>"
+  "match_rate": "<如 87.50 或 100.00>",
+  "max_diff": "<如 1.23e-04>",
+  "first_error_lines": ["<stdout 首个错误起最多30行>"],
+  "stdout_path": "<.verify_logs/phase8_attemptN.stdout 全文路径指针>",
+  "stderr_path": "<.verify_logs/phase8_attemptN.stderr 全文路径指针>"
 }
 ```
+> 修复 4a：不再内嵌 `evaluate_stdout`/`evaluate_stderr` 全文（数千行），改紧凑摘要 + 路径指针；需全文时按指针读盘。`correctness_passed`/`match_rate` 是 Gate-V 消费字段，必留。
 
 提取规则（`verification_ascendc.py` 输出格式）：
 - `match_rate`: 用正则 `r"mismatch_ratio=([0-9.]+)%"` 取所有 case 平均，转换为 match_rate = 100 - avg_mismatch；若无 mismatch 行则写 `100.0`
@@ -1018,7 +1027,7 @@ python3 skills/ascendc/ascendc-debug/scripts/precision_gate.py \
     --step validate --op-name {op_name} --task-name {task_name} --attempt {attempt}
 ```
 
-> 注意：Gate-V 只校验”当前 `{op_name}.json`”对应的验证结果。若任务目录还存在 `{op_name}.json.bak`，则这通常意味着当前 `.json` 是精简用例，**还不能直接宣布最终成功**；必须继续执行 Step 5 中的全量用例验证。
+> 注意：Gate-V 只校验”当前 `{op_name}.json`”对应的验证结果。若任务目录还存在 `{op_name}.json.bak`，则这通常意味着当前 `.json` 是精简用例，**还不能直接宣布最终成功**；全量用例验证由引擎在后续轮次驱动，agent 本轮无需自行触发。
 
 ---
 
