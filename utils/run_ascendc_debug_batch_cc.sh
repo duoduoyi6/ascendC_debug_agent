@@ -38,7 +38,9 @@ MODEL=""
 TIMEOUT_SEC="5400"          # 单任务超时（秒），默认 1.5 小时
 MAX_ATTEMPTS="5"            # ASCENDC_DEBUG_MAX_ATTEMPTS 默认值
 MAX_RESUMES="3"             # pause_turn 最大恢复次数
-MAX_TURNS=""                # 单 attempt agentic turn 数硬上限；空=用引擎默认 180（见 engine/__main__.py）。模型无关，是失控（cache_read/cost 累积）的治本闸
+MAX_TURNS="240"             # 单 attempt agentic turn 数硬上限；默认 240。模型无关，是失控（cache_read/cost 累积）的治本闸
+MAX_TASK_TURNS="720"        # 跨 attempt 累计 agentic turn 数硬上限；默认 720
+KB_PATH=""                  # success 且无作弊时候选知识入库路径；空=不启用
 AGENT_TIMEOUT_SEC=""        # 单次 diagnose agent 调用超时（秒，空=不限）；引擎管 wall-clock
 STALE_AFTER_FAILURE_SEC="3600"   # 失败后停滞多久判定为 stale
 STALE_CHECK_INTERVAL_SEC="60"    # 停滞检测间隔
@@ -65,6 +67,8 @@ while [[ $# -gt 0 ]]; do
         --max-resumes)            MAX_RESUMES="$2"; shift 2 ;;
         --agent-timeout)          AGENT_TIMEOUT_SEC="$2"; shift 2 ;;
         --max-turns)              MAX_TURNS="$2"; shift 2 ;;
+        --max-task-turns)         MAX_TASK_TURNS="$2"; shift 2 ;;
+        --kb-path)                KB_PATH="$2"; shift 2 ;;
         --stale-after-failure)    STALE_AFTER_FAILURE_SEC="$2"; shift 2 ;;
         --stale-check-interval)   STALE_CHECK_INTERVAL_SEC="$2"; shift 2 ;;
         --workdir)                WORKDIR_IN_CONTAINER="$2"; shift 2 ;;
@@ -148,6 +152,9 @@ done
     echo "- claude env: ${CLAUDE_ENV_SH:-<none>}"
     echo "- tilelang env: $TILELANG_ENV_SH"
     echo "- timeout: ${TIMEOUT_SEC}s/task"
+    echo "- max_turns: ${MAX_TURNS:-<engine default>}"
+    echo "- max_task_turns: ${MAX_TASK_TURNS:-<none>}"
+    echo "- kb_path: ${KB_PATH:-<none>}"
     echo "- stale_after_failure: ${STALE_AFTER_FAILURE_SEC}s"
     echo "- start: $(date '+%F %T')"
     echo
@@ -380,6 +387,21 @@ cleanup_task_processes() {
             set +e
             target="$1"
             token="$2"
+            safe_token=""
+            is_safe_token() {
+                case "$1" in
+                    ""|engine|python|python3|claude|bash|sh|timeout|docker|make|cmake|gmake|ninja)
+                        return 1
+                        ;;
+                esac
+                [ "${#1}" -ge 12 ] || return 1
+                return 0
+            }
+            if is_safe_token "$token"; then
+                safe_token="$token"
+            elif [ -n "$token" ]; then
+                echo "[cleanup] skip unsafe broad token=$token"
+            fi
             kill_by_pattern() {
                 sig="$1"; pat="$2"
                 [ -z "$pat" ] && return 0
@@ -406,14 +428,67 @@ cleanup_task_processes() {
                 done
             }
             kill_by_pattern TERM "$target"
-            kill_by_pattern TERM "$token"
+            kill_by_pattern TERM "$safe_token"
             kill_by_cwd TERM
             sleep 2
             kill_by_pattern KILL "$target"
-            kill_by_pattern KILL "$token"
+            kill_by_pattern KILL "$safe_token"
             kill_by_cwd KILL
         ' _ "$task_dir" "$token" || true
     } >> "$wlog" 2>&1
+}
+
+format_epoch_for_ausearch() {
+    local epoch="$1"
+    date -d "@$epoch" '+%m/%d/%Y %T' 2>/dev/null || date '+%m/%d/%Y %T'
+}
+
+collect_signal_audit_evidence() {
+    local task_dir="$1" op_name="$2" status="$3" start_epoch="$4" end_epoch="$5" host_pid="$6" wlog="$7"
+    local audit_dir="$task_dir/precision_tuning/signal_audit"
+    local ts te out raw_tail
+    mkdir -p "$audit_dir"
+    ts=$(format_epoch_for_ausearch "$((start_epoch > 120 ? start_epoch - 120 : start_epoch))")
+    te=$(format_epoch_for_ausearch "$((end_epoch + 120))")
+    out="$audit_dir/rc${status}_$(date '+%Y%m%d_%H%M%S').txt"
+    raw_tail="$audit_dir/rc${status}_audit_raw_tail_$(date '+%Y%m%d_%H%M%S').log"
+    {
+        echo "op_name=$op_name"
+        echo "task_dir=$task_dir"
+        echo "engine_rc=$status"
+        echo "host_cmd_pid=${host_pid:-unknown}"
+        echo "task_start_epoch=$start_epoch"
+        echo "task_end_epoch=$end_epoch"
+        echo "audit_window_start=$ts"
+        echo "audit_window_end=$te"
+        echo
+        echo "## auditctl -s"
+        auditctl -s 2>&1 || true
+        echo
+        echo "## auditctl -l"
+        auditctl -l 2>&1 || true
+        echo
+        echo "## host process snapshot"
+        if [[ -n "${host_pid:-}" ]]; then
+            ps -o pid,ppid,pgid,sid,stat,lstart,etime,comm,args -p "$host_pid" 2>&1 || true
+        else
+            echo "(host_cmd_pid unavailable)"
+        fi
+        echo
+        echo "## ausearch -k proc_kill"
+        if command -v ausearch >/dev/null 2>&1; then
+            ausearch -k proc_kill -ts "$ts" -te "$te" -i 2>&1 || true
+        else
+            echo "ausearch not found"
+        fi
+        echo
+        echo "## raw audit tail path"
+        echo "$raw_tail"
+    } > "$out" 2>&1
+    if [[ -r /var/log/audit/audit.log ]]; then
+        tail -5000 /var/log/audit/audit.log 2>/dev/null | grep 'proc_kill' > "$raw_tail" 2>/dev/null || true
+    fi
+    echo "[signal-audit] rc=$status host_cmd_pid=${host_pid:-unknown} evidence=$out raw_tail=$raw_tail" >> "$wlog"
 }
 
 # ══════════════════════════════════════════════════════════════════
@@ -444,17 +519,20 @@ run_engine_turn() {
                 claude_env="$1"; tilelang_env="$2"; workdir="$3"; skill_dir="$4"
                 task_dir="$5"; op_name="$6"; agent="$7"; npu="$8"
                 model="$9"; claude_bin="${10}"; allowed_tools="${11}"
-                agent_timeout="${12}"
-                entry_failure_type="${13}"; max_turns="${14}"
+                agent_timeout="${12}"; entry_failure_type="${13}"
+                max_turns="${14}"; max_task_turns="${15}"; kb_path="${16}"
 
                 [ -n "$claude_env" ] && [ -f "$claude_env" ] && source "$claude_env"
                 [ -f "$tilelang_env" ] && source "$tilelang_env"
                 cd "$workdir"
 
-                model_arg=""; [ -n "$model" ] && model_arg="--model $model"
-                atimeout_arg=""; [ -n "$agent_timeout" ] && atimeout_arg="--agent-timeout-sec $agent_timeout"
-                entry_arg=""; [ -n "$entry_failure_type" ] && entry_arg="--entry-failure-type $entry_failure_type"
-                mt_arg=""; [ -n "$max_turns" ] && mt_arg="--max-turns $max_turns"
+                extra_args=()
+                [ -n "$model" ] && extra_args+=(--model "$model")
+                [ -n "$agent_timeout" ] && extra_args+=(--agent-timeout-sec "$agent_timeout")
+                [ -n "$entry_failure_type" ] && extra_args+=(--entry-failure-type "$entry_failure_type")
+                [ -n "$max_turns" ] && extra_args+=(--max-turns "$max_turns")
+                [ -n "$max_task_turns" ] && extra_args+=(--max-task-turns "$max_task_turns")
+                [ -n "$kb_path" ] && extra_args+=(--kb-path "$kb_path")
 
                 PYTHONPATH="$skill_dir${PYTHONPATH:+:$PYTHONPATH}" \
                 python3 -m engine "$task_dir" \
@@ -464,12 +542,15 @@ run_engine_turn() {
                     --workdir "$workdir" \
                     --claude-bin "$claude_bin" \
                     --allowed-tools "$allowed_tools" \
-                    $model_arg $atimeout_arg $entry_arg $mt_arg
+                    "${extra_args[@]}"
             ' _ "$CLAUDE_ENV_SH" "$TILELANG_ENV_SH" "$WORKDIR_IN_CONTAINER" "$skill_dir" \
                 "$task_dir" "$op_name" "$agent_short" "$npu" \
                 "${MODEL:-}" "$CLAUDE_BIN" "$ALLOWED_TOOLS" \
-                "${AGENT_TIMEOUT_SEC:-}" "$ENTRY_FAILURE_TYPE" "$MAX_TURNS" >> "$wlog" 2>&1 &
+                "${AGENT_TIMEOUT_SEC:-}" "$ENTRY_FAILURE_TYPE" "$MAX_TURNS" \
+                "$MAX_TASK_TURNS" "$KB_PATH" >> "$wlog" 2>&1 &
     local cmd_pid=$!
+    LAST_ENGINE_HOST_PID="$cmd_pid"
+    echo "[engine] host_cmd_pid=$cmd_pid host_worker_pid=$$ host_parent_pid=$PPID" >> "$wlog"
     local turn_status=0 stale_stop=0
 
     # 停滞检测轮询（监控 runner 进程；runner 内部 spawn 的 claude/编译子进程由
@@ -479,7 +560,7 @@ run_engine_turn() {
         kill -0 "$cmd_pid" 2>/dev/null || break
         if should_stop_stale_after_failure "$task_dir" "$wlog"; then
             stale_stop=1
-            cleanup_task_processes "$container" "$task_dir" "engine" "$wlog"
+            cleanup_task_processes "$container" "$task_dir" "" "$wlog"
             kill -TERM "$cmd_pid" 2>/dev/null || true
             sleep 2
             kill -KILL "$cmd_pid" 2>/dev/null || true
@@ -536,8 +617,16 @@ run_worker() {
             echo "[task] start=$start_human"
         } >> "$wlog"
 
+        # ── 反作弊基线：在 engine/agent 介入前快照 reference/wrapper hash。
+        # anticheat.py snapshot 保留既有 baseline，不覆盖；因此重试/续跑不会污染基线。
+        docker exec "$container" bash -lc "
+            cd '$WORKDIR_IN_CONTAINER'
+            python3 '$ANTICHEAT_SCRIPT' snapshot '$task_dir' --json
+        " >> "$wlog" 2>&1 || true
+
         # ── 单次引擎调用（方案 C：引擎自管 attempt 循环 / 漂移 / 退出产物） ──
         status=0
+        LAST_ENGINE_HOST_PID=""
         set +e
         run_engine_turn "$container" "$npu" "$task_dir" "$op_name" "$wlog"
         status=$?
@@ -547,9 +636,14 @@ run_worker() {
         end_human=$(date '+%F %T')
         elapsed=$((end - start))
 
-        # 超时后清理残留进程（runner + 其 spawn 的 claude/编译子进程）
+        if [[ "$status" -eq 137 || "$status" -eq 143 ]]; then
+            collect_signal_audit_evidence "$task_dir" "$op_name" "$status" "$start" "$end" "${LAST_ENGINE_HOST_PID:-}" "$wlog"
+        fi
+
+        # 异常退出后清理残留进程（runner + 其 spawn 的 claude/编译子进程）。
+        # 只按 task_dir/cwd 清理；不要用 "engine" 这类宽 token 误杀同容器其它任务。
         if [[ "$status" -eq 124 || "$status" -eq 137 || "$status" -eq 143 ]]; then
-            cleanup_task_processes "$container" "$task_dir" "engine" "$wlog"
+            cleanup_task_processes "$container" "$task_dir" "" "$wlog"
         fi
 
         local session_outcome
@@ -582,7 +676,21 @@ try:
 except Exception:
     print('')
 " 2>/dev/null || echo "")
-        [[ -n "$cheat_json" ]] && echo "$cheat_json" > "$task_dir/_anticheat.json"
+        if [[ -n "$cheat_json" ]]; then
+            echo "$cheat_json" > "$task_dir/_anticheat.json"
+            # _anticheat.json 是 engine 退出后的后置事实源；写入后重建 exit artifacts，
+            # 让 debug_status/reportable_success 能反映 post-run reference/hash 检测。
+            docker exec "$container" bash -lc "
+                cd '$WORKDIR_IN_CONTAINER'
+                PYTHONPATH='skills/ascendc/ascendc-debug'\${PYTHONPATH:+:\$PYTHONPATH} \
+                python3 - '$task_dir' <<'PY'
+import sys
+from pathlib import Path
+from engine.exit_artifacts import write_exit_artifacts
+write_exit_artifacts(Path(sys.argv[1]))
+PY
+            " >> "$wlog" 2>&1 || true
+        fi
 
         cheat_mark=""
         if [[ "$cheat_verdict" == "CHEAT" ]]; then
@@ -602,9 +710,15 @@ except Exception:
                 *)                             icon="⚠ $session_outcome${cheat_mark}" ;;
             esac
             echo "[${container}@npu${npu}] ✅ ${op_name} session_outcome=${session_outcome} (${elapsed}s)"
-        elif [[ "$status" -eq 124 || "$status" -eq 137 || "$status" -eq 143 ]]; then
-            icon="⏱ 超时(engine)${cheat_mark}"
+        elif [[ "$status" -eq 124 ]]; then
+            icon="⏱ engine_timeout${cheat_mark}"
             echo "[${container}@npu${npu}] ⏱ ${op_name} ENGINE_TIMEOUT (${elapsed}s)"
+        elif [[ "$status" -eq 143 ]]; then
+            icon="🛑 terminated_by_sigterm${cheat_mark}"
+            echo "[${container}@npu${npu}] 🛑 ${op_name} ENGINE_SIGTERM (${elapsed}s)"
+        elif [[ "$status" -eq 137 ]]; then
+            icon="💥 killed_by_sigkill${cheat_mark}"
+            echo "[${container}@npu${npu}] 💥 ${op_name} ENGINE_SIGKILL (${elapsed}s)"
         elif [[ "$status" -eq 86 ]]; then
             icon="🧊 stale_after_failure${cheat_mark}"
             echo "[${container}@npu${npu}] 🧊 ${op_name} STALE (${elapsed}s)"
@@ -649,7 +763,9 @@ for p in "${pids[@]}"; do wait "$p" || true; done
 SUCCESS=$(grep_count "✅ success" "$REPORT")
 STOPPED_LOOP=$(grep_count "⛔ stopped_by_loop_limit" "$REPORT")
 SKIPPED=$(grep_count "⊘ skipped" "$REPORT")
-TIMEOUT_CNT=$(grep_count "⏱ 超时" "$REPORT")
+TIMEOUT_CNT=$(grep_count "⏱ engine_timeout" "$REPORT")
+SIGTERM_CNT=$(grep_count "🛑 terminated_by_sigterm" "$REPORT")
+SIGKILL_CNT=$(grep_count "💥 killed_by_sigkill" "$REPORT")
 STALE_CNT=$(grep_count "🧊 stale" "$REPORT")
 FAIL=$(grep_count "❌ " "$REPORT")
 PROVIDER_API=$(grep_count "🚧 provider_api_error" "$REPORT")
@@ -664,6 +780,8 @@ CHEAT=$(grep_count "🚨 CHEAT" "$REPORT")
     echo "- stopped_by_loop_limit: $STOPPED_LOOP"
     echo "- skipped_*: $SKIPPED"
     echo "- engine timeout: $TIMEOUT_CNT"
+    echo "- terminated_by_sigterm: $SIGTERM_CNT"
+    echo "- killed_by_sigkill: $SIGKILL_CNT"
     echo "- stale_after_failure: $STALE_CNT"
     echo "- provider_api_error: $PROVIDER_API"
     echo "- failed / crashed / stopped_* / engine_rc!=0: $FAIL"
@@ -676,7 +794,7 @@ CHEAT=$(grep_count "🚨 CHEAT" "$REPORT")
 } >> "$REPORT"
 
 echo "================================================================"
-echo "完成: SUCCESS=$SUCCESS TIMEOUT=$TIMEOUT_CNT STALE=$STALE_CNT FAILED=$FAIL CHEAT=$CHEAT / 共 $TOTAL"
+echo "完成: SUCCESS=$SUCCESS TIMEOUT=$TIMEOUT_CNT SIGTERM=$SIGTERM_CNT SIGKILL=$SIGKILL_CNT STALE=$STALE_CNT FAILED=$FAIL CHEAT=$CHEAT / 共 $TOTAL"
 if [[ -s "$FATAL" ]]; then
     echo "全局熔断: $(cat "$FATAL")"
 fi

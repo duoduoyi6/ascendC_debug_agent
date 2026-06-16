@@ -2,7 +2,7 @@
 
 引擎 next_action 里 forensics/validate 是确定性 py_action (runner 直接跑 precision_gate.py)，
 **唯一需要拉起 agent 的是 diagnose_and_fix**。本模块把该 Action 翻译成一次 `claude --bare -p`
-调用 (命令形态对齐 utils/run_ascendc_debug_batch_cc.sh::run_claude_turn)，做「单个 attempt 的
+调用 (命令形态对齐批处理脚本的 Claude CLI 调用约定)，做「单个 attempt 的
 诊断 + 改 kernel」，改完进程退出，控制权交回 runner (runner 随后跑 Gate-V 客观判定这一轮)。
 
 方案 C 的核心边界 (防 reward-hack):
@@ -55,6 +55,8 @@ _SINGLE_ROUND_CONSTRAINT = """
 - 读取上下文采用按需原则: 不要全文读取 SKILL.md、branch_precision.py、CANN API 文档、
   build/eval 日志或 .json 大文件，优先用 Grep/Read offset+limit/sed/head/tail 定位
   当前根因相关片段；只有诊断必须时才扩大读取范围。
+- 知识库检索由 engine 在本轮 diagnose 前确定性执行，并已在 prompt 中注入摘要；
+  不要重复运行 precision_knowledge.py search。若没有摘要，按当前 forensics/code 证据继续。
 - Bash 命令应有明确诊断目的；长输出请重定向到文件并查看摘要/关键片段，避免完整递归
   grep、完整编译/验证输出反复进入上下文。
 - 修复保持聚焦、最小且可解释；可以按根因需要修改 {task_dir}/kernel/ 下相关文件。
@@ -95,6 +97,50 @@ def _cheat_warning(task_dir: Path) -> str:
     )
 
 
+def _knowledge_search_context(task_dir: Path, attempt: int) -> str:
+    """Return a compact KB retrieval summary injected by engine, if present."""
+    path = task_dir / "precision_tuning" / "knowledge_search_log.json"
+    if not path.exists():
+        return ""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return ""
+    if not isinstance(data, list):
+        return ""
+    entries = [
+        e for e in data
+        if isinstance(e, dict) and e.get("attempt") == attempt
+    ][-2:]
+    if not entries:
+        return ""
+
+    lines = [
+        "\n【引擎知识库检索摘要】",
+        f"- log_path: {path}",
+        "- 你应参考这些命中项，但根因仍必须由 forensics/code 证据验证。",
+    ]
+    for entry in entries:
+        query = entry.get("query") or {}
+        lines.append(
+            f"- call_index={entry.get('call_index')} "
+            f"op_type={query.get('op_type')} pattern={query.get('pattern')} "
+            f"position={query.get('position')} "
+            f"matched={entry.get('matched_count')} checklist={entry.get('checklist_count')} "
+            f"fallback={entry.get('fallback_to_full_load')}"
+        )
+        for item in (entry.get("match_reasons") or [])[:3]:
+            title = item.get("title")
+            score = item.get("score")
+            reason = ",".join(str(x) for x in (item.get("reason") or [])[:4])
+            if title:
+                lines.append(f"  - {title} (score={score}, reason={reason})")
+        if not (entry.get("match_reasons") or []) and entry.get("top_titles"):
+            for title in (entry.get("top_titles") or [])[:3]:
+                lines.append(f"  - {title}")
+    return "\n".join(lines) + "\n"
+
+
 def _build_prompt(task_dir: Path, op_name: str, failure_type: str,
                   attempt: int, npu: Optional[str]) -> str:
     """构造收窄到「单个 attempt」的 diagnose prompt。
@@ -112,6 +158,7 @@ def _build_prompt(task_dir: Path, op_name: str, failure_type: str,
         f"  attempt: {attempt}\n"
     )
     return (head + _cheat_warning(task_dir)
+            + _knowledge_search_context(task_dir, attempt)
             + _SINGLE_ROUND_CONSTRAINT.replace("{task_dir}", str(task_dir)))
 
 
@@ -182,7 +229,7 @@ def _build_claude_cmd(prompt: str, *, claude_bin: str, model: Optional[str],
                       allowed_tools: str, result_file: Path,
                       max_turns: Optional[str] = None,
                       effort: Optional[str] = None) -> list:
-    """构造 `claude --bare -p` 命令 (命令形态对齐 cc 脚本 run_claude_turn 的 turn=0 分支)。
+    """构造 `claude --bare -p` 命令。
 
     输出写 result_file (--output-format json)；调用方负责把 stdout 重定向到该文件。
     """

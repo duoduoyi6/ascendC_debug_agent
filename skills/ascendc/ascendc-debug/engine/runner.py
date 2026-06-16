@@ -40,7 +40,7 @@ class RunnerError(RuntimeError):
 
 
 # 引擎可派发的 Action 白名单 (对应 lingxi validate_action)。
-_AVAILABLE_PY_ACTIONS = ("precision_gate",)
+_AVAILABLE_PY_ACTIONS = ("precision_gate", "knowledge_search")
 _AVAILABLE_AGENTS = ("debug_worker",)
 
 
@@ -84,6 +84,14 @@ def _default_dispatcher(
             if not fr["success"]:
                 return {"passed": False, "error": fr.get("error"),
                         "gate": "GATE-FORENSICS-EXEC"}
+        if action.name == "knowledge_search":
+            from engine.knowledge_search import run_knowledge_search
+            return run_knowledge_search(
+                task_dir,
+                kb_path=args.get("kb_path"),
+                op_name=op_name,
+                attempt=attempt,
+            )
         objective = None
         if gate_step == "validate":
             objective = run_objective_validation(task_dir, attempt=attempt)
@@ -166,8 +174,9 @@ def run_debug_session(
     agent_callback: spawn_agent 的执行体 (NPU 上拉起 agent)；mock 时注入。
     dispatcher: 自定义派发器 (UT 注入 mock)；默认 _default_dispatcher。
     deadline_sec: wall-clock 总时长上限 (秒)；None 不限。超时主动 emit timeout 终态。
-    kb_path: 知识库 JSON 路径；非空时在成功终态把候选知识入库 (修复问题 6)。None
-        (默认) 不启用。入库前置见 knowledge_finalize (outcome==success 且无作弊)。
+    kb_path: 知识库 JSON 路径；非空时 precision_failed 每轮 forensics 后做确定性
+        检索，并在成功终态把候选知识入库。None (默认) 不启用。入库前置见
+        knowledge_finalize (outcome==success 且无作弊)。
     _now: 单调时钟注入点 (UT 控制时间)。
 
     幂等/resume: 若 events.jsonl 已有 session_started，不重复写 (据已有事件续跑)。
@@ -226,6 +235,9 @@ def run_debug_session(
             continue
 
         if isinstance(decision, Action):
+            if kb_path and decision.step == "knowledge_search":
+                decision.skill_args = dict(decision.skill_args or {})
+                decision.skill_args["kb_path"] = kb_path
             validate_action(decision)
             action_id = transition.new_action_id()
             transition.record_action_started(task_dir, decision, action_id)
@@ -307,6 +319,9 @@ def _terminate(task_dir: Path, decision, *,
     from engine.exit_artifacts import build_debug_status
     status = build_debug_status(task_dir)
     if kb_path:
+        from engine.knowledge_candidate import ensure_candidate_entry
+        status["knowledge_candidate"] = ensure_candidate_entry(
+            task_dir, kb_path=kb_path, status=status, op_name=op_name)
         from engine.knowledge_finalize import finalize_knowledge
         status["kb_finalize"] = finalize_knowledge(
             task_dir, kb_path=kb_path,

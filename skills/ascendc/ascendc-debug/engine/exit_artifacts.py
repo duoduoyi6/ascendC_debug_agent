@@ -244,10 +244,34 @@ def _anti_cheat_pass(task_dir: Path) -> bool:
     return _anti_cheat_summary(task_dir).get("violations", 0) == 0
 
 
-def _ast_degrade_pass(events: list[dict]) -> Optional[bool]:
+def _post_anticheat_result(task_dir: Path) -> dict:
+    path = Path(task_dir) / "_anticheat.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _ast_degrade_pass_from_post_anticheat(task_dir: Path) -> Optional[bool]:
+    data = _post_anticheat_result(task_dir)
+    ast = ((data.get("details") or {}).get("ast") or {})
+    status = ast.get("status")
+    if status == "pass":
+        return True
+    if status == "fail":
+        return False
+    if status in {"validator_missing", "parse_error"}:
+        return None
+    return None
+
+
+def _ast_degrade_pass(task_dir: Path, events: list[dict]) -> Optional[bool]:
     checks = _latest_validate_checks(events)
     if "ast_degrade_pass" not in checks:
-        return None
+        return _ast_degrade_pass_from_post_anticheat(task_dir)
     if checks.get("ast_validator_errored"):
         return None
     return bool(checks.get("ast_degrade_pass"))
@@ -291,7 +315,7 @@ def build_debug_status(task_dir: Path) -> dict:
     objective_success = _objective_success(
         task_dir, events, state.total_attempts, final_status_path)
     anti_cheat_pass = _anti_cheat_pass(task_dir)
-    ast_degrade_pass = _ast_degrade_pass(events)
+    ast_degrade_pass = _ast_degrade_pass(task_dir, events)
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -682,7 +706,7 @@ def write_exit_artifacts(task_dir: Path) -> tuple[Path, Path]:
 # run_summary.json — 批跑后处理直接消费的机器摘要 (6.11 文档 Tier 2 项 11)。
 #
 # 设计: 独立 JSON，不混入 debug_trace.md (trace 是人读叙事)。聚合 turns / gate /
-# anti_cheat / kb_finalize / forensics，免 batch report 再扫各处日志。
+# anti_cheat / knowledge_candidate / kb_finalize / forensics，免 batch report 再扫各处日志。
 #
 # 成本口径只用 turns (agent_backend 透传的 num_turns)，模型无关，跨模型可比。
 # best-effort: 任何子项读取失败降级为空/None，绝不影响终态。
@@ -750,20 +774,29 @@ def _gate_summary(events: list[dict]) -> dict:
 def _anti_cheat_summary(task_dir: Path) -> dict:
     """cheat_history.json 的 cheating_attempts 计数 (violation/warning 分列)。
 
+    后置 anticheat.py 写出的 _anticheat.json 若为 CHEAT，也计入 violation。
     文件不存在 = 从未触发任何检查 = 全 0 (clean)。解析失败同样降级全 0。
     """
     path = Path(task_dir) / "precision_tuning" / "cheat_history.json"
-    empty = {"total": 0, "violations": 0, "warnings": 0}
+    total = 0
+    violations = 0
+    warnings = 0
     if not path.exists():
-        return empty
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (ValueError, OSError):
-        return empty
-    attempts = data.get("cheating_attempts") or []
+        attempts = []
+    else:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            data = {}
+        attempts = data.get("cheating_attempts") or []
+    total = len(attempts)
     violations = sum(1 for a in attempts if a.get("severity") == "violation")
     warnings = sum(1 for a in attempts if a.get("severity") == "warning")
-    return {"total": len(attempts), "violations": violations, "warnings": warnings}
+    post = _post_anticheat_result(task_dir)
+    if post.get("verdict") == "CHEAT" and violations == 0:
+        total += 1
+        violations += 1
+    return {"total": total, "violations": violations, "warnings": warnings}
 
 
 def _forensics_summary(task_dir: Path, attempts: int) -> dict:
@@ -795,6 +828,7 @@ def build_run_summary(task_dir: Path, status: Optional[dict] = None) -> dict:
         "turns": _turns_summary(events),
         "gate": _gate_summary(events),
         "anti_cheat": _anti_cheat_summary(task_dir),
+        "knowledge_candidate": status.get("knowledge_candidate"),
         "kb_finalize": status.get("kb_finalize"),
         "forensics": _forensics_summary(task_dir, attempts_used),
     }

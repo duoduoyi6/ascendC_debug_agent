@@ -67,10 +67,13 @@ Claude Code 版 AscendC 算子 debug 批量调度脚本。跨多个 Docker 容�
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--agent` | `ascendc-debug-agent-discovery` | agent name（可切换为 `ascendc-debug-agent-constructive`） |
+| `--agent` | `constructive` | agent name；可传 `constructive` / `discovery` 短名或完整 agent spec 名 |
 | `--model` | 环境变量 `ANTHROPIC_MODEL` | Claude 模型 ID |
 | `--max-attempts` | `5` | 单个算子最大 debug 轮数（`ASCENDC_DEBUG_MAX_ATTEMPTS`） |
 | `--max-resumes` | `3` | pause_turn 最大恢复次数 |
+| `--max-turns` | `240` | 单 attempt agentic turn 数硬上限 |
+| `--max-task-turns` | `720` | 跨 attempt 累计 agentic turn 数硬上限 |
+| `--kb-path` | 不启用 | 精度分支每轮检索并注入摘要；success 且无作弊时再入库的知识库 JSON 路径 |
 | `--timeout` | `5400` | 单任务超时秒数（默认 1.5 小时） |
 | `--stale-after-failure` | `3600` | 失败后停滞多久判定为 stale（秒） |
 | `--stale-check-interval` | `60` | 停滞检测轮询间隔（秒） |
@@ -199,9 +202,11 @@ bash utils/run_ascendc_debug_batch_cc.sh \
 - success: 2
 - stopped_by_global_attempt_limit: 1
 - skipped_*: 0
-- claude timeout: 0
+- engine timeout: 0
+- terminated_by_sigterm: 0
+- killed_by_sigkill: 0
 - stale_after_failure: 0
-- failed / crashed / stopped_* / claude_rc!=0: 1
+- failed / crashed / stopped_* / engine_rc!=0: 1
 - 作弊 (🚨 CHEAT, 与 outcome 正交): 1
 - 结束: 2026-05-06 18:45:00
 ```
@@ -220,6 +225,9 @@ bash utils/run_ascendc_debug_batch_cc.sh \
 | `skipped_unsupported_type` | 不在支持的 failure_type 白名单 | ⊘ |
 | `crashed` | agent 异常终止 | ❌ |
 | `timeout` | agent 内部超时 | ⏱ |
+| `engine_timeout` | 外层 `timeout` 达到 `--timeout` 后终止 engine，退出码 124 | ⏱ |
+| `terminated_by_sigterm` | engine/docker exec 收到 SIGTERM，退出码 143；不等同于超时 | 🛑 |
+| `killed_by_sigkill` | engine/docker exec 收到 SIGKILL，退出码 137；常见于强杀或 OOM | 💥 |
 
 反作弊（🚨 CHEAT）与上述 outcome 正交：wrapper 被修改则无论 outcome 如何均判作弊。
 
@@ -232,5 +240,5 @@ bash utils/run_ascendc_debug_batch_cc.sh \
 | Session 管理 | 无（单次执行） | `--session-id` + `--resume` + `MAX_RESUMES` |
 | 停滞检测 | 无 | 文件 mtime + 活跃进程监控 |
 | 致命错误熔断 | 无 | API 401/402/403/quota 检测 |
-| 进程清理 | 无 | TERM→KILL 两阶段清理 |
+| 进程清理 | 无 | TERM→KILL 两阶段清理；engine 路径只按 task_dir/cwd 清理，避免宽 token 误杀同容器其它任务 |
 | 跨分支重入 | 重新调用 codex exec | 新 session_id + `--agent` |
