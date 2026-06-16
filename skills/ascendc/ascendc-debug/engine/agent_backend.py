@@ -52,16 +52,18 @@ _SINGLE_ROUND_CONSTRAINT = """
 - 不要把自测/自评结果写成最终结论；最终 build/eval/classify/precision_gate 由引擎
   在本轮结束后统一执行。诊断中如确有必要，可以运行局部 build/eval/forensics 命令，
   但其结果只作为本轮根因分析证据，不作为流程终态。
-- 读取上下文采用按需原则: 对 SKILL.md、branch_precision.py、CANN API 文档、build/eval
-  日志或 .json 大文件，优先用 Grep/Read offset+limit/sed/head/tail 定位相关片段；
-  只有诊断必须时才扩大读取范围。
+- 读取上下文采用按需原则: 不要全文读取 SKILL.md、branch_precision.py、CANN API 文档、
+  build/eval 日志或 .json 大文件，优先用 Grep/Read offset+limit/sed/head/tail 定位
+  当前根因相关片段；只有诊断必须时才扩大读取范围。
 - Bash 命令应有明确诊断目的；长输出请重定向到文件并查看摘要/关键片段，避免完整递归
   grep、完整编译/验证输出反复进入上下文。
 - 修复保持聚焦、最小且可解释；可以按根因需要修改 {task_dir}/kernel/ 下相关文件。
   完成本轮预期修改后停止，把验证交回引擎。
 本次只做: 按当前 failure_type 走对应分支方法论 (精度走 Phase A→B→C 等) → 诊断根因 →
 最小化修改 {task_dir}/kernel/ 下文件 → 完成即停 (不要追加任何收尾动作)。
-SKILL.md 的分支方法论散文仍须遵循 (Read 取方法论)，仅「编排/循环/退出」段落被本约束覆盖。
+如需参考 SKILL.md，只读取/遵循当前 failure_type 对应的诊断/修复方法论片段。
+不要读取或执行 SKILL.md 中的全局调度、MAX_ATTEMPTS/loop_signal、Gate 验证、
+Step5/Step6/Step7、退出协议、归档、批处理、report 生成等流程章节；这些由 engine 负责。
 ═══════════════════════════════════════════════════════════════
 """
 
@@ -130,11 +132,14 @@ def _classify_claude_result(result_file: Path) -> dict:
 
     api_status = data.get("api_error_status")
     stop_reason = data.get("stop_reason")
+    subtype = data.get("subtype")
     is_error = bool(data.get("is_error"))
     # api_error_status 更具体且是 fatal 判定依据 (对齐 cc 脚本 read_fatal_claude_error)，
     # 优先于泛化的 is_error。真实 claude API 错误两者常同时出现。
     if api_status is not None:
         state = f"api_error_{api_status}"
+    elif is_error and subtype == "error_max_turns":
+        state = "max_turns_exceeded"
     elif is_error:
         state = "claude_error"
     elif stop_reason == "pause_turn":
@@ -145,12 +150,12 @@ def _classify_claude_result(result_file: Path) -> dict:
         "success": state == "ok",
         "claude_state": state,
         "stop_reason": stop_reason,
+        "subtype": subtype,
         "api_error_status": api_status,
         "error": None if state == "ok" else f"claude_state={state}",
     }
-    # 修复 4b-B: 透传本轮 agentic turn 数 (claude --output-format json 顶层 num_turns,
-    # 已实测存在)。next_action 跨 attempt 累加它做任务级 turns 硬闸。非整数/缺失置 None
-    # (累加层按 0 计，不误杀)。turns 模型无关，优于随 --model 浮动的 total_cost_usd。
+    # 透传本轮 agentic turn 数 (claude --output-format json 顶层 num_turns)。
+    # next_action 跨 attempt 累加做任务级 turns 硬闸；非整数/缺失置 None (累加层按 0 计)。
     turns = data.get("num_turns")
     result["agent_turns"] = turns if isinstance(turns, int) else None
     # 项 12b: 透传 agent 本轮最终诊断陈述 (顶层 `result` 字段)，作为 diagnosis_summary
@@ -186,10 +191,7 @@ def _build_claude_cmd(prompt: str, *, claude_bin: str, model: Optional[str],
         cmd += ["--model", model]
     if effort:
         cmd += ["--effort", effort]
-    # 失控治本闸: --max-turns 限制单 attempt 的 agentic turn 数 (官方 CLI flag)。
-    # turns 是模型无关指标——实测失控任务 cache_read 30M/cost 烧光全因 turns 累积
-    # (193/180/152)，而 turns→美元的系数随 --model 浮动，故只用 turns 做硬闸，
-    # 不引入随模型浮动的美元预算闸。
+    # --max-turns: 单 attempt agentic turn 数硬闸，模型无关。
     if max_turns:
         cmd += ["--max-turns", str(max_turns)]
     cmd += [

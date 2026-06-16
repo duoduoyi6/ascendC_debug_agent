@@ -38,8 +38,7 @@ MODEL=""
 TIMEOUT_SEC="5400"          # 单任务超时（秒），默认 1.5 小时
 MAX_ATTEMPTS="5"            # ASCENDC_DEBUG_MAX_ATTEMPTS 默认值
 MAX_RESUMES="3"             # pause_turn 最大恢复次数
-MAX_BUDGET_USD=""           # 单 attempt 预算上限（USD）；空=不启用（--max-budget-usd 未列于官方 CLI reference，可能不被识别）。失控治本闸用 MAX_TURNS
-MAX_TURNS=""                # 单 attempt agentic turn 数硬上限；空=用引擎默认 120（见 engine/__main__.py）。模型无关，是失控（cache_read/cost 累积）的治本闸
+MAX_TURNS=""                # 单 attempt agentic turn 数硬上限；空=用引擎默认 180（见 engine/__main__.py）。模型无关，是失控（cache_read/cost 累积）的治本闸
 AGENT_TIMEOUT_SEC=""        # 单次 diagnose agent 调用超时（秒，空=不限）；引擎管 wall-clock
 STALE_AFTER_FAILURE_SEC="3600"   # 失败后停滞多久判定为 stale
 STALE_CHECK_INTERVAL_SEC="60"    # 停滞检测间隔
@@ -65,7 +64,6 @@ while [[ $# -gt 0 ]]; do
         --max-attempts)           MAX_ATTEMPTS="$2"; shift 2 ;;
         --max-resumes)            MAX_RESUMES="$2"; shift 2 ;;
         --agent-timeout)          AGENT_TIMEOUT_SEC="$2"; shift 2 ;;
-        --max-budget-usd)         MAX_BUDGET_USD="$2"; shift 2 ;;
         --max-turns)              MAX_TURNS="$2"; shift 2 ;;
         --stale-after-failure)    STALE_AFTER_FAILURE_SEC="$2"; shift 2 ;;
         --stale-check-interval)   STALE_CHECK_INTERVAL_SEC="$2"; shift 2 ;;
@@ -419,110 +417,8 @@ cleanup_task_processes() {
 }
 
 # ══════════════════════════════════════════════════════════════════
-# 单次 Claude Code 调用（支持首次和 resume）
-# 【LEGACY / 方案 C 下不再调用】保留备查: 旧「agent 自驱整个 session」模式的拉起原语。
-# 方案 C 改由 run_engine_turn 拉 `python -m engine`，agent 仅做单 attempt 诊断。
-# read_claude_state / read_fatal_claude_error / MAX_RESUMES 同属此旧模式，一并保留未删。
-# ══════════════════════════════════════════════════════════════════
-run_claude_turn() {
-    local container="$1" npu="$2" session_id="$3" turn="$4" prompt="$5" result_file="$6" wlog="$7"
-    local resume_args="--session-id $session_id"
-    if [[ "$turn" -gt 0 ]]; then
-        resume_args="--resume $session_id"
-    fi
-
-    {
-        echo "[claude] turn=$turn result=$result_file args=$resume_args"
-        echo "[claude] start=$(date '+%F %T')"
-    } >> "$wlog"
-
-    set +e
-    timeout --signal=TERM --kill-after=30 "$TIMEOUT_SEC" \
-        docker exec \
-            -e "ASCEND_RT_VISIBLE_DEVICES=$npu" \
-            -e "ASCENDC_DEBUG_MAX_ATTEMPTS=$MAX_ATTEMPTS" \
-            -e "CLAUDE_PROMPT=$prompt" \
-            "$container" bash -lc '
-                set -e
-                claude_env="$1"
-                tilelang_env="$2"
-                workdir="$3"
-                requested_model="$4"
-                turn="$5"
-                session_id="$6"
-                agent="$7"
-                allowed_tools="$8"
-                result_file="$9"
-                claude_bin="${10}"
-                max_budget_usd="${11}"
-
-                [ -n "$claude_env" ] && [ -f "$claude_env" ] && source "$claude_env"
-                [ -f "$tilelang_env" ] && source "$tilelang_env"
-                cd "$workdir"
-
-                model="$requested_model"
-                [ -n "$model" ] || model="${ANTHROPIC_MODEL:-}"
-
-                budget_args=()
-                if [ -n "$max_budget_usd" ]; then
-                    budget_args=(--max-budget-usd "$max_budget_usd")
-                fi
-
-                if [ "$turn" = "0" ]; then
-                    "$claude_bin" --bare -p \
-                        --model "$model" \
-                        "${budget_args[@]}" \
-                        --agent "$agent" \
-                        --session-id "$session_id" \
-                        --add-dir "$workdir" \
-                        --allowedTools "$allowed_tools" \
-                        --output-format json \
-                        "$CLAUDE_PROMPT" \
-                        > "$result_file"
-                else
-                    "$claude_bin" --bare -p \
-                        --model "$model" \
-                        "${budget_args[@]}" \
-                        --resume "$session_id" \
-                        --add-dir "$workdir" \
-                        --allowedTools "$allowed_tools" \
-                        --output-format json \
-                        "$CLAUDE_PROMPT" \
-                        > "$result_file"
-                fi
-            ' _ "$CLAUDE_ENV_SH" "$TILELANG_ENV_SH" "$WORKDIR_IN_CONTAINER" \
-                "${MODEL:-}" "$turn" "$session_id" "$AGENT" "$ALLOWED_TOOLS" \
-                "$result_file" "$CLAUDE_BIN" "$MAX_BUDGET_USD" >> "$wlog" 2>&1 &
-    local cmd_pid=$!
-    local turn_status=0
-    local stale_stop=0
-
-    # 停滞检测轮询
-    while kill -0 "$cmd_pid" 2>/dev/null; do
-        sleep "$STALE_CHECK_INTERVAL_SEC"
-        if ! kill -0 "$cmd_pid" 2>/dev/null; then
-            break
-        fi
-        if should_stop_stale_after_failure "$(dirname "$result_file")" "$wlog"; then
-            stale_stop=1
-            cleanup_task_processes "$container" "$(dirname "$result_file")" "$session_id" "$wlog"
-            kill -TERM "$cmd_pid" 2>/dev/null || true
-            sleep 2
-            kill -KILL "$cmd_pid" 2>/dev/null || true
-            break
-        fi
-    done
-
-    wait "$cmd_pid"
-    turn_status=$?
-    [[ "$stale_stop" -eq 1 ]] && turn_status=86
-    return "$turn_status"
-}
-
-# ══════════════════════════════════════════════════════════════════
 # 单次引擎调用（方案 C：runner 在容器内持主循环，内部逐轮 spawn agent）
-# 复用 run_claude_turn 的「后台跑 + stale 轮询 + 超时清理」骨架，
-# 仅把被监控命令从 claude 换成 `python -m engine`。
+# 后台跑 + stale 轮询 + 超时清理。
 # ══════════════════════════════════════════════════════════════════
 run_engine_turn() {
     local container="$1" npu="$2" task_dir="$3" op_name="$4" wlog="$5"
@@ -548,15 +444,14 @@ run_engine_turn() {
                 claude_env="$1"; tilelang_env="$2"; workdir="$3"; skill_dir="$4"
                 task_dir="$5"; op_name="$6"; agent="$7"; npu="$8"
                 model="$9"; claude_bin="${10}"; allowed_tools="${11}"
-                max_budget="${12}"; agent_timeout="${13}"
-                entry_failure_type="${14}"; max_turns="${15}"
+                agent_timeout="${12}"
+                entry_failure_type="${13}"; max_turns="${14}"
 
                 [ -n "$claude_env" ] && [ -f "$claude_env" ] && source "$claude_env"
                 [ -f "$tilelang_env" ] && source "$tilelang_env"
                 cd "$workdir"
 
                 model_arg=""; [ -n "$model" ] && model_arg="--model $model"
-                budget_arg=""; [ -n "$max_budget" ] && budget_arg="--max-budget-usd $max_budget"
                 atimeout_arg=""; [ -n "$agent_timeout" ] && atimeout_arg="--agent-timeout-sec $agent_timeout"
                 entry_arg=""; [ -n "$entry_failure_type" ] && entry_arg="--entry-failure-type $entry_failure_type"
                 mt_arg=""; [ -n "$max_turns" ] && mt_arg="--max-turns $max_turns"
@@ -569,11 +464,11 @@ run_engine_turn() {
                     --workdir "$workdir" \
                     --claude-bin "$claude_bin" \
                     --allowed-tools "$allowed_tools" \
-                    $model_arg $budget_arg $atimeout_arg $entry_arg $mt_arg
+                    $model_arg $atimeout_arg $entry_arg $mt_arg
             ' _ "$CLAUDE_ENV_SH" "$TILELANG_ENV_SH" "$WORKDIR_IN_CONTAINER" "$skill_dir" \
                 "$task_dir" "$op_name" "$agent_short" "$npu" \
                 "${MODEL:-}" "$CLAUDE_BIN" "$ALLOWED_TOOLS" \
-                "$MAX_BUDGET_USD" "${AGENT_TIMEOUT_SEC:-}" "$ENTRY_FAILURE_TYPE" "$MAX_TURNS" >> "$wlog" 2>&1 &
+                "${AGENT_TIMEOUT_SEC:-}" "$ENTRY_FAILURE_TYPE" "$MAX_TURNS" >> "$wlog" 2>&1 &
     local cmd_pid=$!
     local turn_status=0 stale_stop=0
 

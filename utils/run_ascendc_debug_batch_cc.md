@@ -71,7 +71,6 @@ Claude Code 版 AscendC 算子 debug 批量调度脚本。跨多个 Docker 容�
 | `--model` | 环境变量 `ANTHROPIC_MODEL` | Claude 模型 ID |
 | `--max-attempts` | `5` | 单个算子最大 debug 轮数（`ASCENDC_DEBUG_MAX_ATTEMPTS`） |
 | `--max-resumes` | `3` | pause_turn 最大恢复次数 |
-| `--max-budget-usd` | 不限 | 单任务预算上限（美元） |
 | `--timeout` | `5400` | 单任务超时秒数（默认 1.5 小时） |
 | `--stale-after-failure` | `3600` | 失败后停滞多久判定为 stale（秒） |
 | `--stale-check-interval` | `60` | 停滞检测轮询间隔（秒） |

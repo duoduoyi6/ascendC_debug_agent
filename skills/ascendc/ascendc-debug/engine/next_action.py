@@ -61,8 +61,7 @@ def _max_task_turns() -> Optional[int]:
     """任务级累计 agentic turn 数硬闸 (修复 4b-B 方案B)。
 
     默认 None=不启用 (向后兼容)；env ASCENDC_DEBUG_MAX_TASK_TURNS=<N>=启用。
-    用 turns 而非 total_cost_usd: turns 模型无关，而 turns→美元系数随 --model 浮动
-    (批跑切多种模型)，故跨 attempt 累计闸也统一用 turns (与单 attempt --max-turns 同量纲)。
+    用 turns 而非金额: turns 模型无关，与单 attempt --max-turns 同量纲，批跑切模型时不漂移。
     """
     raw = os.environ.get("ASCENDC_DEBUG_MAX_TASK_TURNS")
     if raw is None or raw == "":
@@ -287,6 +286,22 @@ def _failed_diagnose_calls_this_attempt(state: DebugState) -> int:
     return count
 
 
+def _diagnose_budget_exceeded_this_attempt(state: DebugState) -> Optional[int]:
+    """Return turns from the latest diagnose max-turns hit in the current attempt."""
+    for e in reversed(state.events):
+        if e.get("type") == "attempt_started":
+            return None
+        if e.get("type") != "action_completed":
+            continue
+        if (e.get("action") or {}).get("step") != "diagnose_and_fix":
+            continue
+        result = e.get("result") or {}
+        if result.get("claude_state") == "max_turns_exceeded":
+            turns = result.get("agent_turns")
+            return turns if isinstance(turns, int) else 0
+    return None
+
+
 def _has_attempt_started_event(state: DebugState) -> bool:
     return any(e.get("type") == "attempt_started" for e in state.events)
 
@@ -379,6 +394,18 @@ def debug_next_action(state: DebugState, gate_result: Optional[GateResult] = Non
         and "diagnose_and_fix" not in completed
         and "validate" not in completed
     ):
+        exceeded_turns = _diagnose_budget_exceeded_this_attempt(state)
+        if exceeded_turns is not None:
+            return Done(
+                session_outcome="stopped_by_budget",
+                reason=(
+                    "diagnose agent hit --max-turns"
+                    f" (agent_turns={exceeded_turns})，停止本任务防重复重试"
+                ),
+            )
+        limited = _budget_limit_decision(state, ft)
+        if limited is not None and _total_agent_turns(state) > 0:
+            return limited
         failed_agent_calls = _failed_diagnose_calls_this_attempt(state)
         if failed_agent_calls > _max_agent_retries_per_attempt():
             return Abort(

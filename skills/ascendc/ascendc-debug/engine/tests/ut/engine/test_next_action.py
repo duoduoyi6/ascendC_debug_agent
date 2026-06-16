@@ -373,10 +373,9 @@ class TestResumeReconstructsGate(unittest.TestCase):
 
 
 class TestTaskTurnsBudget(unittest.TestCase):
-    """修复 4b-B: 跨 attempt 累计 turns 闸 (默认 None 不启用)。
+    """跨 attempt 累计 turns 闸。
 
-    用 num_turns 累加 (agent_backend 透传的 agent_turns)，而非 total_cost_usd——
-    turns 模型无关，turns→美元系数随 --model 浮动。撞轮次上限优先归 loop_limit，
+    用 num_turns 累加 (agent_backend 透传的 agent_turns)，turns 模型无关。撞轮次上限优先归 loop_limit，
     仅未撞轮次但累计 turns 超标才归 stopped_by_budget；gate PASS/STOP 不经此闸 (H1)。
     """
 
