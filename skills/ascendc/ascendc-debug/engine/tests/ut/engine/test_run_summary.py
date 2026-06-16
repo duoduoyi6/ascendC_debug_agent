@@ -2,7 +2,7 @@
 kb_finalize/forensics)，供 batch report 程序化消费。
 
 验收点 (6.11 文档 Tier 2 项 11):
-  - turns 聚合只用 num_turns (agent_turns)，不含任何 usd 字段 (跨模型不可比)。
+  - turns 聚合只用 num_turns (agent_turns)，模型无关，跨模型可比。
   - turns 按 attempt 拆分，缺失/非正整数按 0 计。
   - gate 取各轮 validate 的 loop_signal/stop_reason_code + 最终终判信号。
   - anti_cheat 按 severity 计数 violation/warning。
@@ -62,7 +62,7 @@ class TestRunSummary(unittest.TestCase):
     def test_no_usd_field_anywhere(self) -> None:
         self._two_attempt_session()
         s = build_run_summary(self.task_dir)
-        # 整份摘要不得出现任何 usd/cost 字样 (跨模型不可比，明确剔除)。
+        # 护栏: 输出字段不得包含 usd/cost 字样。
         blob = json.dumps(s, ensure_ascii=False).lower()
         self.assertNotIn("usd", blob)
         self.assertNotIn("cost", blob)

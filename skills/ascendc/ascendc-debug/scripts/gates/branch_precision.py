@@ -59,7 +59,18 @@ class _LegacyPrecisionChecker:
                 with open(path) as f:
                     r = json.load(f)
                 checks["report_parseable"] = True
-                checks["status_completed"] = r.get("status") == "completed"
+                status = r.get("status")
+                if status in {"build_failed", "import_failed", "forensics_unavailable"}:
+                    checks = {
+                        "report_exists": True,
+                        "report_parseable": True,
+                        "diagnostic_report_available": True,
+                        "status_allows_diagnose": True,
+                        "has_primary_hint": bool(r.get("primary_hint")),
+                        "attempt_matches": r.get("attempt", -1) == self.attempt,
+                    }
+                    return self._result("GATE-F", checks)
+                checks["status_completed"] = status == "completed"
                 checks["has_primary_hint"] = bool(r.get("primary_hint"))
                 checks["has_outputs"] = len(r.get("outputs", [])) > 0
                 if checks["has_outputs"]:

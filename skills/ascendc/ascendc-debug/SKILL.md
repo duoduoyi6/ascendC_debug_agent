@@ -4,14 +4,6 @@ description: >
   修复 AscendC 算子的 build / import / runtime / timeout / precision 五类失败。
   由 ascendc-debug-agent-discovery 独立调用。
   通过取证 + Agent 深度分析 + 代码修复 + 重新验证的循环实现修复。
-subagent:
-  enabled: true
-  agent_type: general
-  reason: >
-    覆盖 AscendC build / import / runtime / timeout / precision 五类失败。
-    每类失败都涉及取证→深度分析→修复→验证的多步循环,
-    需要 Agent 结合数值/日志证据和代码理解做深度推理。
-    failure_type 变化时 Gate-V 自动切换到对应分支继续 debug, 直到 success 或达到 MAX_ATTEMPTS。
 ---
 
 ## What I do

@@ -70,7 +70,7 @@ LoopSignal = Literal["PASS", "CONTINUE", "STOP"]
 # 是旧「漂移=session 结束」语义的产物，在新「漂移=续跑」模型下不作为单 session 终态
 # (REWRITE_PLAN §2.2)，故不纳入闭集。Step 8 同步修订 discovery.md + 情景总览.md。
 # stopped_by_budget (6.11 修复 4b-B): 跨 attempt 累计 turns 超任务级硬上限而停
-# (用 num_turns 而非 total_cost_usd——turns 模型无关，美元系数随 --model 浮动)。
+# (用 num_turns——turns 模型无关，与 --model 解耦)。
 # degenerate_no_progress (6.11 N6): 连续 N 轮既无 match_rate 改善、又命中作弊/audit
 # 缺产物兜底 (12a + 修复4 的 CONTINUE 叠加)，退化空转早停，防烧满 branch_cap 预算。
 # provider_api_error: diagnose 步 provider API 错误而 Abort (runner._run_main_loop)，

@@ -1,7 +1,7 @@
 """exit_artifacts.py — 退出产物从 events.jsonl 重建 (不靠 LLM 手写)。
 
 REWRITE_PLAN §2.7: runner 抵达终态时调用，从事件流重放生成两份强制退出产物:
-  debug_status.json — 机器可读 verdict (10 键，schema 见 exit-protocols.md §7.2)
+  debug_status.json — 机器可读 verdict + 成功分层 (schema 见 exit-protocols.md §7.2)
   debug_trace.md    — 4 节叙事 (入口快照 / 迭代历史 / Verdict / 产物清单，§7.1)
 
 determinism 对论文 reproducibility 的直接贡献: 退出产物不再靠 LLM 手写 (消除漏写/编造
@@ -162,8 +162,118 @@ def _session_outcome(events: list[dict]) -> str:
     return "crashed"  # escalated (debug 不用) 保守归 crashed
 
 
+def _latest_validate_result(events: list[dict]) -> Optional[dict]:
+    """最后一次 validate action 的 result；无则 None。"""
+    for e in reversed(events):
+        if e.get("type") != "action_completed":
+            continue
+        if (e.get("action") or {}).get("step") == "validate":
+            result = e.get("result") or {}
+            return result if isinstance(result, dict) else None
+    return None
+
+
+def _read_json(path: Path) -> Optional[dict]:
+    try:
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _objective_success_from_validation_file(task_dir: Path, attempts: int) -> Optional[bool]:
+    tuning = Path(task_dir) / "precision_tuning"
+    for attempt in range(attempts - 1, -1, -1):
+        data = _read_json(tuning / f"validation_result_attempt_{attempt}.json")
+        if data is None:
+            continue
+        if "correctness_passed" in data:
+            return bool(data.get("correctness_passed"))
+    return None
+
+
+def _objective_success_from_verify_status(final_status_path: Optional[str]) -> Optional[bool]:
+    if not final_status_path:
+        return None
+    data = _read_json(Path(final_status_path))
+    if data is None:
+        return None
+    verify = data.get("verify") or {}
+    if data.get("failure_type") == "success" and verify.get("status") == "passed":
+        return True
+    if data.get("failure_type") is not None or verify.get("status") is not None:
+        return False
+    return None
+
+
+def _objective_success(
+    task_dir: Path,
+    events: list[dict],
+    attempts: int,
+    final_status_path: Optional[str],
+) -> bool:
+    """客观数值成功，不等价于 clean/reportable success。"""
+    latest_validate = _latest_validate_result(events) or {}
+    objective = latest_validate.get("objective_validation") or {}
+    if isinstance(objective, dict):
+        rc = objective.get("verification_exit_code")
+        if isinstance(rc, int):
+            return rc == 0
+        if "success" in objective:
+            return bool(objective.get("success")) and objective.get("failure_type") == "success"
+    if isinstance(latest_validate.get("verification_exit_code"), int):
+        return latest_validate["verification_exit_code"] == 0
+
+    from_validation = _objective_success_from_validation_file(task_dir, attempts)
+    if from_validation is not None:
+        return from_validation
+    from_status = _objective_success_from_verify_status(final_status_path)
+    return bool(from_status) if from_status is not None else False
+
+
+def _latest_validate_checks(events: list[dict]) -> dict:
+    latest_validate = _latest_validate_result(events) or {}
+    checks = latest_validate.get("checks") or {}
+    return checks if isinstance(checks, dict) else {}
+
+
+def _anti_cheat_pass(task_dir: Path) -> bool:
+    """confirmed violation 为 false；warning 代表 unknown，不算 confirmed cheat。"""
+    return _anti_cheat_summary(task_dir).get("violations", 0) == 0
+
+
+def _ast_degrade_pass(events: list[dict]) -> Optional[bool]:
+    checks = _latest_validate_checks(events)
+    if "ast_degrade_pass" not in checks:
+        return None
+    if checks.get("ast_validator_errored"):
+        return None
+    return bool(checks.get("ast_degrade_pass"))
+
+
+def _reportable_success(
+    session_outcome: str,
+    objective_success: bool,
+    anti_cheat_pass: bool,
+    ast_degrade_pass: Optional[bool],
+    task_dir: Path,
+) -> bool:
+    # KB finalize 的既有口径: cheat_history 中 warning/violation 任一存在都不是 clean。
+    cheat_clean = _anti_cheat_summary(task_dir).get("total", 0) == 0
+    ast_clean = ast_degrade_pass is True
+    return (
+        session_outcome == "success"
+        and objective_success
+        and anti_cheat_pass
+        and cheat_clean
+        and ast_clean
+    )
+
+
 def build_debug_status(task_dir: Path) -> dict:
-    """从 events 派生 debug_status.json 的 10 键 dict (exit-protocols.md §7.2)。"""
+    """从 events 派生 debug_status.json verdict + 成功分层字段。"""
     events = read_events(task_dir)
     state = DebugState.load(task_dir)
     entry_ft = state.entry_failure_type
@@ -177,9 +287,15 @@ def build_debug_status(task_dir: Path) -> dict:
     if final_ft is not None and state.total_attempts > 0:
         final_status_path = _latest_existing_phase8(task_dir, state.total_attempts)
 
+    outcome = _session_outcome(events)
+    objective_success = _objective_success(
+        task_dir, events, state.total_attempts, final_status_path)
+    anti_cheat_pass = _anti_cheat_pass(task_dir)
+    ast_degrade_pass = _ast_degrade_pass(events)
+
     return {
         "schema_version": SCHEMA_VERSION,
-        "session_outcome": _session_outcome(events),
+        "session_outcome": outcome,
         "session_branch": _BRANCH_LABEL.get(entry_ft or "", None),
         "started_at": started_at,
         "ended_at": ended_at,
@@ -187,6 +303,11 @@ def build_debug_status(task_dir: Path) -> dict:
         "entry_failure_type": entry_ft,
         "final_failure_type": final_ft,
         "final_verify_status_path": final_status_path,
+        "objective_success": objective_success,
+        "anti_cheat_pass": anti_cheat_pass,
+        "ast_degrade_pass": ast_degrade_pass,
+        "reportable_success": _reportable_success(
+            outcome, objective_success, anti_cheat_pass, ast_degrade_pass, task_dir),
         "notes": _terminal_reason(term),
     }
 
@@ -563,8 +684,7 @@ def write_exit_artifacts(task_dir: Path) -> tuple[Path, Path]:
 # 设计: 独立 JSON，不混入 debug_trace.md (trace 是人读叙事)。聚合 turns / gate /
 # anti_cheat / kb_finalize / forensics，免 batch report 再扫各处日志。
 #
-# 成本口径只用 turns (agent_backend 透传的 num_turns)，不含 total_cost_usd——
-# 美元随 --model 浮动、跨模型不可比，turns 模型无关 (沿用 Tier 1 同源决策)。
+# 成本口径只用 turns (agent_backend 透传的 num_turns)，模型无关，跨模型可比。
 # best-effort: 任何子项读取失败降级为空/None，绝不影响终态。
 # ===========================================================================
 

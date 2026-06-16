@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -24,6 +25,11 @@ _REPO_ROOT = _ENGINE_DIR.parents[3]
 _MISMATCH_RATIO_RE = re.compile(r"mismatch_ratio=([0-9.]+)%")
 _MAX_DIFF_RE = re.compile(r"max_abs_diff=([0-9.eE+\-]+|inf|-inf|nan)", re.IGNORECASE)
 _CASE_RE = re.compile(r"^case\[(\d+)\]:\s*(.+)$", re.MULTILINE)
+_MODEL_JSON_EXCLUDES = {
+    "debug_status.json",
+    "run_summary.json",
+    "experiment_manifest.json",
+}
 
 
 def _now_iso() -> str:
@@ -102,6 +108,72 @@ def _extract_first_json(text: str) -> dict:
     except json.JSONDecodeError:
         return {}
     return obj if isinstance(obj, dict) else {}
+
+
+def _public_task_json_candidates(task_dir: Path) -> list[Path]:
+    """Top-level task input JSON candidates for legacy model.py that reads model.json."""
+    out: list[Path] = []
+    for path in sorted(Path(task_dir).glob("*.json")):
+        name = path.name
+        if name == "model.json":
+            continue
+        if name in _MODEL_JSON_EXCLUDES:
+            continue
+        if name.startswith(("_", ".")):
+            continue
+        out.append(path)
+    return out
+
+
+def _ensure_model_json_alias(task_dir: Path) -> dict:
+    """Create model.json from the unique public task JSON when legacy model.py requires it.
+
+    Some archived tasks have model.py hard-coded to read "model.json", while the
+    directory only contains an operator-named JSON such as
+    "20_FusedRopeWithQkNormAndKvCacheUpdate.json". Forensics and objective
+    validation both import model.py, so normalize this input before either path.
+    """
+    task_dir = Path(task_dir)
+    target = task_dir / "model.json"
+    if target.exists():
+        return {"created": False, "reason": "model_json_exists", "target": str(target)}
+    if not (task_dir / "model.py").exists():
+        return {"created": False, "reason": "missing_model_py", "target": str(target)}
+
+    candidates = _public_task_json_candidates(task_dir)
+    if len(candidates) != 1:
+        return {
+            "created": False,
+            "reason": "ambiguous_or_missing_task_json",
+            "target": str(target),
+            "candidates": [p.name for p in candidates],
+        }
+    source = candidates[0]
+    try:
+        shutil.copy2(source, target)
+    except OSError as exc:
+        return {
+            "created": False,
+            "reason": "copy_failed",
+            "target": str(target),
+            "source": str(source),
+            "error": str(exc),
+        }
+
+    info = {
+        "created": True,
+        "reason": "missing_model_json_unique_task_json",
+        "target": str(target),
+        "source": str(source),
+    }
+    try:
+        tuning = task_dir / "precision_tuning"
+        tuning.mkdir(parents=True, exist_ok=True)
+        (tuning / "input_normalization.json").write_text(
+            json.dumps(info, indent=2, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+    return info
 
 
 def _case_stats(stdout_text: str) -> tuple[int, int, float]:
@@ -206,6 +278,7 @@ def run_objective_validation(
     """Run build + verification + classify for phase8 attempt artifacts."""
     task_dir = Path(task_dir).resolve()
     repo_root = Path(repo_root or _REPO_ROOT).resolve()
+    input_normalization = _ensure_model_json_alias(task_dir)
     logs_dir = task_dir / ".verify_logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     stdout_path = logs_dir / f"phase8_attempt{attempt}.stdout"
@@ -307,6 +380,7 @@ def run_objective_validation(
         "stderr_path": str(stderr_path),
         "verify_status_path": str(status_path),
         "validation_result_path": str(validation_result_path),
+        "input_normalization": input_normalization,
     }
 
 
@@ -331,6 +405,10 @@ def _forensics_input_hash(task_dir: Path) -> str:
     model_new = task_dir / "model_new_ascendc.py"
     if model_new.exists():
         files.append(model_new)
+    model_json = task_dir / "model.json"
+    if model_json.exists():
+        files.append(model_json)
+    files.extend(_public_task_json_candidates(task_dir))
     for f in sorted(set(files), key=lambda p: str(p)):
         try:
             h.update(str(f.relative_to(task_dir)).encode("utf-8"))
@@ -365,6 +443,101 @@ def _forensics_cache_save(task_dir: Path, *, src_hash: str, attempt: int) -> Non
         pass
 
 
+def _kernel_build_ready(task_dir: Path) -> bool:
+    build_dir = task_dir / "kernel" / "build"
+    if not build_dir.is_dir():
+        return False
+    try:
+        return any(build_dir.rglob("*.so"))
+    except OSError:
+        return False
+
+
+def _run_forensics_prebuild(
+    task_dir: Path,
+    *,
+    attempt: int,
+    repo_root: Path,
+    timeout: Optional[float],
+) -> dict:
+    logs_dir = task_dir / ".verify_logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    stdout_path = logs_dir / f"forensics_build_attempt{attempt}.stdout"
+    stderr_path = logs_dir / f"forensics_build_attempt{attempt}.stderr"
+    stdout_path.write_text("", encoding="utf-8")
+    stderr_path.write_text("", encoding="utf-8")
+
+    env = _repo_env(repo_root)
+    soc_version = env.get("ASCENDC_SOC_VERSION", "Ascend910B3")
+    clean_build = env.get("ASCENDC_DEBUG_FORENSICS_CLEAN_BUILD", "1") != "0"
+    build_cmd = [
+        sys.executable,
+        str(repo_root / "utils" / "build_ascendc.py"),
+        str(task_dir),
+        "-v",
+        soc_version,
+    ]
+    if clean_build:
+        build_cmd.append("--clean")
+
+    rc = _run_logged(
+        build_cmd,
+        cwd=repo_root,
+        env=env,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        title="forensics_prebuild_ascendc",
+        timeout=timeout,
+    )
+    stdout_text = _read(stdout_path)
+    stderr_text = _read(stderr_path)
+    return {
+        "exit_code": rc,
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
+        "stdout_tail": stdout_text[-2000:],
+        "stderr_tail": stderr_text[-2000:],
+        "first_error_lines": (
+            _extract_first_error(stdout_text + "\n" + stderr_text) if rc != 0 else []
+        ),
+    }
+
+
+def _write_forensics_unavailable_report(
+    task_dir: Path,
+    *,
+    attempt: int,
+    status: str,
+    primary_hint: str,
+    error: str,
+    build_result: Optional[dict] = None,
+) -> Path:
+    tuning_dir = task_dir / "precision_tuning"
+    tuning_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": "2.0",
+        "op_name": task_dir.name,
+        "attempt": attempt,
+        "status": status,
+        "error": error,
+        "outputs": [],
+        "primary_hint": primary_hint,
+        "primary_confidence": 0.0,
+        "primary_evidence": error,
+        "source": "engine_forensics_prebuild",
+        "generated_at": _now_iso(),
+    }
+    if build_result is not None:
+        payload["build_exit_code"] = build_result.get("exit_code")
+        payload["stdout_path"] = build_result.get("stdout_path")
+        payload["stderr_path"] = build_result.get("stderr_path")
+        payload["first_error_lines"] = build_result.get("first_error_lines", [])
+        payload["stderr_tail"] = build_result.get("stderr_tail", "")
+    path = tuning_dir / f"forensics_report_{attempt}.json"
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
 def run_forensics(
     task_dir: Path,
     *,
@@ -385,6 +558,7 @@ def run_forensics(
     """
     task_dir = Path(task_dir).resolve()
     repo_root = Path(repo_root or _REPO_ROOT).resolve()
+    input_normalization = _ensure_model_json_alias(task_dir)
     report = task_dir / "precision_tuning" / f"forensics_report_{attempt}.json"
 
     # 建议A: staleness 缓存。当前取证输入 (kernel 源码 + model_new) hash 命中上轮缓存，
@@ -414,7 +588,42 @@ def run_forensics(
                         "error": None,
                         "cached": True,
                         "cached_from_attempt": prev_attempt,
+                        "input_normalization": input_normalization,
                     }
+
+    prebuild_result = None
+    if os.environ.get("ASCENDC_DEBUG_FORENSICS_PREBUILD", "1") != "0":
+        if not _kernel_build_ready(task_dir):
+            prebuild_result = _run_forensics_prebuild(
+                task_dir,
+                attempt=attempt,
+                repo_root=repo_root,
+                timeout=timeout,
+            )
+            if int(prebuild_result.get("exit_code", 1)) != 0:
+                error = (
+                    "forensics prebuild failed; treating build log as diagnostic "
+                    "evidence and continuing to agent"
+                )
+                report_path = _write_forensics_unavailable_report(
+                    task_dir,
+                    attempt=attempt,
+                    status="build_failed",
+                    primary_hint="build_error",
+                    error=error,
+                    build_result=prebuild_result,
+                )
+                return {
+                    "success": True,
+                    "exit_code": prebuild_result.get("exit_code"),
+                    "report_path": str(report_path),
+                    "error": error,
+                    "cached": False,
+                    "forensics_unavailable": True,
+                    "unavailable_reason": "build_failed",
+                    "build_result": prebuild_result,
+                    "input_normalization": input_normalization,
+                }
 
     script = repo_root / "skills" / "ascendc" / "ascendc-debug" / "scripts" / "precision_forensics.py"
     # 第一位置参 = task_name (目录名)，不是 op_name；--task-dir 给绝对路径。
@@ -441,4 +650,6 @@ def run_forensics(
         "report_path": str(report) if report.exists() else None,
         "error": stderr_tail,
         "cached": False,
+        "build_result": prebuild_result,
+        "input_normalization": input_normalization,
     }
