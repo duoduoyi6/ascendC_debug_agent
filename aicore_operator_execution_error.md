@@ -1,5 +1,5 @@
 # AI Core 算子执行报错
-**来源：** https://www.hiascend.com/document/detail/zh/canncommercial/800/developmentguide/maintenref/troubleshooting/troubleshooting_0150.html  
+**来源：** https://www.hiascend.com/document/detail/zh/canncommercial/800/developmentguide/maintenref/troubleshooting/troubleshooting_0150.html
 **产品：** CANN 商用版 8.0.0 — 维护参考 > 故障处理 > 故障案例集 > 算子执行问题
 
 ---
@@ -8,7 +8,7 @@
 
 Runtime 执行报错，在 plog 日志中 Runtime 打印了类似 `fault kernel_name` 和 `func_name` 的关键信息。
 
-plog 日志默认路径：`$HOME/ascend/log/[run|debug]/plog`  
+plog 日志默认路径：`$HOME/ascend/log/[run|debug]/plog`
 日志格式：`plog-pid_yyymmddhhmmss.log`
 
 ### 典型报错日志示例
@@ -57,7 +57,7 @@ plog 日志默认路径：`$HOME/ascend/log/[run|debug]/plog`
 
 ## 处理步骤
 
-该类型错误，**需要联系技术支持定位排查**。  
+该类型错误，**需要联系技术支持定位排查**。
 您可以获取日志后，通过链接联系技术支持。
 
 ---
