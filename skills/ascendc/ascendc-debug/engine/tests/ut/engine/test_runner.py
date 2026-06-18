@@ -115,9 +115,9 @@ class TestFullSession(unittest.TestCase):
         # 首轮 PASS → success。
         status, disp = self._run([_gate("PASS")])
         self.assertEqual(status["session_outcome"], "success")
-        # 走了 forensics → diagnose_and_fix → validate。
+        # precision_failed 序列: forensics → knowledge_search → diagnose_and_fix → validate。
         steps = [s for _, s in disp.calls]
-        self.assertEqual(steps, ["forensics", "diagnose_and_fix", "validate"])
+        self.assertEqual(steps, ["forensics", "knowledge_search", "diagnose_and_fix", "validate"])
 
     def test_session_continue_then_pass(self) -> None:
         # 第一轮 CONTINUE，第二轮 PASS → success，2 轮。

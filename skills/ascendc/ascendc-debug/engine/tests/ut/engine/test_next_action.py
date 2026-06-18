@@ -191,10 +191,21 @@ class TestRoundSequence(unittest.TestCase):
         self.assertEqual(d.step, "forensics")
         self.assertEqual(d.kind, "py_action")
 
-    def test_step_after_forensics_is_spawn(self) -> None:
+    def test_step_after_forensics_is_knowledge_search(self) -> None:
+        # precision_failed 序列: forensics → knowledge_search → diagnose_and_fix → validate
         ft = "precision_failed"
         st = _state(current_ft=ft, total_attempts=1, per_branch={ft: 1},
                     events=[_attempt_ev(ft), _completed_ev("forensics")])
+        d = debug_next_action(st)
+        self.assertIsInstance(d, Action)
+        self.assertEqual(d.step, "knowledge_search")
+        self.assertEqual(d.kind, "py_action")
+
+    def test_step_after_knowledge_search_is_spawn(self) -> None:
+        ft = "precision_failed"
+        st = _state(current_ft=ft, total_attempts=1, per_branch={ft: 1},
+                    events=[_attempt_ev(ft), _completed_ev("forensics"),
+                            _completed_ev("knowledge_search")])
         d = debug_next_action(st)
         self.assertIsInstance(d, Action)
         self.assertEqual(d.step, "diagnose_and_fix")
@@ -204,6 +215,7 @@ class TestRoundSequence(unittest.TestCase):
         ft = "precision_failed"
         st = _state(current_ft=ft, total_attempts=1, per_branch={ft: 1},
                     events=[_attempt_ev(ft), _completed_ev("forensics"),
+                            _completed_ev("knowledge_search"),
                             _completed_ev("diagnose_and_fix")])
         d = debug_next_action(st)
         self.assertIsInstance(d, Action)
@@ -304,16 +316,16 @@ class TestForensicsRetry(unittest.TestCase):
         self.assertIsInstance(d, Done)
         self.assertEqual(d.session_outcome, "stopped_by_gate")
 
-    def test_forensics_success_then_progresses_to_diagnose(self) -> None:
+    def test_forensics_success_then_progresses_to_knowledge_search(self) -> None:
         # 失败后又成功一次: 成功的 forensics 计入 completed，失败计数仍 1 (≤2)
-        # 不触发超限 → 推进到 diagnose_and_fix。
+        # 不触发超限 → precision_failed 序列下推进到 knowledge_search。
         ft = "precision_failed"
         st = _state(current_ft=ft, total_attempts=1, per_branch={ft: 1},
                     events=[_attempt_ev(ft), self._forensics_fail_ev(),
                             _completed_ev("forensics", {"passed": True})])
         d = debug_next_action(st)
         self.assertIsInstance(d, Action)
-        self.assertEqual(d.step, "diagnose_and_fix")
+        self.assertEqual(d.step, "knowledge_search")
 
 
 class TestValidateNoSignalAborts(unittest.TestCase):

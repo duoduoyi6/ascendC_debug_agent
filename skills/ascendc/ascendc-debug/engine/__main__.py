@@ -75,19 +75,23 @@ def main(argv=None) -> int:
                          "使 agent 能访问 skills/ archive_tasks/ 等参考资料")
     ap.add_argument("--agent-timeout-sec", type=float, default=None,
                     help="单次 diagnose agent 调用超时 (秒)")
-    # --max-turns: 单 attempt agentic turn 数硬闸，模型无关。默认 180。
+    # --max-turns: 单 attempt agentic turn 数硬闸，模型无关。
+    # 默认 180：V3 Kimi smoke 中复杂算子在 121 turns 被截断，120 偏紧；180 给
+    # hard case 留出诊断空间，同时保留硬闸，避免回到 240+ 的高 token 风险。
     ap.add_argument("--max-turns", default="180",
                     help="单 attempt agentic turn 数硬上限；默认 180")
-    # 跨 attempt 累计 turns 硬上限 (任务级)。单 attempt 闸 (--max-turns) 压不住多轮累计，
-    # 此闸累加各 attempt 的 num_turns，超阈 Done(stopped_by_budget)。默认 480。
+    # 跨 attempt 累计 turns 硬上限 (任务级)。单 attempt 闸 (--max-turns)
+    # 压不住多轮累计，此闸累加各 attempt 的 num_turns，超阈 Done(stopped_by_budget)。
+    # 默认 480，覆盖 2-4 轮正常修复空间；与单 attempt 闸同量纲。
     ap.add_argument("--max-task-turns", type=int, default=480,
                     help="跨 attempt 累计 agentic turn 数硬上限 (任务级)；默认 480")
     ap.add_argument("--entry-failure-type", default=None,
                     help="首次运行时注入入口 failure_type；例如 precision_failed")
-    # 修复问题 6: KB 入库编排。success 且无作弊 (reportable_success) 时把候选知识
-    # (candidate_kb_entry.json) 入库；默认 None 不启用 (向后兼容)。
+    # KB 编排: precision_failed 每轮 forensics 后先做确定性 search，把命中摘要
+    # 注入 diagnose prompt；success 且无作弊时再把 candidate_kb_entry.json 入库。
+    # 默认 None 不启用 (向后兼容)。
     ap.add_argument("--kb-path", default=None,
-                    help="精度知识库 JSON 路径；配置后 success 终态自动入库，默认不启用")
+                    help="精度知识库 JSON 路径；配置后每轮检索并在 success 终态自动入库，默认不启用")
     args = ap.parse_args(argv)
 
     if args.max_attempts is not None:

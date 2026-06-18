@@ -60,7 +60,7 @@ def _max_forensics_retries_per_attempt() -> int:
 def _max_task_turns() -> Optional[int]:
     """任务级累计 agentic turn 数硬闸 (修复 4b-B 方案B)。
 
-    默认 None=不启用 (向后兼容)；env ASCENDC_DEBUG_MAX_TASK_TURNS=<N>=启用。
+    env 未设时不启用；engine/batch CLI 当前默认会设置 ASCENDC_DEBUG_MAX_TASK_TURNS=480。
     用 turns 而非金额: turns 模型无关，与单 attempt --max-turns 同量纲，批跑切模型时不漂移。
     """
     raw = os.environ.get("ASCENDC_DEBUG_MAX_TASK_TURNS")
@@ -77,7 +77,7 @@ def _max_degenerate_rounds() -> Optional[int]:
     """N6 复合早停阈值: 连续 N 轮退化空转 (作弊/audit 缺产物兜底无改善) 即停。
 
     默认启用 (返回 2)——N6 是 12a/修复4 的「CONTINUE 叠加烧预算」配套防御，二者已
-    默认生效，故其防护也默认生效 (与默认不启用的 turns 闸不同)。
+    默认生效，故其防护也默认生效。
     env ASCENDC_DEBUG_MAX_DEGENERATE_ROUNDS=<N>: N>=1 设阈值；<=0 (或非法) 视为禁用
     (返回 None)，留给需要跑满 branch_cap 观察退化全过程的实验。
     """
@@ -230,10 +230,19 @@ _STOP_OUTCOME = {
 # ---------------------------------------------------------------------------
 # 轮内步骤序列 (一个 attempt 内引擎逐步驱动的 Action 链)。
 # 对齐 agent.md 分工边界: 取证=py_action / 诊断+修复=spawn_agent / Gate-V=py_action。
-#   forensics → diagnose_and_fix → validate
+#   precision_failed: forensics → knowledge_search → diagnose_and_fix → validate
+#   other branches:   forensics → diagnose_and_fix → validate
 # 引擎据「本轮 attempt_started 之后已完成哪些 step」决定下一步。
 # ---------------------------------------------------------------------------
 _ROUND_SEQUENCE = ("forensics", "diagnose_and_fix", "validate")
+_PRECISION_ROUND_SEQUENCE = ("forensics", "knowledge_search",
+                             "diagnose_and_fix", "validate")
+
+
+def _round_sequence(failure_type: str) -> tuple[str, ...]:
+    if failure_type == "precision_failed":
+        return _PRECISION_ROUND_SEQUENCE
+    return _ROUND_SEQUENCE
 
 
 def _completed_steps_this_attempt(state: DebugState) -> set:
@@ -313,7 +322,7 @@ def _budget_limit_decision(state: DebugState, failure_type: str) -> Optional[Don
     if state.branch_attempt(failure_type) >= _branch_cap(failure_type):
         return Done(session_outcome="stopped_by_loop_limit",
                     reason=f"分支 {failure_type} 撞硬上限 {_branch_cap(failure_type)}")
-    # 修复 4b-B: 任务级累计 turns 闸 (默认 None 不启用)。放在 loop_limit 之后——
+    # 修复 4b-B: 任务级累计 turns 闸 (env 未设时不启用)。放在 loop_limit 之后——
     # 撞轮次上限优先归 stopped_by_loop_limit (更精确)，仅未撞轮次但累计 turns 超标时
     # 才归 stopped_by_budget。本函数只在续跑路径 (gate CONTINUE / 兜底) 前被调用，
     # gate PASS/STOP 直接 return 不经此 → 天然满足「终判优先于预算闸」(H1)。
@@ -334,12 +343,20 @@ def _make_action_for_step(step: str, failure_type: str, attempt: int) -> Action:
     """把轮内 step 名构造成具体 Action。
 
     forensics / validate → py_action (跑确定性脚本: precision_gate.py --step)。
+    knowledge_search → py_action (跑 precision_knowledge.py search, 写检索日志)。
     diagnose_and_fix → spawn_agent (拉起 constructive/discovery worker 诊断+改 kernel)。
     """
     if step == "diagnose_and_fix":
         return Action(
             kind="spawn_agent",
             name="debug_worker",
+            step=step,
+            skill_args={"failure_type": failure_type, "attempt": attempt},
+        )
+    if step == "knowledge_search":
+        return Action(
+            kind="py_action",
+            name="knowledge_search",
             step=step,
             skill_args={"failure_type": failure_type, "attempt": attempt},
         )
@@ -480,7 +497,7 @@ def debug_next_action(state: DebugState, gate_result: Optional[GateResult] = Non
             reason=f"forensics 连续失败 {failed_forensics} 次，无法产出取证数据",
         )
 
-    for step in _ROUND_SEQUENCE:
+    for step in _round_sequence(ft):
         if step not in completed:
             return _make_action_for_step(step, ft, state.total_attempts - 1)
 
