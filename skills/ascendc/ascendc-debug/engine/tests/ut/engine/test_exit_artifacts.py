@@ -53,7 +53,9 @@ class TestDebugStatus(unittest.TestCase):
         s = build_debug_status(self.task_dir)
         expected = {"schema_version", "session_outcome", "session_branch",
                     "started_at", "ended_at", "attempts_used", "entry_failure_type",
-                    "final_failure_type", "final_verify_status_path", "notes"}
+                    "final_failure_type", "final_verify_status_path", "notes",
+                    "objective_success", "anti_cheat_pass", "ast_degrade_pass",
+                    "reportable_success"}
         self.assertEqual(set(s), expected)
 
     def test_no_terminal_event_is_crashed(self) -> None:

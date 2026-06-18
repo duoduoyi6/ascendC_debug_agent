@@ -42,6 +42,8 @@ try:
 except (TypeError, ValueError):
     MAX_ATTEMPTS = 5
 
+_PROTECTED_PY_FILES = ("model.py", "model_new_ascendc.py", "model_new_tilelang.py")
+
 
 @dataclass
 class GateOutcome:
@@ -67,7 +69,7 @@ def _sha256(path: Path) -> Optional[str]:
 
 
 def check_anticheat(task_dir: Path) -> dict:
-    """对 model_new_ascendc.py / model_new_tilelang.py 对比 .bench_baseline/ 的 hash。
+    """对 reference/wrapper 文件对比 .bench_baseline/ 的 hash。
 
     若 .bench_baseline/ 不存在（非 bench 环境），跳过并视为通过。
     """
@@ -76,7 +78,7 @@ def check_anticheat(task_dir: Path) -> dict:
         return {"anticheat_baseline_present": False, "anticheat_pass": True}
     result = {"anticheat_baseline_present": True}
     hash_keys = []
-    for name in ("model_new_ascendc.py", "model_new_tilelang.py"):
+    for name in _PROTECTED_PY_FILES:
         bp = baseline_dir / name
         cp = task_dir / name
         if not bp.exists():

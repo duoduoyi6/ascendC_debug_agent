@@ -4,7 +4,7 @@
 两类使用场景共享同一 verify：
 
 1) 精度调优（有 baseline）：调优期间禁止改 Python wrapper
-   - snapshot: 调优前保存 wrapper 副本 + sha256
+   - snapshot: 调优前保存 reference/wrapper 副本 + sha256
    - verify:   hash 对比 + AST 退化检测 + C++ kernel 扫描
    - restore:  检测到作弊时从基线恢复
 
@@ -13,7 +13,7 @@
    - 重点靠 AST + C++ 层扫描捕获 "kernel 目录存在但内部直接调 at::xxx / x.sum() 之类"
 
 检测规则：
-  - HASH_DIFF / DELETED:       wrapper 与 baseline sha256 不一致（仅精度调优场景）
+  - HASH_DIFF / DELETED:       reference/wrapper 与 baseline sha256 不一致（仅精度调优场景）
   - AST_FAIL:type{1-4}:        validate_ascendc_impl.py 命中 4 类 PyTorch 退化
   - CPP_ATEN_CALL:<op>:        kernel/*.cpp|h 里调 at::<非白名单 op>
   - CPP_ATEN_HEADER:<op>:      #include <ATen/ops/<op>.h>（算子头文件基本等于作弊意图）
@@ -43,7 +43,7 @@ import sys
 from pathlib import Path
 
 
-WRAPPER_FILES = ["model_new_ascendc.py", "model_new_tilelang.py"]
+WRAPPER_FILES = ["model.py", "model_new_ascendc.py", "model_new_tilelang.py"]
 DEFAULT_BASELINE_DIRNAME = ".bench_baseline"
 
 # ── C++ kernel 扫描规则 ──
@@ -218,21 +218,29 @@ def cmd_snapshot(args) -> int:
     baseline_dir.mkdir(parents=True, exist_ok=True)
 
     saved = []
+    skipped = []
     for fname in WRAPPER_FILES:
         src = task_dir / fname
         if not src.exists():
             continue
-        shutil.copy2(src, baseline_dir / fname)
-        (baseline_dir / f"{fname}.sha256").write_text(sha256sum(src) + "\n")
+        dst = baseline_dir / fname
+        hash_path = baseline_dir / f"{fname}.sha256"
+        if dst.exists() and hash_path.exists():
+            skipped.append(fname)
+            continue
+        shutil.copy2(src, dst)
+        hash_path.write_text(sha256sum(src) + "\n")
         saved.append(fname)
 
-    result = {"baseline_dir": str(baseline_dir), "saved": saved}
+    result = {"baseline_dir": str(baseline_dir), "saved": saved, "skipped": skipped}
     if args.json:
         print(json.dumps(result, ensure_ascii=False))
     else:
         print(f"[SNAPSHOT] baseline → {baseline_dir}")
         for f in saved:
             print(f"  - {f}")
+        for f in skipped:
+            print(f"  - {f} (existing baseline kept)")
         if not saved:
             print("  (no wrapper files found — nothing to snapshot)")
     return 0

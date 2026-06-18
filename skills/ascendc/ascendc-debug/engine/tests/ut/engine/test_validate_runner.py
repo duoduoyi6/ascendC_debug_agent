@@ -37,8 +37,13 @@ class _FakeForensics:
         self.task_dir = task_dir
         self.calls = 0
 
-    def __call__(self, cmd, cwd=None, env=None, capture_output=False,
-                 text=False, timeout=None, check=False):
+    def __call__(self, cmd, **kwargs):
+        # prebuild step (build_ascendc.py) 不带 --attempt，直接返回成功，不计入 calls。
+        if "--attempt" not in cmd:
+            class _R:
+                returncode = 0
+                stderr = ""
+            return _R()
         self.calls += 1
         # 从 cmd 里取 --attempt 值，产出对应 report (模拟真实脚本行为)。
         attempt = cmd[cmd.index("--attempt") + 1]
