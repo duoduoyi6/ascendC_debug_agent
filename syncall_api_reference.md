@@ -1,5 +1,5 @@
 # SyncAll — Inter-Core Synchronization API Reference
-**Source:** https://www.hiascend.com/document/detail/en/canncommercial/800/apiref/ascendcopapi/atlasascendc_api_07_0204.html
+**Source:** https://www.hiascend.com/document/detail/en/canncommercial/800/apiref/ascendcopapi/atlasascendc_api_07_0204.html  
 **Product:** CANN Commercial Edition 8.0.0 — Ascend C Operator Development API
 
 ---
