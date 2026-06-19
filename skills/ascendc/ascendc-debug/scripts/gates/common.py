@@ -91,6 +91,60 @@ def check_anticheat(task_dir: Path) -> dict:
     return result
 
 
+_cpp_checker_fn = None
+_cpp_checker_loaded = False
+
+
+def _load_cpp_checker():
+    """Lazy-load _check_cpp_regression from scripts/anticheat.py (gates/ 的同级父目录)。
+
+    用 importlib 按文件路径加载，独立于 sys.path。加载失败 (文件缺失/语法错误/无该
+    符号) 返回 None → check_cpp_regression fail-open，不把 gate 卡死。
+    """
+    global _cpp_checker_fn, _cpp_checker_loaded
+    if _cpp_checker_loaded:
+        return _cpp_checker_fn
+    _cpp_checker_loaded = True
+    try:
+        import importlib.util
+        anticheat_path = Path(__file__).resolve().parent.parent / "anticheat.py"
+        if not anticheat_path.exists():
+            return None
+        spec = importlib.util.spec_from_file_location("_anticheat_for_gate", str(anticheat_path))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _cpp_checker_fn = getattr(module, "_check_cpp_regression", None)
+    except Exception:
+        _cpp_checker_fn = None
+    return _cpp_checker_fn
+
+
+def check_cpp_regression(task_dir: Path) -> dict:
+    """C++ kernel 源码扫描 (复用 anticheat._check_cpp_regression，DRY)。
+
+    检测 kernel/*.{cpp,h} 里 at::/torch:: 算子调用、ATen 头文件、禁用 tensor 计算方法、
+    缺 kernel launch (NO_KERNEL_LAUNCH)。这是静态源码扫描 (非 fail-open validator)，
+    命中即确证作弊 (绕过 AscendC kernel 在 C++ 层直接调 torch/aten)。
+
+    checker 加载失败 / 扫描异常 → fail-open (cpp_regression_pass=True，errored 标记)，
+    不卡死 gate。no_kernel_dir → 中性通过 (无可扫描内容，不确证作弊)。
+    """
+    fn = _load_cpp_checker()
+    if fn is None:
+        return {"cpp_checker_present": False, "cpp_regression_pass": True}
+    try:
+        res = fn(task_dir)
+    except Exception:
+        return {"cpp_checker_present": True, "cpp_regression_pass": True,
+                "cpp_checker_errored": True}
+    status = res.get("status")
+    return {
+        "cpp_checker_present": True,
+        "cpp_regression_pass": status != "fail",
+        "cpp_violations": len(res.get("violations", [])),
+    }
+
+
 def _find_ast_validator(task_dir: Path) -> Optional[Path]:
     """向上查找 skills/ascendc/ascendc-translator/scripts/validate_ascendc_impl.py。"""
     for cand in [task_dir] + list(task_dir.parents):
@@ -238,6 +292,8 @@ def _record_cheat_attempt(task_dir: Path, attempt: int, checks: dict, *, cheat_t
             "ast_degrade_pass": checks.get("ast_degrade_pass"),
             "ast_validator_errored": checks.get("ast_validator_errored", False),
             "anticheat_pass": checks.get("anticheat_pass"),
+            "cpp_regression_pass": checks.get("cpp_regression_pass"),
+            "cpp_violations": checks.get("cpp_violations"),
         },
         "instruction": (
             "AST validator 异常 (超时/缺失)，本轮反作弊未能确证，按未检测处理"
@@ -270,6 +326,9 @@ def run_common(step: str, task_dir: Path, op_name: str, attempt: int) -> GateOut
     checks.update(check_structure(task_dir, op_name))
     if step == "validate":
         checks.update(check_verify_status_present(task_dir))
+        # C++ 源码扫描只在 validate step 跑: forensics/audit 阶段 kernel 可能仍在构造，
+        # NO_KERNEL_LAUNCH 会误报污染 cheat_history。validate 时 kernel 已成型，扫描可信。
+        checks.update(check_cpp_regression(task_dir))
     if step in ("audit", "fix", "validate"):
         checks.update(check_audit_file_present(task_dir, attempt))
 
@@ -295,7 +354,8 @@ def run_common(step: str, task_dir: Path, op_name: str, attempt: int) -> GateOut
     # cheat 路径显式给出 loop_signal (非 None)，规避批次1「validate 无信号 → Abort」误触。
     ast_failed = checks.get("ast_degrade_pass", True) is False
     anticheat_failed = checks.get("anticheat_pass", True) is False
-    if ast_failed or anticheat_failed:
+    cpp_failed = checks.get("cpp_regression_pass", True) is False
+    if ast_failed or anticheat_failed or cpp_failed:
         if ast_failed:
             # N5: validator 异常 (超时/缺失 fail-open) 与真作弊区分，单独记 warning，
             # 不静默当 pass，也不等价真作弊 (避免误杀)。
@@ -304,9 +364,13 @@ def run_common(step: str, task_dir: Path, op_name: str, attempt: int) -> GateOut
             _record_cheat_attempt(task_dir, attempt, checks, cheat_type=cheat_type)
         if anticheat_failed:
             _record_cheat_attempt(task_dir, attempt, checks, cheat_type="WRAPPER_HASH")
+        if cpp_failed:
+            # C++ 扫描是静态确证 (非 fail-open validator)，命中即真作弊，记 violation。
+            _record_cheat_attempt(task_dir, attempt, checks, cheat_type="CPP_REGRESSION")
 
         # validator 异常 (errored) 不等同确证作弊，不据此终止/续跑；按原 ok 判定走。
-        confirmed_cheat = anticheat_failed or (
+        # cpp 扫描命中是确证作弊 (静态源码层面无 fail-open 歧义)。
+        confirmed_cheat = anticheat_failed or cpp_failed or (
             ast_failed and not checks.get("ast_validator_errored")
         )
         if confirmed_cheat and step == "validate":

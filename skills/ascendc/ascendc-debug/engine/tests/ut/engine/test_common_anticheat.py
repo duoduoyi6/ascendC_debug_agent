@@ -105,6 +105,58 @@ class TestAntiCheatBranching(unittest.TestCase):
         self.assertEqual(entries[0]["severity"], "violation")
 
 
+class TestCppRegressionGate(unittest.TestCase):
+    """C++ 扫描进 Gate 热路径: success+cpp_cheat→STOP / fail+cpp_cheat→CONTINUE，仅 validate step。"""
+
+    def _run_with_cpp(self, step, correctness_passed, *, cpp_status="fail"):
+        """跑指定 step，把 check_cpp_regression 强制为指定 status (模拟 C++ 作弊)。"""
+        with tempfile.TemporaryDirectory() as d:
+            task = _make_task(Path(d), correctness_passed=correctness_passed)
+            orig = common.check_cpp_regression
+            common.check_cpp_regression = lambda _t: {
+                "cpp_checker_present": True,
+                "cpp_regression_pass": cpp_status != "fail",
+                "cpp_violations": 2 if cpp_status == "fail" else 0,
+            }
+            try:
+                outcome = run_common(step, task, "FakeOp", 0)
+                history = task / "precision_tuning" / "cheat_history.json"
+                hist = (json.loads(history.read_text()) if history.exists()
+                        else {"cheating_attempts": []})
+                return outcome, hist
+            finally:
+                common.check_cpp_regression = orig
+
+    def test_cpp_success_plus_cheat_is_stop(self) -> None:
+        # objective success + C++ 作弊 → STOP + cheat_detected。
+        outcome, hist = self._run_with_cpp("validate", True)
+        out = outcome.to_gate_output()
+        self.assertFalse(out["passed"])
+        self.assertEqual(out["loop_signal"], "STOP")
+        self.assertEqual(out["checks"]["stop_reason_code"], "cheat_detected")
+        self.assertTrue(any(e["cheat_type"] == "CPP_REGRESSION"
+                            for e in hist["cheating_attempts"]))
+
+    def test_cpp_fail_plus_cheat_is_continue(self) -> None:
+        # objective fail + C++ 作弊 → CONTINUE (保留诊断成本)。
+        outcome, _ = self._run_with_cpp("validate", False)
+        out = outcome.to_gate_output()
+        self.assertEqual(out["loop_signal"], "CONTINUE")
+        self.assertNotIn("stop_reason_code", out.get("checks", {}))
+
+    def test_cpp_scan_skipped_on_forensics(self) -> None:
+        # 非 validate step 不跑 C++ 扫描: forensics 不该读到 cpp_regression_pass。
+        outcome, _ = self._run_with_cpp("forensics", None)
+        self.assertNotIn("cpp_regression_pass", outcome.checks)
+
+    def test_cpp_pass_no_cheat(self) -> None:
+        # C++ 扫描通过 → 不记 cheat，validate step 正常通过。
+        outcome, hist = self._run_with_cpp("validate", True, cpp_status="pass")
+        out = outcome.to_gate_output()
+        self.assertTrue(out["passed"])
+        self.assertEqual(hist["cheating_attempts"], [])
+
+
 class TestForensicsStepDefersVerdict(unittest.TestCase):
     """非 validate step (forensics) 检测到作弊只记录，不派终判信号 (无 objective 结论)。"""
 
