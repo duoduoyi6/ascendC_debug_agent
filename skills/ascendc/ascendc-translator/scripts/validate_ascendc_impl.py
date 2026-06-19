@@ -255,6 +255,64 @@ def find_wrapper_functions(tree, ext_names):
     return wrappers
 
 
+def collect_class_methods(tree):
+    """收集 ModelNew(优先)/Model 类的所有方法定义 {method_name: FunctionDef}。
+
+    供 check_forbidden_torch_ops 递归展开 self.method() 调用 (区分自定义方法 vs
+    nn.Module 子模块属性)。优先 ModelNew，与 find_model_forward 口径一致。
+    """
+    model_new_methods = {}
+    model_methods = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name in ("ModelNew", "Model"):
+            target = model_new_methods if node.name == "ModelNew" else model_methods
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    target[item.name] = item
+    return model_new_methods or model_methods
+
+
+def collect_module_functions(tree):
+    """收集模块级函数定义 {func_name: FunctionDef}。
+
+    供 check_forbidden_torch_ops 递归展开模块级 helper 调用，防止把 torch 计算藏进
+    模块级函数逃逸检测。
+    """
+    funcs = {}
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            funcs[node.name] = node
+    return funcs
+
+
+def collect_method_wrappers(class_methods, ext_names):
+    """收集 (递归) 调用 kernel 扩展的本类方法名集合。
+
+    forward 可能只调 self._run_kernel()，真正的 ext 调用藏在该方法内部。把这类方法名
+    并入 wrapper_names，让 check_kernel_calls_in_forward 认出「forward → self.method →
+    ext」也算 kernel 被调用 (否则误判 type2)。递归防环。
+    """
+    def _reaches_ext(method, visited):
+        if method is None or id(method) in visited:
+            return False
+        visited.add(id(method))
+        for child in ast.walk(method):
+            if not isinstance(child, ast.Call):
+                continue
+            resolved = _resolve_call_name(child)
+            if resolved is None:
+                continue
+            qual, attr = resolved
+            if qual in ext_names:
+                return True
+            if qual == "self" and attr in class_methods:
+                if _reaches_ext(class_methods[attr], visited):
+                    return True
+        return False
+
+    return {name for name, fn in class_methods.items() if _reaches_ext(fn, set())}
+
+
 def check_kernel_calls_in_forward(forward_node, ext_names, wrapper_names):
     """检查 forward 中是否调用了 AscendC 扩展模块的函数。
 
@@ -287,79 +345,122 @@ def check_kernel_calls_in_forward(forward_node, ext_names, wrapper_names):
     return called
 
 
-def check_forbidden_torch_ops(forward_node):
-    """检查 forward 中是否使用了禁止的 torch 计算操作。
+def check_forbidden_torch_ops(forward_node, class_methods=None,
+                              module_functions=None, ext_names=None,
+                              wrapper_names=None):
+    """检查 forward (及其递归调用的 helper) 中是否使用禁止的 torch 计算操作。
 
-    返回违规列表 [{"line": N, "call": str, "reason": str}, ...]
+    递归语义 (anti-cheat 盲区修复): forward 调用的本类方法 / 模块级 helper 会被递归
+    展开检查，防止把 F.pad / torch.matmul 等藏进 helper 逃逸检测。同时借递归区分:
+      - self.method() 且 method 是本类已定义方法 → 递归进入 (不判违规)，消除原先把
+        「forward 调自定义纯 wrapper 方法」误判 type3 的 false positive。
+      - self.xxx() 且 xxx 非本类方法 → 判违规 (方案A: __init__ 赋的属性绝大多数是
+        nn.Linear/nn.Conv 子模块，调用等于用 PyTorch 算子，保持原语义)。
+
+    class_methods/module_functions: {name: FunctionDef}，None 时退化为非递归 (向后兼容)。
+    ext_names/wrapper_names: kernel 扩展 / wrapper 名集合，递归时跳过 (合法调用)。
+
+    返回违规列表 [{"line": N, "call": str, "reason": str}, ...] (行号指向真实出现处，
+    含 helper 内部行)。
     """
+    class_methods = class_methods or {}
+    module_functions = module_functions or {}
+    ext_names = ext_names or set()
+    wrapper_names = wrapper_names or set()
     violations = []
     if forward_node is None:
         return violations
 
-    for node in ast.walk(forward_node):
-        # --- 检测 @ 运算符（矩阵乘法）---
-        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.MatMult):
-            violations.append({
-                "line": node.lineno,
-                "call": "@",
-                "reason": "矩阵乘法 @ 运算符必须在 AscendC kernel 中实现",
-            })
-            continue
+    visited = set()  # 防递归环 (id(FunctionDef))
 
-        if not isinstance(node, ast.Call):
-            continue
+    def _scan(node):
+        if node is None or id(node) in visited:
+            return
+        visited.add(id(node))
 
-        resolved = _resolve_call_name(node)
-        if resolved is None:
-            continue
-
-        qual, attr = resolved
-
-        # --- torch.xxx(...) ---
-        if qual == "torch":
-            if attr not in ALLOWED_TORCH_FUNCS:
+        for child in ast.walk(node):
+            # --- 检测 @ 运算符（矩阵乘法）---
+            if isinstance(child, ast.BinOp) and isinstance(child.op, ast.MatMult):
                 violations.append({
-                    "line": node.lineno,
-                    "call": f"torch.{attr}",
-                    "reason": f"torch.{attr} 是计算操作，必须在 AscendC kernel 中实现",
+                    "line": child.lineno,
+                    "call": "@",
+                    "reason": "矩阵乘法 @ 运算符必须在 AscendC kernel 中实现",
                 })
-            continue
+                continue
 
-        # --- F.xxx(...) / functional.xxx(...) ---
-        if qual in ("F", "functional", "torch.nn.functional", "nn.functional"):
-            violations.append({
-                "line": node.lineno,
-                "call": f"{qual}.{attr}",
-                "reason": f"{qual}.{attr} 是 PyTorch 计算操作，必须在 AscendC kernel 中实现",
-            })
-            continue
+            if not isinstance(child, ast.Call):
+                continue
 
-        # --- Python 内建函数 —— 允许 ---
-        if qual is None and attr in ALLOWED_BUILTIN_FUNCS:
-            continue
+            resolved = _resolve_call_name(child)
+            if resolved is None:
+                continue
 
-        # --- tensor 方法计算操作 ---
-        if attr in FORBIDDEN_TENSOR_METHODS:
-            if qual not in ("torch", "F", "functional",
-                            "torch.nn.functional", "nn.functional"):
+            qual, attr = resolved
+
+            # --- torch.xxx(...) ---
+            if qual == "torch":
+                if attr not in ALLOWED_TORCH_FUNCS:
+                    violations.append({
+                        "line": child.lineno,
+                        "call": f"torch.{attr}",
+                        "reason": f"torch.{attr} 是计算操作，必须在 AscendC kernel 中实现",
+                    })
+                continue
+
+            # --- F.xxx(...) / functional.xxx(...) ---
+            if qual in ("F", "functional", "torch.nn.functional", "nn.functional"):
                 violations.append({
-                    "line": node.lineno,
-                    "call": f"{qual}.{attr}()" if qual else f"{attr}()",
-                    "reason": f"{attr} 是计算操作，必须在 AscendC kernel 中实现",
+                    "line": child.lineno,
+                    "call": f"{qual}.{attr}",
+                    "reason": f"{qual}.{attr} 是 PyTorch 计算操作，必须在 AscendC kernel 中实现",
                 })
-            continue
+                continue
 
-        # --- self.layer_name(x) —— 禁止 nn.Module 调用 ---
-        if qual == "self":
-            if attr not in ("forward",):
+            # --- kernel 扩展 / wrapper 调用 —— 合法，跳过 ---
+            if qual in ext_names:
+                continue
+            if qual is None and attr in wrapper_names:
+                continue
+
+            # --- Python 内建函数 —— 允许 ---
+            if qual is None and attr in ALLOWED_BUILTIN_FUNCS:
+                continue
+
+            # --- 模块级 helper 调用 → 递归展开 ---
+            if qual is None and attr in module_functions:
+                _scan(module_functions[attr])
+                continue
+
+            # --- tensor 方法计算操作 ---
+            if attr in FORBIDDEN_TENSOR_METHODS:
+                if qual not in ("torch", "F", "functional",
+                                "torch.nn.functional", "nn.functional"):
+                    violations.append({
+                        "line": child.lineno,
+                        "call": f"{qual}.{attr}()" if qual else f"{attr}()",
+                        "reason": f"{attr} 是计算操作，必须在 AscendC kernel 中实现",
+                    })
+                continue
+
+            # --- self.xxx(...) ---
+            if qual == "self":
+                if attr in ("forward",):
+                    continue
+                # 本类已定义方法 → 递归进入 (消除 false positive)
+                if attr in class_methods:
+                    _scan(class_methods[attr])
+                    continue
+                # 非本类方法 → 方案A: 判违规 (疑似 nn.Module 子模块属性)
                 violations.append({
-                    "line": node.lineno,
+                    "line": child.lineno,
                     "call": f"self.{attr}(...)",
                     "reason": f"self.{attr}() 疑似 nn.Module 前向调用，核心计算必须在 AscendC kernel 中实现",
                 })
-            continue
+                continue
 
+    _scan(forward_node)
     return violations
+
 
 
 def check_for_loops_over_tensors(forward_node):
@@ -580,7 +681,11 @@ def validate(code, filepath="<unknown>"):
         result["suggestion"] = "代码缺少 ModelNew（或 Model）类或 forward 方法。"
         return result
 
+    class_methods = collect_class_methods(tree)
     wrapper_names = find_wrapper_functions(tree, valid_ext_names)
+    # forward → self._helper → ext 形式: 把递归调到 ext 的本类方法并入 wrapper_names，
+    # 否则 Check 2 会误判 type2 (forward 表面只调 self.method 未直接见 ext)。
+    wrapper_names = wrapper_names | collect_method_wrappers(class_methods, valid_ext_names)
     called = check_kernel_calls_in_forward(
         forward_node, valid_ext_names, wrapper_names
     )
@@ -602,8 +707,15 @@ def validate(code, filepath="<unknown>"):
 
     result["checks"]["kernel_called_from_forward"]["passed"] = True
 
-    # --- Check 3: 禁止的 torch 操作 ---
-    violations = check_forbidden_torch_ops(forward_node)
+    # --- Check 3: 禁止的 torch 操作 (递归展开 forward 调用的 helper) ---
+    module_functions = collect_module_functions(tree)
+    violations = check_forbidden_torch_ops(
+        forward_node,
+        class_methods=class_methods,
+        module_functions=module_functions,
+        ext_names=valid_ext_names,
+        wrapper_names=wrapper_names,
+    )
     result["checks"]["no_forbidden_torch_ops"]["violations"] = violations
 
     if violations:

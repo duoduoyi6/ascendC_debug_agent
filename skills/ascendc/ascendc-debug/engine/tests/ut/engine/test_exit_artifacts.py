@@ -19,6 +19,7 @@ from engine.exit_artifacts import (
     write_diagnosis_summary,
     _kernel_file_hashes,
     diff_changed_files,
+    _success_category,
 )
 from engine.types import Abort, Action, Continue, Done
 
@@ -55,7 +56,7 @@ class TestDebugStatus(unittest.TestCase):
                     "started_at", "ended_at", "attempts_used", "entry_failure_type",
                     "final_failure_type", "final_verify_status_path", "notes",
                     "objective_success", "anti_cheat_pass", "ast_degrade_pass",
-                    "reportable_success"}
+                    "reportable_success", "success_category"}
         self.assertEqual(set(s), expected)
 
     def test_no_terminal_event_is_crashed(self) -> None:
@@ -247,6 +248,40 @@ def _write_validation(task_dir: Path, attempt: int, payload: dict) -> None:
         json.dumps(payload), encoding="utf-8")
 
 
+class TestSuccessCategory(unittest.TestCase):
+    """退出分层枚举: failed / cheat_or_invalid / clean_kernel_success / wrapper_assisted_success。"""
+
+    def test_failed_when_objective_false(self) -> None:
+        # 数值没过即 failed，无论是否作弊。
+        self.assertEqual(_success_category(False, True, True, False), "failed")
+        self.assertEqual(_success_category(False, False, False, False), "failed")
+
+    def test_cheat_or_invalid_on_anticheat_violation(self) -> None:
+        # 数值过 + anti_cheat 确证 violation → 假成功。
+        self.assertEqual(
+            _success_category(True, False, True, False), "cheat_or_invalid")
+
+    def test_cheat_or_invalid_on_ast_degrade(self) -> None:
+        # 数值过 + AST 退化确证 (ast_degrade_pass is False) → 假成功。
+        self.assertEqual(
+            _success_category(True, True, False, False), "cheat_or_invalid")
+
+    def test_clean_kernel_success(self) -> None:
+        # 数值过 + 无作弊 + reportable → 真·干净成功。
+        self.assertEqual(
+            _success_category(True, True, True, True), "clean_kernel_success")
+
+    def test_wrapper_assisted_when_validator_errored(self) -> None:
+        # 数值过 + 无确证作弊 (ast None=validator errored) + 非 reportable → 灰色中间态。
+        self.assertEqual(
+            _success_category(True, True, None, False), "wrapper_assisted_success")
+
+    def test_wrapper_assisted_when_not_reportable(self) -> None:
+        # 数值过 + ast clean 但 session 未正常 success 等导致非 reportable → 灰色中间态。
+        self.assertEqual(
+            _success_category(True, True, True, False), "wrapper_assisted_success")
+
+
 class TestKernelHashDiff(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -281,6 +316,34 @@ class TestKernelHashDiff(unittest.TestCase):
         (self.task_dir / "kernel" / ".hidden.h").write_text("junk", encoding="utf-8")
         h = _kernel_file_hashes(self.task_dir)
         self.assertEqual(list(h), ["kernel/real.cpp"])
+
+    def test_protected_root_files_snapshotted(self) -> None:
+        # 反作弊: model.py / 参考 wrapper 纳入快照，篡改后出现在 changed_files。
+        (self.task_dir / "model.py").write_text("v0", encoding="utf-8")
+        (self.task_dir / "model_new_ascendc.py").write_text("w0", encoding="utf-8")
+        before = _kernel_file_hashes(self.task_dir)
+        self.assertIn("model.py", before)
+        self.assertIn("model_new_ascendc.py", before)
+        (self.task_dir / "model.py").write_text("tampered", encoding="utf-8")
+        after = _kernel_file_hashes(self.task_dir)
+        self.assertEqual(diff_changed_files(before, after), ["model.py"])
+
+    def test_op_json_snapshotted_only_with_op_name(self) -> None:
+        # <op>.json / .json.bak 需 op_name 精确定位；不传则不纳入 (避免误纳入引擎产物)。
+        (self.task_dir / "cumsum.json").write_text("{}", encoding="utf-8")
+        (self.task_dir / "cumsum.json.bak").write_text("{}", encoding="utf-8")
+        self.assertNotIn("cumsum.json", _kernel_file_hashes(self.task_dir))
+        h = _kernel_file_hashes(self.task_dir, op_name="cumsum")
+        self.assertIn("cumsum.json", h)
+        self.assertIn("cumsum.json.bak", h)
+
+    def test_engine_products_not_snapshotted(self) -> None:
+        # 引擎自身产物 (debug_status.json / _anticheat.json) 即便传 op_name 也不该混入。
+        (self.task_dir / "debug_status.json").write_text("{}", encoding="utf-8")
+        (self.task_dir / "_anticheat.json").write_text("{}", encoding="utf-8")
+        h = _kernel_file_hashes(self.task_dir, op_name="cumsum")
+        self.assertNotIn("debug_status.json", h)
+        self.assertNotIn("_anticheat.json", h)
 
 
 class TestDiagnosisSummary(unittest.TestCase):

@@ -111,14 +111,14 @@ def _default_dispatcher(
         # 不阻断诊断本身。
         from engine.exit_artifacts import _kernel_file_hashes, diff_changed_files
         try:
-            before = _kernel_file_hashes(task_dir)
+            before = _kernel_file_hashes(task_dir, op_name)
         except Exception:  # noqa: BLE001
             before = None
         result = agent_callback(action, task_dir, op_name, attempt)
         if before is not None:
             try:
                 result["changed_files"] = diff_changed_files(
-                    before, _kernel_file_hashes(task_dir))
+                    before, _kernel_file_hashes(task_dir, op_name))
             except Exception:  # noqa: BLE001
                 pass
         return result

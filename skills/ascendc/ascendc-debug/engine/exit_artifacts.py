@@ -38,9 +38,18 @@ _TERMINAL_TYPES = {"session_done", "session_aborted", "session_escalated"}
 # + task_dir 根 model_new_ascendc.py。code_snapshot/ 不可用 (仅 Gate-A 写，引擎不调)。
 _KERNEL_SRC_GLOBS = ("*.cpp", "*.h", "*.hpp", "*.py")
 
+# 反作弊: 受保护产物 (评测基准/参考实现/算子配置)。纳入快照后，正常诊断只该改 kernel/，
+# 一旦这些文件出现在 changed_files 即受保护产物被篡改的信号 (与 anticheat hash 校验互补，
+# 这里给出具体文件名)。<op>.json / <op>.json.bak 需 op_name 精确定位，避免 glob *.json
+# 误纳入引擎自身产物 (debug_status.json / _anticheat.json / validation_result_*.json)。
+_PROTECTED_ROOT_FILES = ("model.py", "model_new_ascendc.py", "model_new_tilelang.py")
 
-def _kernel_file_hashes(task_dir: Path) -> dict[str, str]:
-    """{相对 task_dir 的源文件路径: sha256}。读异常的文件跳过 (best-effort)。"""
+
+def _kernel_file_hashes(task_dir: Path, op_name: Optional[str] = None) -> dict[str, str]:
+    """{相对 task_dir 的源文件路径: sha256}。读异常的文件跳过 (best-effort)。
+
+    op_name 给定时额外纳入 <op>.json / <op>.json.bak (受保护算子配置)。
+    """
     task_dir = Path(task_dir)
     out: dict[str, str] = {}
     files: list[Path] = []
@@ -48,9 +57,15 @@ def _kernel_file_hashes(task_dir: Path) -> dict[str, str]:
     if kernel_dir.is_dir():
         for pat in _KERNEL_SRC_GLOBS:
             files.extend(kernel_dir.rglob(pat))
-    model_new = task_dir / "model_new_ascendc.py"
-    if model_new.exists():
-        files.append(model_new)
+    for name in _PROTECTED_ROOT_FILES:
+        p = task_dir / name
+        if p.exists():
+            files.append(p)
+    if op_name:
+        for name in (f"{op_name}.json", f"{op_name}.json.bak"):
+            p = task_dir / name
+            if p.exists():
+                files.append(p)
     for f in sorted(set(files), key=str):
         # 排除点文件: macOS AppleDouble (._foo.cpp，归档经 mac 中转的真实残留，见
         # hyena 快照) 及其他隐藏文件，不是真实源码，会污染 changed_files 文件名列表。
@@ -296,6 +311,36 @@ def _reportable_success(
     )
 
 
+def _success_category(
+    objective_success: bool,
+    anti_cheat_pass: bool,
+    ast_degrade_pass: Optional[bool],
+    reportable_success: bool,
+) -> str:
+    """退出分层枚举 (互斥且穷尽)，论文按此口径统计 clean-success 率与作弊率。
+
+      failed                   — 客观数值未通过 (无论是否作弊，数值没过就是失败)。
+      cheat_or_invalid         — 数值通过但确证作弊 (wrapper hash 破坏 / AST 退化确证 /
+                                 C++ 绕过)，「假成功」不计入有效成功。
+      clean_kernel_success     — 数值通过 + reportable (无任何作弊/warning，AST clean)，
+                                 论文口径的真·干净 kernel 成功。
+      wrapper_assisted_success — 数值通过 + 无确证作弊，但未达 reportable (AST validator
+                                 异常导致未知 / 有 warning / session 未正常 success)，灰色
+                                 中间态: 不算确证作弊，也不计入干净成功，单列供人工复核。
+
+    confirmed_cheat 口径与 gates.common.run_common 一致: anti_cheat 确证 violation，或 AST
+    退化确证 fail (ast_degrade_pass is False；None=validator errored 不算确证)。
+    """
+    if not objective_success:
+        return "failed"
+    confirmed_cheat = (not anti_cheat_pass) or (ast_degrade_pass is False)
+    if confirmed_cheat:
+        return "cheat_or_invalid"
+    if reportable_success:
+        return "clean_kernel_success"
+    return "wrapper_assisted_success"
+
+
 def build_debug_status(task_dir: Path) -> dict:
     """从 events 派生 debug_status.json verdict + 成功分层字段。"""
     events = read_events(task_dir)
@@ -316,6 +361,8 @@ def build_debug_status(task_dir: Path) -> dict:
         task_dir, events, state.total_attempts, final_status_path)
     anti_cheat_pass = _anti_cheat_pass(task_dir)
     ast_degrade_pass = _ast_degrade_pass(task_dir, events)
+    reportable_success = _reportable_success(
+        outcome, objective_success, anti_cheat_pass, ast_degrade_pass, task_dir)
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -330,8 +377,9 @@ def build_debug_status(task_dir: Path) -> dict:
         "objective_success": objective_success,
         "anti_cheat_pass": anti_cheat_pass,
         "ast_degrade_pass": ast_degrade_pass,
-        "reportable_success": _reportable_success(
-            outcome, objective_success, anti_cheat_pass, ast_degrade_pass, task_dir),
+        "reportable_success": reportable_success,
+        "success_category": _success_category(
+            objective_success, anti_cheat_pass, ast_degrade_pass, reportable_success),
         "notes": _terminal_reason(term),
     }
 
@@ -825,6 +873,7 @@ def build_run_summary(task_dir: Path, status: Optional[dict] = None) -> dict:
         "session_outcome": status.get("session_outcome"),
         "session_branch": status.get("session_branch"),
         "attempts_used": attempts_used,
+        "success_category": status.get("success_category"),
         "turns": _turns_summary(events),
         "gate": _gate_summary(events),
         "anti_cheat": _anti_cheat_summary(task_dir),

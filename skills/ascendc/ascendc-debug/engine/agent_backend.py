@@ -49,6 +49,11 @@ _SINGLE_ROUND_CONSTRAINT = """
 本次调用只负责**一个 attempt 的诊断 + 修复**，循环与终态由外层引擎掌控:
 - 禁止自己跑 MAX_ATTEMPTS 循环；禁止读 Gate loop_signal 自行决定继续/停止/跳 Step5/Step6。
 - 禁止写 debug_status.json / debug_trace.md (退出产物由引擎从事件流确定性重建)。
+- 【受保护文件，严禁以任何方式修改/删除/重命名/覆写】: model.py、参考实现 wrapper
+  (model_new_ascendc.py / model_new_tilelang.py)、算子配置 <op>.json 及其 .json.bak 备份、
+  .verify_status/ 目录下任何文件。这些是客观评测的基准与产物，改动它们等同作弊 (会被反作弊
+  hash 校验与 C++/AST 扫描捕获并判定 cheat_detected，本轮成果作废)。只允许修改
+  {task_dir}/kernel/ 下的 .cpp/.h/.hpp 算子源码。
 - 不要把自测/自评结果写成最终结论；最终 build/eval/classify/precision_gate 由引擎
   在本轮结束后统一执行。诊断中如确有必要，可以运行局部 build/eval/forensics 命令，
   但其结果只作为本轮根因分析证据，不作为流程终态。
