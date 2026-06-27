@@ -418,8 +418,11 @@ class _LegacyPrecisionChecker:
         total = full_eval.get("total_cases", 0) or 0
         passed_cases = full_eval.get("passed_cases", 0) or 0
         locatable = (total > passed_cases) and not crashed
+        # LoopGuard 关 (no_loopguard arm): 抑制本函数的 nearly_success 早停，
+        # 续跑至 _compute_loop_signal 的 max_attempts_reached 硬顶 (有界)，与 :349 对齐。
+        loop_guard_on = os.environ.get("ABLATE_LOOP_GUARD") != "1"
 
-        if rounds >= _FULL_EVAL_MAX_ROUNDS and not improved:
+        if loop_guard_on and rounds >= _FULL_EVAL_MAX_ROUNDS and not improved:
             return (
                 "STOP",
                 f"{reason}；全量复验连续 {rounds} 轮无改善，疑似精度上限，建议人工确认",
@@ -432,10 +435,16 @@ class _LegacyPrecisionChecker:
                 f"(全量 {passed_cases}/{total}，match_rate={curr:.2f}%)",
                 "full_eval_regression",
             )
+        if loop_guard_on:
+            return (
+                "STOP",
+                f"{reason}；全量复验无可定位失败样本，建议人工确认",
+                "nearly_success",
+            )
         return (
-            "STOP",
-            f"{reason}；全量复验无可定位失败样本，建议人工确认",
-            "nearly_success",
+            "CONTINUE",
+            f"{reason}；LoopGuard 关，全量无可定位样本仍续跑至最大轮次",
+            "full_eval_regression",
         )
 
     def _count_stagnant(self, trend: list) -> int:
@@ -851,7 +860,7 @@ class _LegacyPrecisionChecker:
         status_skipped = False
         for line in section.split("\n"):
             if "状态" in line:
-                parts = re.split(r"[:：]", line, 1)
+                parts = re.split(r"[:：]", line, maxsplit=1)
                 val = parts[1] if len(parts) > 1 else ""
                 # SKILL 模板状态行同时含"已执行 / 跳过"两词，子串匹配两头不讨好:
                 # 仅当含"跳过"、不含"已执行"、且无 <...> 未填占位，才是真·合法跳过。
@@ -869,7 +878,7 @@ class _LegacyPrecisionChecker:
         for line in section.split("\n"):
             if not re.search(r"\bP[123]\b", line):
                 continue
-            parts = re.split(r"[:：]", line, 1)
+            parts = re.split(r"[:：]", line, maxsplit=1)
             val = parts[1].strip() if len(parts) > 1 else ""
             if not val or (val.startswith("<") and val.endswith(">")):
                 continue  # 空 / 未填模板占位

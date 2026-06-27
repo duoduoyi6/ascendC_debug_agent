@@ -38,7 +38,9 @@ MODEL=""
 TIMEOUT_SEC="5400"          # 单任务超时（秒），默认 1.5 小时
 MAX_ATTEMPTS="5"            # ASCENDC_DEBUG_MAX_ATTEMPTS 默认值
 MAX_RESUMES="3"             # pause_turn 最大恢复次数
-MAX_TURNS=""                # 单 attempt agentic turn 数硬上限；空=用引擎默认 180（见 engine/__main__.py）。模型无关，是失控（cache_read/cost 累积）的治本闸
+MAX_TURNS="240"             # 单 attempt agentic turn 数硬上限；默认 240。模型无关，是失控（cache_read/cost 累积）的治本闸
+MAX_TASK_TURNS="720"        # 跨 attempt 累计 agentic turn 数硬上限；默认 720
+KB_PATH=""                  # success 且无作弊时候选知识入库路径；空=不启用
 AGENT_TIMEOUT_SEC=""        # 单次 diagnose agent 调用超时（秒，空=不限）；引擎管 wall-clock
 STALE_AFTER_FAILURE_SEC="3600"   # 失败后停滞多久判定为 stale
 STALE_CHECK_INTERVAL_SEC="60"    # 停滞检测间隔
@@ -65,6 +67,8 @@ while [[ $# -gt 0 ]]; do
         --max-resumes)            MAX_RESUMES="$2"; shift 2 ;;
         --agent-timeout)          AGENT_TIMEOUT_SEC="$2"; shift 2 ;;
         --max-turns)              MAX_TURNS="$2"; shift 2 ;;
+        --max-task-turns)         MAX_TASK_TURNS="$2"; shift 2 ;;
+        --kb-path)                KB_PATH="$2"; shift 2 ;;
         --stale-after-failure)    STALE_AFTER_FAILURE_SEC="$2"; shift 2 ;;
         --stale-check-interval)   STALE_CHECK_INTERVAL_SEC="$2"; shift 2 ;;
         --workdir)                WORKDIR_IN_CONTAINER="$2"; shift 2 ;;
@@ -74,6 +78,7 @@ while [[ $# -gt 0 ]]; do
         --agent)                  AGENT="$2"; shift 2 ;;
         --allowed-tools)          ALLOWED_TOOLS="$2"; shift 2 ;;
         --entry-failure-type)     ENTRY_FAILURE_TYPE="$2"; shift 2 ;;
+        --ablate-profile)         ABLATE_PROFILE="$2"; shift 2 ;;
         -h|--help)
             sed -n '1,30p' "$0"
             exit 0
@@ -81,6 +86,28 @@ while [[ $# -gt 0 ]]; do
         *) echo "未知参数: $1"; exit 1 ;;
     esac
 done
+
+# ── 消融 profile 矩阵 (§3.6) ──
+# ABLATE_* env 经 docker exec -e 传入容器，子进程自动继承，中间零透传。
+# 默认 full (不 export 任何 ablate)。
+ABLATE_PROFILE="${ABLATE_PROFILE:-full}"
+case "$ABLATE_PROFILE" in
+    full)         ;;
+    no_kb)        KB_PATH="" ;;
+    no_forensics) export ABLATE_FORENSICS=1 ;;
+    no_probe)     export ABLATE_PROBE=1 ;;
+    no_anticheat) export ABLATE_ANTICHEAT=1 ;;
+    no_loopguard) export ABLATE_LOOP_GUARD=1 ;;
+    no_audit)     export ABLATE_GATE_A=1 ;;
+    no_fulleval)  export ABLATE_FULL_EVAL=1 ;;
+    baseline)     # 全脚手架关下界 (§3.3): 取证/循环闸/Gate-A/全量闸/插桩全消融，清 KB。
+                  # 反作弊用 detect-only (检测+记录不阻断)——暴露虚假成功、量化反作弊拦截量。
+                  export ABLATE_FORENSICS=1; export ABLATE_LOOP_GUARD=1
+                  export ABLATE_GATE_A=1;    export ABLATE_FULL_EVAL=1
+                  export ABLATE_PROBE=1;     export ANTICHEAT_DETECT_ONLY=1
+                  KB_PATH="" ;;
+    *) echo "未知 ABLATE_PROFILE: $ABLATE_PROFILE"; exit 1 ;;
+esac
 
 # ── 校验 ──
 [[ -z "$TASK_DIRS" && -z "$TASK_DIRS_FILE" ]] && {
@@ -148,6 +175,9 @@ done
     echo "- claude env: ${CLAUDE_ENV_SH:-<none>}"
     echo "- tilelang env: $TILELANG_ENV_SH"
     echo "- timeout: ${TIMEOUT_SEC}s/task"
+    echo "- max_turns: ${MAX_TURNS:-<engine default>}"
+    echo "- max_task_turns: ${MAX_TASK_TURNS:-<none>}"
+    echo "- kb_path: ${KB_PATH:-<none>}"
     echo "- stale_after_failure: ${STALE_AFTER_FAILURE_SEC}s"
     echo "- start: $(date '+%F %T')"
     echo
@@ -435,26 +465,38 @@ run_engine_turn() {
     } >> "$wlog"
 
     set +e
+    local ablate_flags=()
+    [[ -n "${ABLATE_FORENSICS:-}" ]]  && ablate_flags+=(-e "ABLATE_FORENSICS=$ABLATE_FORENSICS")
+    [[ -n "${ABLATE_LOOP_GUARD:-}" ]] && ablate_flags+=(-e "ABLATE_LOOP_GUARD=$ABLATE_LOOP_GUARD")
+    [[ -n "${ABLATE_GATE_A:-}" ]]     && ablate_flags+=(-e "ABLATE_GATE_A=$ABLATE_GATE_A")
+    [[ -n "${ABLATE_ANTICHEAT:-}" ]]  && ablate_flags+=(-e "ABLATE_ANTICHEAT=$ABLATE_ANTICHEAT")
+    [[ -n "${ABLATE_FULL_EVAL:-}" ]]  && ablate_flags+=(-e "ABLATE_FULL_EVAL=$ABLATE_FULL_EVAL")
+    [[ -n "${ABLATE_PROBE:-}" ]]      && ablate_flags+=(-e "ABLATE_PROBE=$ABLATE_PROBE")
+    [[ -n "${ANTICHEAT_DETECT_ONLY:-}" ]] && ablate_flags+=(-e "ANTICHEAT_DETECT_ONLY=$ANTICHEAT_DETECT_ONLY")
     timeout --signal=TERM --kill-after=30 "$TIMEOUT_SEC" \
         docker exec \
             -e "ASCEND_RT_VISIBLE_DEVICES=$npu" \
             -e "ASCENDC_DEBUG_MAX_ATTEMPTS=$MAX_ATTEMPTS" \
+            "${ablate_flags[@]}" \
             "$container" bash -lc '
                 set -e
                 claude_env="$1"; tilelang_env="$2"; workdir="$3"; skill_dir="$4"
                 task_dir="$5"; op_name="$6"; agent="$7"; npu="$8"
                 model="$9"; claude_bin="${10}"; allowed_tools="${11}"
-                agent_timeout="${12}"
-                entry_failure_type="${13}"; max_turns="${14}"
+                agent_timeout="${12}"; entry_failure_type="${13}"
+                max_turns="${14}"; max_task_turns="${15}"; kb_path="${16}"
 
                 [ -n "$claude_env" ] && [ -f "$claude_env" ] && source "$claude_env"
                 [ -f "$tilelang_env" ] && source "$tilelang_env"
                 cd "$workdir"
 
-                model_arg=""; [ -n "$model" ] && model_arg="--model $model"
-                atimeout_arg=""; [ -n "$agent_timeout" ] && atimeout_arg="--agent-timeout-sec $agent_timeout"
-                entry_arg=""; [ -n "$entry_failure_type" ] && entry_arg="--entry-failure-type $entry_failure_type"
-                mt_arg=""; [ -n "$max_turns" ] && mt_arg="--max-turns $max_turns"
+                extra_args=()
+                [ -n "$model" ]              && extra_args+=(--model "$model")
+                [ -n "$agent_timeout" ]      && extra_args+=(--agent-timeout-sec "$agent_timeout")
+                [ -n "$entry_failure_type" ] && extra_args+=(--entry-failure-type "$entry_failure_type")
+                [ -n "$max_turns" ]          && extra_args+=(--max-turns "$max_turns")
+                [ -n "$max_task_turns" ]     && extra_args+=(--max-task-turns "$max_task_turns")
+                [ -n "$kb_path" ]            && extra_args+=(--kb-path "$kb_path")
 
                 PYTHONPATH="$skill_dir${PYTHONPATH:+:$PYTHONPATH}" \
                 python3 -m engine "$task_dir" \
@@ -464,11 +506,12 @@ run_engine_turn() {
                     --workdir "$workdir" \
                     --claude-bin "$claude_bin" \
                     --allowed-tools "$allowed_tools" \
-                    $model_arg $atimeout_arg $entry_arg $mt_arg
+                    "${extra_args[@]}"
             ' _ "$CLAUDE_ENV_SH" "$TILELANG_ENV_SH" "$WORKDIR_IN_CONTAINER" "$skill_dir" \
                 "$task_dir" "$op_name" "$agent_short" "$npu" \
                 "${MODEL:-}" "$CLAUDE_BIN" "$ALLOWED_TOOLS" \
-                "${AGENT_TIMEOUT_SEC:-}" "$ENTRY_FAILURE_TYPE" "$MAX_TURNS" >> "$wlog" 2>&1 &
+                "${AGENT_TIMEOUT_SEC:-}" "$ENTRY_FAILURE_TYPE" "$MAX_TURNS" \
+                "$MAX_TASK_TURNS" "$KB_PATH" >> "$wlog" 2>&1 &
     local cmd_pid=$!
     local turn_status=0 stale_stop=0
 

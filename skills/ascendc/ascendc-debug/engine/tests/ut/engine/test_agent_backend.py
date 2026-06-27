@@ -9,12 +9,14 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 from engine.agent_backend import (
+    _build_prompt,
     make_agent_callback,
     spawn_diagnose_agent,
 )
@@ -311,6 +313,41 @@ class TestKbUsageTrace(unittest.TestCase):
             _run=self._fake_run(None))
         trace = self._read_trace()
         self.assertEqual(trace[0]["cited_titles"], [])
+
+
+class TestNoprobeInjection(unittest.TestCase):
+    """ABLATE_PROBE=1 时 _build_prompt 末尾追加 noprobe 约束 (no_probe/baseline arm)。
+
+    env 用 addCleanup 隔离防泄漏污染其他用例。
+    """
+
+    def _set_probe(self, value) -> None:
+        prev = os.environ.get("ABLATE_PROBE")
+        if value is None:
+            os.environ.pop("ABLATE_PROBE", None)
+        else:
+            os.environ["ABLATE_PROBE"] = value
+
+        def _restore() -> None:
+            if prev is None:
+                os.environ.pop("ABLATE_PROBE", None)
+            else:
+                os.environ["ABLATE_PROBE"] = prev
+        self.addCleanup(_restore)
+
+    def test_probe_ablated_injects_constraint(self) -> None:
+        self._set_probe("1")
+        with tempfile.TemporaryDirectory() as d:
+            prompt = _build_prompt(Path(d), "FakeOp", "precision_failed", 0, "0")
+        self.assertIn("ABLATE_PROBE", prompt)
+        self.assertIn("禁用插桩", prompt)
+        self.assertIn("[L5_PROBE]", prompt)
+
+    def test_probe_default_no_constraint(self) -> None:
+        self._set_probe(None)
+        with tempfile.TemporaryDirectory() as d:
+            prompt = _build_prompt(Path(d), "FakeOp", "precision_failed", 0, "0")
+        self.assertNotIn("禁用插桩", prompt)
 
 
 if __name__ == "__main__":
