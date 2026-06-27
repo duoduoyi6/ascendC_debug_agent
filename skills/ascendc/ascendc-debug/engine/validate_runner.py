@@ -31,6 +31,78 @@ _MODEL_JSON_EXCLUDES = {
     "experiment_manifest.json",
 }
 
+# 全量复验用 case JSONL 排除集 (与 _MODEL_JSON_EXCLUDES 合并，覆盖批跑脚本同名集)。
+_CASE_JSON_EXCLUDE = _MODEL_JSON_EXCLUDES | {"round_summary.json"}
+
+
+# ---------------------------------------------------------------------------
+# 全量复验: case JSONL 文件选择 (从 utils/run_unified_final_verify_full_eval.py 复制，
+# 行为对齐其 choose_full_json 选最全集合的逻辑)。utils/ 是批跑工具非引擎库，import
+# 会耦合其 argparse/main，故外科手术复制这几个纯文件函数。
+# ---------------------------------------------------------------------------
+def _count_nonempty_lines(path: Path) -> int:
+    return sum(1 for line in path.read_text(errors="replace").splitlines() if line.strip())
+
+
+def _looks_like_case_jsonl(path: Path) -> bool:
+    """首行为含 'inputs' 键的 JSON dict 才算 case JSONL (排除 model.json/状态文件)。"""
+    if path.name.startswith(("_", ".")):
+        return False
+    if path.name in _CASE_JSON_EXCLUDE or path.name == "model.json":
+        return False
+    if not (path.name.endswith(".json") or path.name.endswith(".json.bak")
+            or path.name.endswith(".json.full")):
+        return False
+    try:
+        first = next(line for line in path.read_text(errors="replace").splitlines()
+                     if line.strip())
+        data = json.loads(first)
+    except Exception:  # noqa: BLE001 — 非法/空文件一律判否
+        return False
+    return isinstance(data, dict) and "inputs" in data
+
+
+def _active_json_name(path: Path) -> str:
+    """全量备份文件 (<op>.json.bak / .json.full) 对应的生效文件名 <op>.json。"""
+    name = path.name
+    if name.endswith(".json.bak"):
+        return name[:-4]
+    if name.endswith(".json.full"):
+        return name[:-5]
+    return name
+
+
+def _choose_full_json(source_dir: Path) -> tuple[Optional[Path], int]:
+    """选任务目录里最全的 case JSONL: 行数→后缀分(.bak/.full=2 > .json=1)→名字。"""
+    candidates = [p for p in Path(source_dir).iterdir()
+                  if p.is_file() and _looks_like_case_jsonl(p)]
+    if not candidates:
+        return None, 0
+
+    def rank(path: Path) -> tuple[int, int, str]:
+        lines = _count_nonempty_lines(path)
+        suffix_score = 2 if path.name.endswith((".json.bak", ".json.full")) else 1
+        return (lines, suffix_score, path.name)
+
+    best = max(candidates, key=rank)
+    return best, _count_nonempty_lines(best)
+
+
+def _full_eval_enabled() -> bool:
+    """全量复验闸开关。默认开；ABLATE_FULL_EVAL=1 (或 ASCENDC_ABLATE_FULL_EVAL=1) 关。"""
+    for key in ("ABLATE_FULL_EVAL", "ASCENDC_ABLATE_FULL_EVAL"):
+        if os.environ.get(key) == "1":
+            return False
+    return True
+
+
+def _full_eval_trigger_threshold() -> float:
+    """轻量 match_rate ≥ 此阈值才切全量复验 (默认 99.0，对齐 nearly_success 线)。"""
+    try:
+        return float(os.environ.get("ASCENDC_DEBUG_FULL_EVAL_TRIGGER", "99.0"))
+    except (TypeError, ValueError):
+        return 99.0
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -244,6 +316,7 @@ def _write_validation_result(
     stderr_text: str,
     stdout_path: Path,
     stderr_path: Path,
+    full_eval: Optional[dict] = None,
 ) -> Path:
     tuning_dir = task_dir / "precision_tuning"
     tuning_dir.mkdir(parents=True, exist_ok=True)
@@ -263,9 +336,140 @@ def _write_validation_result(
         "stdout_path": str(stdout_path),
         "stderr_path": str(stderr_path),
     }
+    # 全量复验产物 (§2.1)。默认 None → 不写键，旧 schema 不变 (向后兼容已跑产物/UT)。
+    if full_eval is not None:
+        payload["full_eval"] = full_eval
     path = tuning_dir / f"validation_result_attempt_{attempt}.json"
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return path
+
+
+def _full_eval_state_path(task_dir: Path) -> Path:
+    return task_dir / "precision_tuning" / ".full_eval_state.json"
+
+
+def _upsert_full_eval_state(task_dir: Path, *, attempt: int, match_rate: float) -> None:
+    """跨轮全量复验收敛态 (best-effort)。供 branch_precision 判"是否已做过/有无改善"。
+
+    attempts_done: 已做过全量复验的 attempt 列表 (去重升序)；
+    best_full_match_rate: 历史最高全量 match_rate (判无改善)；
+    last_full_match_rate / last_attempt: 最近一次。
+    """
+    path = _full_eval_state_path(task_dir)
+    state = {}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                state = loaded
+        except (ValueError, OSError):
+            state = {}
+    done = set(state.get("attempts_done", []))
+    done.add(attempt)
+    prev_best = state.get("best_full_match_rate")
+    best = match_rate if prev_best is None else max(float(prev_best), match_rate)
+    state.update({
+        "attempts_done": sorted(done),
+        "best_full_match_rate": best,
+        "last_full_match_rate": match_rate,
+        "last_attempt": attempt,
+    })
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _run_full_eval(
+    task_dir: Path,
+    *,
+    attempt: int,
+    repo_root: Path,
+    env: dict[str, str],
+    clean_build: bool,  # noqa: ARG001 — 全量不重 build (.so 已在)，保留签名对齐
+    timeout: Optional[float],
+) -> Optional[dict]:
+    """轻量达阈值后用最全 case 集复验一次 (§2.1)。
+
+    物理机制 (对齐 utils/run_unified_final_verify_full_eval.py): 备份当前生效 <op>.json →
+    用 .json.bak/.json.full 覆盖 → 跑同一 verification (不重 build) → finally 恢复。
+    返回 None = 无更全集合 (only_py 算子 / 无 .bak)，下游 graceful 回退轻量口径。
+    """
+    task_dir = Path(task_dir)
+    full_json, full_lines = _choose_full_json(task_dir)
+    if full_json is None:
+        return None
+    active_name = _active_json_name(full_json)
+    active_path = task_dir / active_name
+    # 全量文件必须比当前生效集更全才有复验意义 (full_json 即生效文件本身 = 无备份)。
+    cur_lines = _count_nonempty_lines(active_path) if active_path.exists() else 0
+    if active_path == full_json or full_lines <= cur_lines:
+        return None
+
+    # 备份用独立后缀，避开 _choose_full_json 只认的 .json/.json.bak/.json.full。
+    backup_path = task_dir / f"{active_name}.lightweight_bak_attempt{attempt}"
+    logs_dir = task_dir / ".verify_logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    stdout_path = logs_dir / f"phase8_attempt{attempt}_full.stdout"
+    stderr_path = logs_dir / f"phase8_attempt{attempt}_full.stderr"
+    stdout_path.write_text("", encoding="utf-8")
+    stderr_path.write_text("", encoding="utf-8")
+
+    original_bytes = active_path.read_bytes() if active_path.exists() else None
+    try:
+        backup_path.write_bytes(original_bytes if original_bytes is not None else b"")
+        active_path.write_text(full_json.read_text(errors="replace"), encoding="utf-8")
+        verify_cmd = [
+            sys.executable,
+            str(repo_root / "utils" / "verification_ascendc.py"),
+            str(task_dir),
+        ]
+        rc = _run_logged(
+            verify_cmd,
+            cwd=repo_root,
+            env=env,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            title="verification_ascendc_full",
+            timeout=timeout,
+        )
+    finally:
+        if original_bytes is not None:
+            try:
+                active_path.write_bytes(original_bytes)
+            except OSError:
+                pass
+        try:
+            backup_path.unlink()
+        except OSError:
+            pass
+
+    stdout_text = _read(stdout_path)
+    metrics = _validation_metrics(stdout_text, rc)
+    total_cases = metrics["total_cases"]
+    crashed = rc != 0 and total_cases == 0  # 跑不起来 vs 精度失败 的区分
+    match_rate = float(metrics["match_rate"])
+    result = {
+        "ran": True,
+        "full_json_source": full_json.name,
+        "full_json_cases": full_lines,
+        "match_rate": match_rate,
+        "passed_cases": metrics["passed_cases"],
+        "total_cases": total_cases,
+        "correctness_passed": rc == 0,
+        "crashed": crashed,
+        "stdout_path": str(stdout_path),
+        "first_error_lines": _extract_first_error(stdout_text) if rc != 0 else [],
+    }
+    # 单独落盘 + 更新跨轮收敛态。
+    try:
+        (task_dir / "precision_tuning" / f"validation_result_attempt_{attempt}_full.json"
+         ).write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+    _upsert_full_eval_state(task_dir, attempt=attempt, match_rate=match_rate)
+    return result
 
 
 def run_objective_validation(
@@ -330,6 +534,23 @@ def run_objective_validation(
 
     stdout_text = _read(stdout_path)
     stderr_text = _read(stderr_path)
+
+    # 全量复验闸 (§2.1): 轻量 verify 全过 (rc=0) 或近通过 (match_rate≥触发阈值) 时，
+    # 用最全 case 集复验一次。结果落 validation_result 的 full_eval 子字段供 Gate-V 判信号。
+    # ABLATE_FULL_EVAL=1 关闸；无更全集合 (only_py 算子) 自动 graceful no-op (返回 None)。
+    full_eval = None
+    if _full_eval_enabled() and verification_ran:
+        lm = _validation_metrics(stdout_text, verify_rc)
+        if verify_rc == 0 or float(lm["match_rate"]) >= _full_eval_trigger_threshold():
+            full_eval = _run_full_eval(
+                task_dir,
+                attempt=attempt,
+                repo_root=repo_root,
+                env=env,
+                clean_build=clean_build,
+                timeout=timeout,
+            )
+
     validation_result_path = _write_validation_result(
         task_dir,
         attempt=attempt,
@@ -338,6 +559,7 @@ def run_objective_validation(
         stderr_text=stderr_text,
         stdout_path=stdout_path,
         stderr_path=stderr_path,
+        full_eval=full_eval,
     )
 
     classify_cmd = [
@@ -381,6 +603,7 @@ def run_objective_validation(
         "verify_status_path": str(status_path),
         "validation_result_path": str(validation_result_path),
         "input_normalization": input_normalization,
+        "full_eval": full_eval,
     }
 
 

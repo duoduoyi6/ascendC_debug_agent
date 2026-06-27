@@ -229,6 +229,43 @@ def _classify_claude_result(result_file: Path) -> dict:
     return result
 
 
+def _write_kb_usage_trace(task_dir: Path, attempt: int,
+                          final_response: Optional[str]) -> None:
+    """注入的 KB top_titles 中哪些被 agent 引用 → 追加到 kb_usage_trace.json。"""
+    log_path = task_dir / "precision_tuning" / "knowledge_search_log.json"
+    trace_path = task_dir / "precision_tuning" / "kb_usage_trace.json"
+    try:
+        data = json.loads(log_path.read_text(encoding="utf-8")) if log_path.exists() else []
+    except (ValueError, OSError):
+        data = []
+    injected: list[str] = []
+    for e in data:
+        if isinstance(e, dict) and e.get("attempt") == attempt:
+            injected.extend(e.get("top_titles") or [])
+    # deduplicate preserving order
+    seen: set[str] = set()
+    injected = [t for t in injected if not (t in seen or seen.add(t))]  # type: ignore[func-returns-value]
+
+    text = (final_response or "").lower()
+    cited = [t for t in injected if t.lower() in text]
+    entry = {
+        "attempt": attempt,
+        "injected_titles": injected,
+        "cited_titles": cited,
+        "citation_rate": round(len(cited) / len(injected), 3) if injected else None,
+    }
+    try:
+        existing = json.loads(trace_path.read_text(encoding="utf-8")) if trace_path.exists() else []
+        if not isinstance(existing, list):
+            existing = []
+    except (ValueError, OSError):
+        existing = []
+    existing = [e for e in existing if not (isinstance(e, dict) and e.get("attempt") == attempt)]
+    existing.append(entry)
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    trace_path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def _build_claude_cmd(prompt: str, *, claude_bin: str, model: Optional[str],
                       agent_name: str, session_id: str, workdir: Path,
                       allowed_tools: str, result_file: Path,
@@ -308,6 +345,7 @@ def spawn_diagnose_agent(
 
     result = _classify_claude_result(result_file)
     result["session_id"] = session_id
+    _write_kb_usage_trace(Path(task_dir), attempt, result.get("final_response"))
     return result
 
 

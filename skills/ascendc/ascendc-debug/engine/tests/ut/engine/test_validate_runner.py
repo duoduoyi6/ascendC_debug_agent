@@ -129,5 +129,97 @@ class TestForensicsCache(unittest.TestCase):
         self.assertFalse(r1.get("cached"))
 
 
+class TestRunFullEval(unittest.TestCase):
+    """全量复验 (§2.1): 备份→覆盖<op>.json→跑→finally恢复 的隔离正确性。
+
+    mock _run_logged 不真跑 verification: 按需写 case 行到 stdout 控制 match_rate，
+    核心断言全量跑前后生效 <op>.json 字节一致 (恢复正确，不污染 agent 后续输入)。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.task_dir = Path(self._tmp.name)
+        (self.task_dir / "precision_tuning").mkdir(parents=True)
+        # 轻量 5_FakeOp.json (2 行) + 全量 .bak (4 行)，含 inputs 键以过 _looks_like_case_jsonl。
+        self.light = self.task_dir / "5_FakeOp.json"
+        self.light.write_text(
+            '{"inputs": [1]}\n{"inputs": [2]}\n', encoding="utf-8")
+        self.full = self.task_dir / "5_FakeOp.json.bak"
+        self.full.write_text(
+            '{"inputs": [1]}\n{"inputs": [2]}\n{"inputs": [3]}\n{"inputs": [4]}\n',
+            encoding="utf-8")
+        self._env_backup = {k: os.environ.pop(k, None)
+                            for k in ("ABLATE_FULL_EVAL", "ASCENDC_ABLATE_FULL_EVAL")}
+
+    def tearDown(self) -> None:
+        for k, v in self._env_backup.items():
+            if v is not None:
+                os.environ[k] = v
+        self._tmp.cleanup()
+
+    def _fake_run_logged(self, *, case_lines: str, rc: int):
+        """返回一个 fake _run_logged: 把 case_lines 写进 stdout_path 并返回 rc。"""
+        def _fake(cmd, *, cwd, env, stdout_path, stderr_path, title, timeout):
+            Path(stdout_path).write_text(case_lines, encoding="utf-8")
+            return rc
+        return _fake
+
+    def _call(self):
+        return validate_runner._run_full_eval(
+            self.task_dir, attempt=0, repo_root=Path("/repo"),
+            env={}, clean_build=True, timeout=None)
+
+    def test_full_eval_all_matched_restores_json(self) -> None:
+        before = self.light.read_bytes()
+        cases = "case[0]: output: matched\ncase[1]: output: matched\n" \
+                "case[2]: output: matched\ncase[3]: output: matched\n"
+        with mock.patch.object(validate_runner, "_run_logged",
+                               self._fake_run_logged(case_lines=cases, rc=0)):
+            fe = self._call()
+        self.assertTrue(fe["ran"])
+        self.assertFalse(fe["crashed"])
+        self.assertEqual(fe["total_cases"], 4)
+        self.assertEqual(fe["passed_cases"], 4)
+        self.assertEqual(fe["full_json_source"], "5_FakeOp.json.bak")
+        # 关键: 生效 <op>.json 恢复为轻量原文 (字节一致)。
+        self.assertEqual(self.light.read_bytes(), before)
+        # 备份文件已删。
+        self.assertFalse(
+            (self.task_dir / "5_FakeOp.json.lightweight_bak_attempt0").exists())
+        # 单独落盘 + 跨轮状态。
+        self.assertTrue(
+            (self.task_dir / "precision_tuning" / "validation_result_attempt_0_full.json").exists())
+        self.assertTrue(
+            (self.task_dir / "precision_tuning" / ".full_eval_state.json").exists())
+
+    def test_full_eval_partial_fail_restores_json(self) -> None:
+        before = self.light.read_bytes()
+        cases = "case[0]: output: matched\ncase[1]: output: matched\n" \
+                "case[2]: output: mismatch_ratio=10.000000%\ncase[3]: output: matched\n"
+        with mock.patch.object(validate_runner, "_run_logged",
+                               self._fake_run_logged(case_lines=cases, rc=1)):
+            fe = self._call()
+        self.assertEqual(fe["total_cases"], 4)
+        self.assertEqual(fe["passed_cases"], 3)
+        self.assertFalse(fe["crashed"])
+        self.assertEqual(self.light.read_bytes(), before)
+
+    def test_full_eval_crash_restores_json(self) -> None:
+        before = self.light.read_bytes()
+        with mock.patch.object(validate_runner, "_run_logged",
+                               self._fake_run_logged(case_lines="Traceback...\n", rc=1)):
+            fe = self._call()
+        self.assertTrue(fe["crashed"])  # rc!=0 且无 case 数据
+        self.assertEqual(self.light.read_bytes(), before)
+
+    def test_no_fuller_json_returns_none(self) -> None:
+        # 删掉 .bak → 只剩轻量 → 无更全集合 → None (only_py 算子同此态)。
+        self.full.unlink()
+        with mock.patch.object(validate_runner, "_run_logged",
+                               self._fake_run_logged(case_lines="", rc=0)):
+            fe = self._call()
+        self.assertIsNone(fe)
+
+
 if __name__ == "__main__":
     unittest.main()

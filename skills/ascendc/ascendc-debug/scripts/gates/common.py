@@ -321,14 +321,17 @@ def run_common(step: str, task_dir: Path, op_name: str, attempt: int) -> GateOut
     为纯诊断信息。
     """
     checks: dict = {}
-    checks.update(check_anticheat(task_dir))
-    checks.update(check_ast_degrade(task_dir))
+    _ablate_ac = os.environ.get("ABLATE_ANTICHEAT") == "1"
+    if not _ablate_ac:
+        checks.update(check_anticheat(task_dir))
+        checks.update(check_ast_degrade(task_dir))
     checks.update(check_structure(task_dir, op_name))
     if step == "validate":
         checks.update(check_verify_status_present(task_dir))
         # C++ 源码扫描只在 validate step 跑: forensics/audit 阶段 kernel 可能仍在构造，
         # NO_KERNEL_LAUNCH 会误报污染 cheat_history。validate 时 kernel 已成型，扫描可信。
-        checks.update(check_cpp_regression(task_dir))
+        if not _ablate_ac:
+            checks.update(check_cpp_regression(task_dir))
     if step in ("audit", "fix", "validate"):
         checks.update(check_audit_file_present(task_dir, attempt))
 
