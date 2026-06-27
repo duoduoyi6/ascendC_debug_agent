@@ -441,6 +441,12 @@ Gate-A 通过后，`precision_gate.py` 自动将以上 section 提取为独立�
     "compilation_log": null,
     "tuning_directions": "precision_tuning/tuning_directions.json",
     "forensics_used": "precision_tuning/forensics_report_0.json"
+    // "section_sources": {"l5_probe": "INSTRUMENTATION_FINDINGS"}
+    //   ↑ 仅在真探针连续缺失触发兜底降级时出现；正常轮不写此字段。
+    //     标记某 section 内容实际取自别名 section（L5_PROBE 真探针连续 ≥2 轮
+    //     missing → 回退取 INSTRUMENTATION_FINDINGS 内容兜底）。供统计/消融区分
+    //     "真探针通过" vs "回退兜底"。同一信号亦经 Gate-A 的 events result dict
+    //     顶层 l5_probe_degraded / l5_probe_source 透传（见 SKILL.md L5_PROBE 节）。
   }
 }
 ```
@@ -571,6 +577,8 @@ Gate-A 通过后，`precision_gate.py` 自动将以上 section 提取为独立�
 **设计意图**：避免下一轮 attempt 读取整个 `precision_audit.md`（几百行），Agent 按需通过 `round_summary_N.index.sections.*` 的路径直接读取对应的单个 section 文件。
 
 > **提取失败处理**：若某 section 未找到，对应 `index.sections.{name}` 置为 `null`，Gate-A 不因此阻断，Agent fallback 读取 `index.audit_full`（完整审计文件）。
+
+> **L5_PROBE 真探针降级兜底**：Gate-A 优先要求 `[L5_PROBE]` 写真实 P1/P2/P3 printf 实测值（executed）；带理由的合法跳过（skipped，SKILL.md 4 条跳过条件）亦视为存在。仅当连续 ≥2 轮真探针缺失（missing）时，才允许回退取 `[INSTRUMENTATION_FINDINGS]` 内容兜底填充 `l5_probe.md`，此时 `index.section_sources.l5_probe = "INSTRUMENTATION_FINDINGS"` 留痕，且 Gate-A 的 events result dict 顶层置 `l5_probe_degraded=true` / `l5_probe_source="INSTRUMENTATION_FINDINGS"`。降级**非阻断但必标记**，供统计/消融区分真探针通过与回退兜底。
 
 ---
 

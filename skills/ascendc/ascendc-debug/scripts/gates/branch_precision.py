@@ -28,6 +28,15 @@ from .common import GateOutcome, MAX_ATTEMPTS
 
 MAX_STAGNANT_ROUNDS = 2
 
+# L5_PROBE 真探针优先：连续 N 轮 audit 缺真探针 (P1/P2/P3 实测值) 才允许
+# INSTRUMENTATION_FINDINGS 兜底并标 degraded。单轮缺失不回退——逼 agent 走真探针。
+_L5_PROBE_FALLBACK_THRESHOLD = 2
+
+# 全量复验闸 (§2.1)：连续 N 轮全量未满且无改善 → 回落 nearly_success STOP，
+# 避免真·量化噪声 (全量也只到 99%) 无限重试烧预算。EPS 区分真改善 vs 噪声抖动。
+_FULL_EVAL_MAX_ROUNDS = 2
+_FULL_EVAL_IMPROVE_EPS = 0.5  # 百分点
+
 
 class _LegacyPrecisionChecker:
     """原 GateChecker 精度相关方法的 1:1 搬移。"""
@@ -151,6 +160,8 @@ class _LegacyPrecisionChecker:
             "has_direction_assessment": True,
         }
         content = None
+        l5_probe_degraded = False
+        l5_probe_source = "L5_PROBE"
         if checks["report_exists"]:
             with open(path, encoding="utf-8") as f:
                 content = f.read()
@@ -159,13 +170,26 @@ class _LegacyPrecisionChecker:
                              ("COMPUTATION_DECOMPOSITION", "has_computation_decomposition"),
                              ("REFERENCE_IMPL_SPEC", "has_reference_impl_spec"),
                              ("KERNEL_STEP_TRACE", "has_kernel_step_trace"),
-                             ("L5_PROBE", "has_l5_probe"),
                              ("ROOT_CAUSE", "has_root_cause"),
                              ("CAUSAL_CHAIN_ANALYSIS", "has_causal_chain_analysis"),
                              ("FIX_PLAN", "has_fix_plan"),
                              ("TARGET_FILES", "has_target_files"),
                              ("EXPERIMENT_RESULTS", "has_experiment_results")]:
                 checks[key] = f"[{tag}]" in content
+            # L5_PROBE 真探针优先 (取代统一存在性检查): executed/skipped 算"存在"
+            # (保留 SKILL.md 合法跳过通过契约); 仅 missing 才是真探针失败。连续
+            # >=_L5_PROBE_FALLBACK_THRESHOLD 轮 missing 才允许 INSTRUMENTATION_FINDINGS
+            # 兜底并标 degraded——单轮缺失不回退，逼 agent 走真探针。
+            probe_status = self._l5_probe_status(content)
+            if probe_status != "missing":
+                checks["has_l5_probe"] = True
+            else:
+                consecutive = self._consecutive_probe_failures()  # 不含本轮
+                if (consecutive + 1 >= _L5_PROBE_FALLBACK_THRESHOLD
+                        and "[INSTRUMENTATION_FINDINGS]" in content):
+                    checks["has_l5_probe"] = True
+                    l5_probe_degraded = True
+                    l5_probe_source = "INSTRUMENTATION_FINDINGS"
             checks["has_direction_assessment"] = (
                 self.attempt == 0 or "[DIRECTION_ASSESSMENT]" in content
             )
@@ -176,9 +200,17 @@ class _LegacyPrecisionChecker:
                     checks["direction_assessment_binary"] = False
 
         gate_result = self._result("GATE-A", checks)
+        # degraded 标记记 gate_result 顶层 (非 checks——否则进 all(checks.values())
+        # 误判)，供统计/消融区分"真探针通过"与"连续失败回退兜底"。
+        if l5_probe_degraded:
+            gate_result["l5_probe_degraded"] = True
+            gate_result["l5_probe_source"] = l5_probe_source
 
-        if gate_result["passed"] and content:
-            self._write_audit_index(content)
+        # 正常通过则写 index；degraded 兜底也写 (即便 passed=False)——回退轮常因别的
+        # section 缺失而 passed=False，而 section_sources 留痕恰是最该保住的兜底证据，
+        # 不能被 passed 门控吞掉 (§1.7c 必需标记)。
+        if content and (gate_result["passed"] or l5_probe_degraded):
+            self._write_audit_index(content, l5_probe_source=l5_probe_source)
 
         return gate_result
 
@@ -287,16 +319,39 @@ class _LegacyPrecisionChecker:
     # ================================================================
 
     def _compute_loop_signal(self, passed: bool, match_rate: float = None, forensics_data: dict = None) -> tuple:
-        if passed:
-            return "PASS", "精度验证通过", "precision_passed"
+        # 全量复验闸 (§2.1): 轻量结果须经全量 case 集复核才定终态。
+        # full_eval 为 None = 闸关 / only_py 算子无全量集 → graceful 回退轻量口径 (原行为)。
+        full_eval = self._load_full_eval()
 
-        # match_rate ≥ 99% 但 evaluate 返回 FAIL：量化截断噪声或 float16 精度损失，无可自动修复点
+        if passed:
+            # 轻量全过。无全量产物 → 维持原 PASS；有则须全量也 100% 才算真过 (消假阳性)。
+            if full_eval is None or not full_eval.get("ran"):
+                return "PASS", "精度验证通过", "precision_passed"
+            if full_eval.get("crashed"):
+                return self._full_eval_continue_or_stop(full_eval, reason="轻量过但全量复验crash")
+            if full_eval.get("total_cases") and \
+                    full_eval.get("passed_cases") == full_eval.get("total_cases"):
+                return "PASS", "精度验证通过 (全量复验100%)", "precision_passed"
+            return self._full_eval_continue_or_stop(full_eval, reason="轻量过但全量未满")
+
+        # match_rate ≥ 99% 但 evaluate 返回 FAIL：原 nearly_success 触发线。
+        # 现在此处不直接 STOP，而是看全量复验：全量也满 → 推过线；否则带样本继续 / 防爆回落。
         if match_rate is not None and match_rate >= 99.0:
-            return (
-                "STOP",
-                f"精度接近通过 (match_rate={match_rate:.2f}%)，疑似量化截断噪声或 float16 精度损失，建议人工确认",
-                "nearly_success",
-            )
+            if full_eval is not None and full_eval.get("ran"):
+                if not full_eval.get("crashed") and full_eval.get("total_cases") and \
+                        full_eval.get("passed_cases") == full_eval.get("total_cases"):
+                    return "PASS", (
+                        f"轻量近通过 (match_rate={match_rate:.2f}%) 且全量复验100%通过"
+                    ), "precision_passed"
+                return self._full_eval_continue_or_stop(
+                    full_eval, reason=f"轻量近通过 (match_rate={match_rate:.2f}%) 但全量未满")
+            # 全量闸关 / 无全量集 → 维持原 nearly_success STOP (向后兼容)；LoopGuard 关时放行续跑。
+            if os.environ.get("ABLATE_LOOP_GUARD") != "1":
+                return (
+                    "STOP",
+                    f"精度接近通过 (match_rate={match_rate:.2f}%)，疑似量化截断噪声或 float16 精度损失，建议人工确认",
+                    "nearly_success",
+                )
 
         # fp16 early exit: 连续两轮仅 fp16 失败且 max_abs_diff ≤ 0.25 且 mismatch_ratio < 2.0%
         if self.attempt >= 1 and forensics_data is not None:
@@ -345,6 +400,43 @@ class _LegacyPrecisionChecker:
                 pass
 
         return "CONTINUE", f"精度未通过, 进入第 {self.attempt + 2} 轮", None
+
+    def _full_eval_continue_or_stop(self, full_eval: dict, *, reason: str) -> tuple:
+        """全量复验未满时的收敛判定 (防爆核心，§2.1)。
+
+        有可定位失败样本 (total>passed 且未 crash) 或 crash → CONTINUE 带样本继续 debug
+        (stop_reason_code=full_eval_regression，CONTINUE 标签不进 _STOP_OUTCOME)；
+        连续 _FULL_EVAL_MAX_ROUNDS 轮全量无改善 → 回落 nearly_success STOP，避免真·量化
+        噪声 (全量也只到 99%) 无限重试。无可定位样本 (异常态) → 保守 STOP nearly_success。
+        """
+        state = self._load_full_eval_state()
+        rounds = len(state.get("attempts_done", []))
+        best = state.get("best_full_match_rate")
+        curr = float(full_eval.get("match_rate", 0.0))
+        improved = (best is None) or (curr > float(best) + _FULL_EVAL_IMPROVE_EPS)
+        crashed = bool(full_eval.get("crashed"))
+        total = full_eval.get("total_cases", 0) or 0
+        passed_cases = full_eval.get("passed_cases", 0) or 0
+        locatable = (total > passed_cases) and not crashed
+
+        if rounds >= _FULL_EVAL_MAX_ROUNDS and not improved:
+            return (
+                "STOP",
+                f"{reason}；全量复验连续 {rounds} 轮无改善，疑似精度上限，建议人工确认",
+                "nearly_success",
+            )
+        if locatable or crashed:
+            return (
+                "CONTINUE",
+                f"{reason}，带全量失败样本继续 debug "
+                f"(全量 {passed_cases}/{total}，match_rate={curr:.2f}%)",
+                "full_eval_regression",
+            )
+        return (
+            "STOP",
+            f"{reason}；全量复验无可定位失败样本，建议人工确认",
+            "nearly_success",
+        )
 
     def _count_stagnant(self, trend: list) -> int:
         ratios = [t["mismatch_ratio"] for t in trend if t.get("mismatch_ratio") is not None]
@@ -742,6 +834,76 @@ class _LegacyPrecisionChecker:
             return first_word in ("是", "否")
         return False
 
+    # ----------------------------------------------------------------
+    # L5_PROBE 真探针优先治理 (优先真探针 / 连续失败才回退 / 回退留痕)
+    # ----------------------------------------------------------------
+    def _l5_probe_status(self, content: str) -> str:
+        """判定 [L5_PROBE] 真探针状态，返回三态之一:
+          - "executed": section 存在，P1/P2/P3 至少一阶段有实测数值 (printf 真值)
+          - "skipped":  section 存在且状态=跳过 (带理由的合法跳过，SKILL.md 4 条跳过条件)
+          - "missing":  section 缺失，或状态=已执行但三阶段全 N/A / 仅模板占位 (无真数据)
+        has_l5_probe 据此判: executed/skipped 算"存在"(保留 SKILL.md 合法跳过通过契约);
+        仅 missing 才是真探针失败，连续多轮 missing 才允许 INSTRUMENTATION_FINDINGS 兜底。
+        """
+        section = self._extract_section(content, "L5_PROBE")
+        if section is None:
+            return "missing"
+        status_skipped = False
+        for line in section.split("\n"):
+            if "状态" in line:
+                parts = re.split(r"[:：]", line, 1)
+                val = parts[1] if len(parts) > 1 else ""
+                # SKILL 模板状态行同时含"已执行 / 跳过"两词，子串匹配两头不讨好:
+                # 仅当含"跳过"、不含"已执行"、且无 <...> 未填占位，才是真·合法跳过。
+                # 模板残留 (两词俱在或带占位) 不算 skipped，落到下方按实测值判 executed/missing。
+                if ("跳过" in val and "已执行" not in val
+                        and not re.search(r"<[^>]*>", val)):
+                    status_skipped = True
+                break
+        if status_skipped:
+            return "skipped"
+        return "executed" if self._l5_probe_has_measured_value(section) else "missing"
+
+    def _l5_probe_has_measured_value(self, section: str) -> bool:
+        """P1/P2/P3 阶段行是否含真实测值 (排除 N/A 与未填的 <...> 模板占位)。"""
+        for line in section.split("\n"):
+            if not re.search(r"\bP[123]\b", line):
+                continue
+            parts = re.split(r"[:：]", line, 1)
+            val = parts[1].strip() if len(parts) > 1 else ""
+            if not val or (val.startswith("<") and val.endswith(">")):
+                continue  # 空 / 未填模板占位
+            # 先认真值: 行内存在数字即视为有实测值。"N/A" 仅在剥去 N/A token 后
+            # 再无数字时才否决——避免混合行 (如 "x[0]=0.5000 / N/A") 被整行作废。
+            stripped = re.sub(r"\bN/?A\b", "", val, flags=re.IGNORECASE)
+            if re.search(r"\d", stripped):
+                return True
+        return False
+
+    def _consecutive_probe_failures(self) -> int:
+        """回看本轮之前 (attempt-1, attempt-2, …) 连续真探针缺失 (missing) 的轮数。
+
+        历史某轮 audit md 缺失或不可读 → break (无法判定，保守不累计)，避免把
+        provider/budget 异常缺产物的轮误计为真探针失败。
+        """
+        count = 0
+        a = self.attempt - 1
+        while a >= 0:
+            path = os.path.join(self.tuning_dir, f"precision_audit_{a}.md")
+            if not os.path.exists(path):
+                break
+            try:
+                with open(path, encoding="utf-8") as f:
+                    prev = f.read()
+            except (OSError, UnicodeDecodeError):
+                break
+            if self._l5_probe_status(prev) == "missing":
+                count += 1
+                a -= 1
+            else:
+                break
+        return count
+
     # ================================================================
     # Section 提取与 audit index 写入
     # ================================================================
@@ -798,13 +960,16 @@ class _LegacyPrecisionChecker:
                 return first_word
         return None
 
-    def _write_audit_index(self, content: str) -> None:
+    def _write_audit_index(self, content: str, l5_probe_source: str = "L5_PROBE") -> None:
         attempt_dir = os.path.join(self.tuning_dir, "history", f"attempt_{self.attempt}")
         sections_dir = os.path.join(attempt_dir, "sections")
         try:
             os.makedirs(sections_dir, exist_ok=True)
         except OSError:
             return
+        # 真探针缺失连续超阈时 check_audit 传入 l5_probe_source=INSTRUMENTATION_FINDINGS,
+        # 此时 l5_probe 索引取该 section 内容兜底; section_sources 顶层留痕 (§1.7c 必需标记)。
+        section_sources = {}
 
         SECTION_MAP = [
             ("forensics_summary",        "FORENSICS_SUMMARY"),
@@ -825,14 +990,20 @@ class _LegacyPrecisionChecker:
         sections_index = {}
         base = f"precision_tuning/history/attempt_{self.attempt}/sections"
         for key, tag in SECTION_MAP:
-            sec_text = self._extract_section(content, tag)
+            extract_tag = tag
+            # 真探针缺失连续超阈：l5_probe 改取兜底来源 (INSTRUMENTATION_FINDINGS) 内容。
+            if key == "l5_probe" and l5_probe_source != "L5_PROBE":
+                extract_tag = l5_probe_source
+            sec_text = self._extract_section(content, extract_tag)
             rel_path = f"{base}/{key}.md"
             if sec_text is not None:
                 abs_path = os.path.join(sections_dir, f"{key}.md")
                 try:
                     with open(abs_path, "w", encoding="utf-8") as f:
-                        f.write(f"[{tag}]\n\n{sec_text}\n")
+                        f.write(f"[{extract_tag}]\n\n{sec_text}\n")
                     sections_index[key] = rel_path
+                    if extract_tag != tag:
+                        section_sources[key] = extract_tag  # 留痕：内容实际来自别名 section
                 except OSError:
                     sections_index[key] = None
             else:
@@ -857,6 +1028,9 @@ class _LegacyPrecisionChecker:
             "tuning_directions":  "precision_tuning/tuning_directions.json",
             "forensics_used":     f"precision_tuning/forensics_report_{n}.json",
         }
+        # 仅 degraded 兜底发生时写 section_sources (§1.7c 必需标记)，正常轮不污染既有 schema。
+        if section_sources:
+            index["section_sources"] = section_sources
 
         initial_summary = {
             "attempt": self.attempt,
@@ -891,6 +1065,36 @@ class _LegacyPrecisionChecker:
             except (json.JSONDecodeError, OSError):
                 pass
         return None
+
+    def _load_full_eval(self) -> dict:
+        """读取当前 attempt validation_result 的 full_eval 子字段 (§2.1 全量复验产物)。
+
+        无 full_eval / 文件缺失 / 解析失败 / 闸关 → 返回 None (全量闸关或 only_py 算子的正常态)。
+        """
+        if os.environ.get("ABLATE_FULL_EVAL") == "1":
+            return None
+        path = os.path.join(self.tuning_dir, f"validation_result_attempt_{self.attempt}.json")
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    data = json.load(f)
+                fe = data.get("full_eval")
+                return fe if isinstance(fe, dict) else None
+            except (json.JSONDecodeError, OSError):
+                pass
+        return None
+
+    def _load_full_eval_state(self) -> dict:
+        """读取 .full_eval_state.json 跨轮收敛态；缺失/损坏返回 {}。"""
+        path = os.path.join(self.tuning_dir, ".full_eval_state.json")
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    data = json.load(f)
+                return data if isinstance(data, dict) else {}
+            except (json.JSONDecodeError, OSError):
+                pass
+        return {}
 
     def _get_baseline_match_rate(self, forensics_data: dict = None):
         baseline_path = os.path.join(self.tuning_dir, "baseline_state.json")
@@ -938,8 +1142,12 @@ class _LegacyPrecisionChecker:
 def _legacy_to_outcome(raw: dict) -> GateOutcome:
     """把 _LegacyPrecisionChecker 返回的 dict (gate/passed/checks[/loop_*]) 转成 GateOutcome。"""
     checks = dict(raw.get("checks", {}))
-    # 附带 prerequisite_error / stop_reason_code / attempt / max_attempts 等保留到 checks
-    for k in ("prerequisite_error", "stop_reason_code", "attempt", "max_attempts"):
+    # 附带 prerequisite_error / stop_reason_code / attempt / max_attempts 等保留到 checks。
+    # l5_probe_degraded / l5_probe_source 同走 checks 通道 (GateOutcome.to_gate_output
+    # 仅输出 checks，这是唯一能穿过投影链落进 events 的载体)；二者在 check_audit 内
+    # passed 算完后才挂顶层，故此处搬入 checks 不影响 all(checks.values()) 判定。
+    for k in ("prerequisite_error", "stop_reason_code", "attempt", "max_attempts",
+              "l5_probe_degraded", "l5_probe_source"):
         if k in raw:
             checks[k] = raw[k]
     return GateOutcome(

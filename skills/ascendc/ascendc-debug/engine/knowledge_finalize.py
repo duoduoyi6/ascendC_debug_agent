@@ -20,6 +20,8 @@ dump 完成入库 (沿用其全部字段校验，不在此重复)。
 from __future__ import annotations
 
 import json
+import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -32,6 +34,10 @@ _ENGINE_DIR = Path(__file__).resolve().parent
 _KB_SCRIPT = _ENGINE_DIR.parent / "scripts" / "precision_knowledge.py"
 
 _DUMP_TIMEOUT_SEC = 120  # dump 是纯文件操作，120s 充裕；防子进程异常卡死。
+
+# §2.2: 入库判据改全量——全量复验下 matched_ratio ≥ 此阈值且不 crash 才入库。
+# 0.95 保住 50/51(0.98)/49/50(0.98) 近满分高价值条目，挡 runtime/crash 类污染。
+_KB_FULL_EVAL_THRESHOLD = 0.95
 
 
 def _skip(reason: str, **extra) -> dict:
@@ -60,6 +66,62 @@ def _cheat_history_clean(task_dir: Path) -> bool:
     except (ValueError, OSError):
         return False
     return not (data.get("cheating_attempts") or [])
+
+
+def _kb_full_eval_threshold() -> float:
+    try:
+        return float(os.environ.get("ASCENDC_DEBUG_KB_FULL_EVAL_THRESHOLD",
+                                    str(_KB_FULL_EVAL_THRESHOLD)))
+    except (TypeError, ValueError):
+        return _KB_FULL_EVAL_THRESHOLD
+
+
+def _latest_full_eval(task_dir: Path) -> Optional[dict]:
+    """取最大 attempt 的 validation_result 的 full_eval 子字段 (终态轮的全量复验产物)。
+
+    无 validation_result / 均无 full_eval → None (全量闸关 / only_py 算子 / 旧产物)。
+    """
+    tuning = task_dir / "precision_tuning"
+    if not tuning.is_dir():
+        return None
+    best_attempt, best_fe = -1, None
+    for path in tuning.glob("validation_result_attempt_*.json"):
+        m = re.search(r"validation_result_attempt_(\d+)\.json$", path.name)
+        if not m:
+            continue
+        attempt = int(m.group(1))
+        if attempt <= best_attempt:
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            continue
+        fe = data.get("full_eval")
+        if isinstance(fe, dict):
+            best_attempt, best_fe = attempt, fe
+    return best_fe
+
+
+def _full_eval_admits(task_dir: Path) -> tuple[bool, str]:
+    """§2.2 入库判据: 全量复验下不 crash 且 matched_ratio ≥ 阈值才放行。
+
+    无 full_eval / 未 ran → 放行 (向后兼容旧产物/无全量集的 only_py 算子，不引第三套数据源)。
+    crashed → 挡 (更广输入下根本跑不起来，非测试不全)。ratio < 阈值 → 挡。
+    """
+    fe = _latest_full_eval(task_dir)
+    if fe is None or not fe.get("ran"):
+        return True, "无全量复验产物，按轻量口径放行 (向后兼容)"
+    if fe.get("crashed"):
+        return False, "全量复验 crash (更广输入跑不起来)"
+    total = fe.get("total_cases", 0) or 0
+    passed = fe.get("passed_cases", 0) or 0
+    if total <= 0:
+        return True, "全量复验无 case 数据，放行"
+    ratio = passed / total
+    threshold = _kb_full_eval_threshold()
+    if ratio < threshold:
+        return False, f"全量 matched_ratio={ratio:.3f} < {threshold}"
+    return True, f"全量 matched_ratio={ratio:.3f} 达标"
 
 
 def _candidate_action(task_dir: Path) -> tuple[str, Optional[str]]:
@@ -102,6 +164,10 @@ def _finalize_impl(task_dir: Path, kb_path: str, session_outcome: Optional[str],
         return _skip("无 candidate_kb_entry.json (agent 未产出候选)")
     if not _cheat_history_clean(task_dir):
         return _skip("cheat_history 非空 (reportable_success=false)，保守不入库")
+
+    full_ok, full_reason = _full_eval_admits(task_dir)
+    if not full_ok:
+        return _skip(f"全量复验判据未过: {full_reason}")
 
     action, merge_target = _candidate_action(task_dir)
     if action == "abandon":

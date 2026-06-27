@@ -192,7 +192,7 @@ class TestRoundSequence(unittest.TestCase):
         self.assertEqual(d.kind, "py_action")
 
     def test_step_after_forensics_is_knowledge_search(self) -> None:
-        # precision_failed 序列: forensics → knowledge_search → diagnose_and_fix → validate
+        # precision_failed 序列: forensics → knowledge_search → audit → diagnose_and_fix → validate
         ft = "precision_failed"
         st = _state(current_ft=ft, total_attempts=1, per_branch={ft: 1},
                     events=[_attempt_ev(ft), _completed_ev("forensics")])
@@ -201,21 +201,49 @@ class TestRoundSequence(unittest.TestCase):
         self.assertEqual(d.step, "knowledge_search")
         self.assertEqual(d.kind, "py_action")
 
-    def test_step_after_knowledge_search_is_spawn(self) -> None:
+    def test_step_after_knowledge_search_is_audit(self) -> None:
+        # knowledge_search 后是 audit (Gate-A 接回，修复前): py_action/gate_step=audit。
         ft = "precision_failed"
         st = _state(current_ft=ft, total_attempts=1, per_branch={ft: 1},
                     events=[_attempt_ev(ft), _completed_ev("forensics"),
                             _completed_ev("knowledge_search")])
         d = debug_next_action(st)
         self.assertIsInstance(d, Action)
+        self.assertEqual(d.step, "audit")
+        self.assertEqual(d.kind, "py_action")
+        self.assertEqual(d.name, "precision_gate")
+        self.assertEqual(d.skill_args["gate_step"], "audit")
+
+    def test_step_after_audit_is_spawn(self) -> None:
+        # audit 完成后推进到 diagnose_and_fix (spawn_agent)。
+        ft = "precision_failed"
+        st = _state(current_ft=ft, total_attempts=1, per_branch={ft: 1},
+                    events=[_attempt_ev(ft), _completed_ev("forensics"),
+                            _completed_ev("knowledge_search"),
+                            _completed_ev("audit")])
+        d = debug_next_action(st)
+        self.assertIsInstance(d, Action)
         self.assertEqual(d.step, "diagnose_and_fix")
         self.assertEqual(d.kind, "spawn_agent")
+
+    def test_audit_failed_does_not_block(self) -> None:
+        # Gate-A 降级豁免: audit passed=False 仍计入 completed → 越过它推进到 diagnose,
+        # 不卡死 (区别于 forensics passed=False 的重派语义)。
+        ft = "precision_failed"
+        st = _state(current_ft=ft, total_attempts=1, per_branch={ft: 1},
+                    events=[_attempt_ev(ft), _completed_ev("forensics"),
+                            _completed_ev("knowledge_search"),
+                            _completed_ev("audit", {"passed": False})])
+        d = debug_next_action(st)
+        self.assertIsInstance(d, Action)
+        self.assertEqual(d.step, "diagnose_and_fix")
 
     def test_step_after_fix_is_validate(self) -> None:
         ft = "precision_failed"
         st = _state(current_ft=ft, total_attempts=1, per_branch={ft: 1},
                     events=[_attempt_ev(ft), _completed_ev("forensics"),
                             _completed_ev("knowledge_search"),
+                            _completed_ev("audit"),
                             _completed_ev("diagnose_and_fix")])
         d = debug_next_action(st)
         self.assertIsInstance(d, Action)

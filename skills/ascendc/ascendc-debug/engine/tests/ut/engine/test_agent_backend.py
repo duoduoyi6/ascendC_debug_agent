@@ -259,6 +259,60 @@ class TestCallbackIntoRunner(unittest.TestCase):
                          ["ascendc-debug-agent-constructive"] * 2)
 
 
+class TestKbUsageTrace(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.task_dir = Path(self._tmp.name)
+        (self.task_dir / "precision_tuning").mkdir()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _write_kb_log(self, entries: list) -> None:
+        p = self.task_dir / "precision_tuning" / "knowledge_search_log.json"
+        p.write_text(json.dumps(entries), encoding="utf-8")
+
+    def _read_trace(self) -> list:
+        p = self.task_dir / "precision_tuning" / "kb_usage_trace.json"
+        return json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
+
+    def _fake_run(self, final_response: str | None):
+        body: dict = {"is_error": False, "stop_reason": "end_turn"}
+        if final_response is not None:
+            body["result"] = final_response
+        return _fake_run_factory(body, {})
+
+    def test_cited_titles_detected(self) -> None:
+        self._write_kb_log([
+            {"attempt": 0, "call_index": 0, "top_titles": ["TileGemm", "VecAdd"]},
+        ])
+        spawn_diagnose_agent(
+            _diagnose_action("precision_failed", 0), self.task_dir, "op", 0,
+            _run=self._fake_run("参考 TileGemm 的做法修复了循环边界"))
+        trace = self._read_trace()
+        self.assertEqual(len(trace), 1)
+        self.assertEqual(trace[0]["cited_titles"], ["TileGemm"])
+        self.assertAlmostEqual(trace[0]["citation_rate"], 0.5)
+
+    def test_no_kb_log_writes_empty_injected(self) -> None:
+        spawn_diagnose_agent(
+            _diagnose_action("precision_failed", 0), self.task_dir, "op", 0,
+            _run=self._fake_run("some response"))
+        trace = self._read_trace()
+        self.assertEqual(trace[0]["injected_titles"], [])
+        self.assertIsNone(trace[0]["citation_rate"])
+
+    def test_none_final_response_no_crash(self) -> None:
+        self._write_kb_log([
+            {"attempt": 1, "call_index": 0, "top_titles": ["SomeKB"]},
+        ])
+        spawn_diagnose_agent(
+            _diagnose_action("precision_failed", 1), self.task_dir, "op", 1,
+            _run=self._fake_run(None))
+        trace = self._read_trace()
+        self.assertEqual(trace[0]["cited_titles"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
 

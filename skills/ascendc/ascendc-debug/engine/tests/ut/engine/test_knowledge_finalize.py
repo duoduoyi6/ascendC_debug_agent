@@ -128,5 +128,73 @@ class TestKnowledgeFinalize(unittest.TestCase):
         self.assertTrue(out.exists())
 
 
+class TestFullEvalAdmits(unittest.TestCase):
+    """§2.2 入库判据: 全量复验下不 crash 且 matched_ratio ≥ 0.95 才入库。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.task_dir = Path(self._tmp.name)
+        self.tuning = self.task_dir / "precision_tuning"
+        self.tuning.mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _write_vr(self, attempt: int, full_eval) -> None:
+        vr = {"attempt": attempt, "correctness_passed": True}
+        if full_eval is not None:
+            vr["full_eval"] = full_eval
+        (self.tuning / f"validation_result_attempt_{attempt}.json").write_text(
+            json.dumps(vr), encoding="utf-8")
+
+    def _admits(self):
+        from engine.knowledge_finalize import _full_eval_admits  # noqa: PLC0415
+        return _full_eval_admits(self.task_dir)
+
+    def test_no_full_eval_admits(self) -> None:
+        self._write_vr(0, None)
+        ok, _r = self._admits()
+        self.assertTrue(ok)
+
+    def test_crash_rejected(self) -> None:
+        self._write_vr(0, {"ran": True, "crashed": True,
+                           "passed_cases": 0, "total_cases": 0})
+        ok, _r = self._admits()
+        self.assertFalse(ok)
+
+    def test_below_threshold_rejected(self) -> None:
+        self._write_vr(0, {"ran": True, "crashed": False,
+                           "passed_cases": 45, "total_cases": 51})  # 0.882 < 0.95
+        ok, _r = self._admits()
+        self.assertFalse(ok)
+
+    def test_above_threshold_admits(self) -> None:
+        self._write_vr(0, {"ran": True, "crashed": False,
+                           "passed_cases": 50, "total_cases": 51})  # 0.980 ≥ 0.95
+        ok, _r = self._admits()
+        self.assertTrue(ok)
+
+    def test_latest_attempt_wins(self) -> None:
+        # 多 attempt 取最大 attempt 的 full_eval (终态轮)。早轮达标、终轮不达标 → 挡。
+        self._write_vr(0, {"ran": True, "crashed": False,
+                           "passed_cases": 51, "total_cases": 51})
+        self._write_vr(2, {"ran": True, "crashed": False,
+                           "passed_cases": 40, "total_cases": 51})  # 0.784
+        ok, _r = self._admits()
+        self.assertFalse(ok)
+
+    def test_finalize_skips_when_full_eval_fails(self) -> None:
+        # 集成: 全量未过 → finalize_knowledge skip (不调 dump 子进程)。
+        _write(self.tuning / "candidate_kb_entry.json", {"title": "t"})
+        self._write_vr(0, {"ran": True, "crashed": True,
+                           "passed_cases": 0, "total_cases": 0})
+        run = _FakeRun()
+        res = finalize_knowledge(self.task_dir, kb_path="kb.json",
+                                 session_outcome="success", op_name="add", _run=run)
+        self.assertTrue(res["skipped"])
+        self.assertIn("全量复验判据未过", res["reason"])
+        self.assertEqual(run.calls, [])  # 未触达 dump
+
+
 if __name__ == "__main__":
     unittest.main()

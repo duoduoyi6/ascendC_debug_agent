@@ -127,7 +127,8 @@ def _default_dispatcher(
 
 def _gate_result_to_dict(gr: GateResult) -> dict:
     """GateResult → 事件 result dict。摊平 loop_signal/stop_reason_code +
-    透传 import_subtype (从 checks 提取，履行喂数据契约)。"""
+    透传 import_subtype / l5_probe_* (从 checks 提取，履行喂数据契约)。"""
+    checks = gr.checks or {}
     return {
         "gate": gr.gate,
         "passed": gr.passed,
@@ -135,7 +136,10 @@ def _gate_result_to_dict(gr: GateResult) -> dict:
         "loop_reason": gr.loop_reason,
         "stop_reason_code": gr.stop_reason_code,
         "prerequisite_error": gr.prerequisite_error,
-        "import_subtype": (gr.checks or {}).get("import_subtype"),
+        "import_subtype": checks.get("import_subtype"),
+        # 真探针回退兜底标记 (供统计/消融区分"真探针通过"vs"连续失败回退")。
+        "l5_probe_degraded": checks.get("l5_probe_degraded"),
+        "l5_probe_source": checks.get("l5_probe_source"),
         "checks": gr.checks,
     }
 

@@ -230,19 +230,25 @@ _STOP_OUTCOME = {
 # ---------------------------------------------------------------------------
 # 轮内步骤序列 (一个 attempt 内引擎逐步驱动的 Action 链)。
 # 对齐 agent.md 分工边界: 取证=py_action / 诊断+修复=spawn_agent / Gate-V=py_action。
-#   precision_failed: forensics → knowledge_search → diagnose_and_fix → validate
+#   precision_failed: forensics → knowledge_search → audit → diagnose_and_fix → validate
 #   other branches:   forensics → diagnose_and_fix → validate
 # 引擎据「本轮 attempt_started 之后已完成哪些 step」决定下一步。
+# audit (Gate-A) 仅 precision 分支有，位于修复前: 审上一轮遗留 + 本轮取证，产出
+# 指导本轮修复; 缺产物降级 (passed=False 不阻断，见 _completed_steps_this_attempt)。
 # ---------------------------------------------------------------------------
 _ROUND_SEQUENCE = ("forensics", "diagnose_and_fix", "validate")
-_PRECISION_ROUND_SEQUENCE = ("forensics", "knowledge_search",
+_PRECISION_ROUND_SEQUENCE = ("forensics", "knowledge_search", "audit",
                              "diagnose_and_fix", "validate")
 
 
 def _round_sequence(failure_type: str) -> tuple[str, ...]:
-    if failure_type == "precision_failed":
-        return _PRECISION_ROUND_SEQUENCE
-    return _ROUND_SEQUENCE
+    seq = _PRECISION_ROUND_SEQUENCE if failure_type == "precision_failed" else _ROUND_SEQUENCE
+    skip = set()
+    if os.environ.get("ABLATE_FORENSICS") == "1":
+        skip.add("forensics")
+    if os.environ.get("ABLATE_GATE_A") == "1":
+        skip.add("audit")
+    return tuple(s for s in seq if s not in skip) if skip else seq
 
 
 def _completed_steps_this_attempt(state: DebugState) -> set:
@@ -260,6 +266,10 @@ def _completed_steps_this_attempt(state: DebugState) -> set:
             # forensics gate passed=false 不计入 completed，允许重派 (修复 2/3)。
             if step == "forensics" and result.get("passed") is False:
                 continue
+            # audit (Gate-A) 降级豁免: 无论 passed 与否都计入 completed (不进上面
+            # 的 forensics 排除分支)。Gate-A 缺 section → passed=False，但它只产审计
+            # md + 落 checks 供统计/消融，不阻断；越过它推进到 diagnose_and_fix。
+            # (与 forensics passed=False 重派语义相反——故不加排除分支，此处仅注明。)
             if step:
                 done.add(step)
     return done
@@ -343,6 +353,7 @@ def _make_action_for_step(step: str, failure_type: str, attempt: int) -> Action:
     """把轮内 step 名构造成具体 Action。
 
     forensics / validate → py_action (跑确定性脚本: precision_gate.py --step)。
+    audit → py_action (Gate-A 质量门控: precision_gate.py --step audit, 复用同派发器)。
     knowledge_search → py_action (跑 precision_knowledge.py search, 写检索日志)。
     diagnose_and_fix → spawn_agent (拉起 constructive/discovery worker 诊断+改 kernel)。
     """
@@ -360,12 +371,19 @@ def _make_action_for_step(step: str, failure_type: str, attempt: int) -> Action:
             step=step,
             skill_args={"failure_type": failure_type, "attempt": attempt},
         )
+    # forensics/audit/validate 共用 precision_gate 派发器，仅 gate_step 不同。
+    if step == "forensics":
+        gate_step = "forensics"
+    elif step == "audit":
+        gate_step = "audit"
+    else:
+        gate_step = "validate"
     return Action(
         kind="py_action",
         name="precision_gate",
         step=step,
         skill_args={"failure_type": failure_type, "attempt": attempt,
-                    "gate_step": "forensics" if step == "forensics" else "validate"},
+                    "gate_step": gate_step},
     )
 
 
@@ -453,15 +471,16 @@ def debug_next_action(state: DebugState, gate_result: Optional[GateResult] = Non
                 # $49 量级)。放在 loop_limit/budget 闸之后——撞硬上限优先归更精确的 outcome。
                 # 此刻 events 已含当前轮 validate (runner 先 record_completed 再 reload)，
                 # 故 streak 含当前轮。
-                degen_limit = _max_degenerate_rounds()
-                if degen_limit is not None:
-                    streak = _degenerate_continue_streak(state)
-                    if streak >= degen_limit:
-                        return Done(
-                            session_outcome="degenerate_no_progress",
-                            reason=(f"连续 {streak} 轮退化空转 (作弊/audit 缺产物兜底无"
-                                    f"改善) 达上限 {degen_limit}，早停防烧预算"),
-                        )
+                if os.environ.get("ABLATE_LOOP_GUARD") != "1":
+                    degen_limit = _max_degenerate_rounds()
+                    if degen_limit is not None:
+                        streak = _degenerate_continue_streak(state)
+                        if streak >= degen_limit:
+                            return Done(
+                                session_outcome="degenerate_no_progress",
+                                reason=(f"连续 {streak} 轮退化空转 (作弊/audit 缺产物兜底无"
+                                        f"改善) 达上限 {degen_limit}，早停防烧预算"),
+                            )
                 return _dispatch_loop_signal(state, gate)
             # sig is None: validate 已完成但 gate 未给 loop_signal = gate 协议错误，
             # 不能当作「需继续」无脑兜底 continue (问题 3)。gate 为 None (crash-resume
