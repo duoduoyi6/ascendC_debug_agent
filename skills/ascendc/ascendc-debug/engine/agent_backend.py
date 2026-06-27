@@ -74,6 +74,22 @@ Step5/Step6/Step7、退出协议、归档、批处理、report 生成等流程�
 ═══════════════════════════════════════════════════════════════
 """
 
+# 消融注入: 关闭插桩 (no_probe / baseline arm)。ABLATE_PROBE=1 时在 prompt 末尾追加，
+# 指示 agent 跳过 SKILL.md Sub-step 2.6 插桩定位，[L5_PROBE] 写消融跳过理由版
+# (复用 SKILL.md:824/506 "状态: 跳过（理由: ...）" 口径，section 仍存在不触发 Gate-A 缺失)。
+_NOPROBE_CONSTRAINT = """
+
+═══════════════════════════════════════════════════════════════
+【消融开关 ABLATE_PROBE: 本次调用禁用插桩定位 (L5 Probe)】
+═══════════════════════════════════════════════════════════════
+- 跳过 SKILL.md Sub-step 2.6 插桩定位 (printf/DumpTensor 二分搜索)，不得在 kernel 中
+  插入任何调试打印探针。
+- 仍须产出 [L5_PROBE] section，但写跳过版:
+  「状态: 跳过（理由: 消融实验关闭插桩 ABLATE_PROBE=1）」。
+- 根因定位仅依据 forensics/code 静态证据 + Phase A/B 既有分析，不依赖 L5 实测中间值。
+═══════════════════════════════════════════════════════════════
+"""
+
 # PLACEHOLDER_REST
 
 
@@ -164,7 +180,8 @@ def _build_prompt(task_dir: Path, op_name: str, failure_type: str,
     )
     return (head + _cheat_warning(task_dir)
             + _knowledge_search_context(task_dir, attempt)
-            + _SINGLE_ROUND_CONSTRAINT.replace("{task_dir}", str(task_dir)))
+            + _SINGLE_ROUND_CONSTRAINT.replace("{task_dir}", str(task_dir))
+            + (_NOPROBE_CONSTRAINT if os.environ.get("ABLATE_PROBE") == "1" else ""))
 
 
 def _classify_claude_result(result_file: Path) -> dict:

@@ -13,6 +13,7 @@ test_common_anticheat.py 的 bootstrap)，独立于 PYTHONPATH。
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -552,6 +553,49 @@ class TestFullEvalLoopSignal(unittest.TestCase):
              "match_rate": 96.0},
             state={"attempts_done": [0, 1], "best_full_match_rate": 90.0})
         sig, _r, code = self._sig(True)
+        self.assertEqual((sig, code), ("CONTINUE", "full_eval_regression"))
+
+    def _set_loop_guard(self, value) -> None:
+        # env 隔离: addCleanup 还原原值，防泄漏污染同文件其他用例。
+        prev = os.environ.get("ABLATE_LOOP_GUARD")
+        if value is None:
+            os.environ.pop("ABLATE_LOOP_GUARD", None)
+        else:
+            os.environ["ABLATE_LOOP_GUARD"] = value
+
+        def _restore() -> None:
+            if prev is None:
+                os.environ.pop("ABLATE_LOOP_GUARD", None)
+            else:
+                os.environ["ABLATE_LOOP_GUARD"] = prev
+        self.addCleanup(_restore)
+
+    def test_full_eval_stagnant_no_loopguard_continues(self) -> None:
+        # no_loopguard arm: 与 test_full_eval_stagnant_falls_back_stop 同输入，
+        # 但 ABLATE_LOOP_GUARD=1 → 抑制 nearly_success 早停，续跑至 max_attempts 硬顶 (与 :349 对齐)。
+        self._set_loop_guard("1")
+        self._write_full_eval(
+            0,
+            {"ran": True, "crashed": False, "passed_cases": 49, "total_cases": 51,
+             "match_rate": 96.0},
+            state={"attempts_done": [0, 1], "best_full_match_rate": 96.0})
+        sig, _r, code = self._sig(True)
+        self.assertEqual((sig, code), ("CONTINUE", "full_eval_regression"))
+
+    def test_full_eval_no_locatable_no_loopguard_continues(self) -> None:
+        # :435 退化边界 (无可定位失败样本): 默认 STOP nearly_success；
+        # no_loopguard 时转 CONTINUE。直接调函数锁定两条 nearly_success 出口均受闸约束。
+        fe = {"ran": True, "crashed": False, "total_cases": 10,
+              "passed_cases": 10, "match_rate": 99.5}
+        self.checker._load_full_eval_state = lambda: {
+            "attempts_done": [], "best_full_match_rate": None}
+
+        self._set_loop_guard(None)
+        sig, _r, code = self.checker._full_eval_continue_or_stop(fe, reason="t")
+        self.assertEqual((sig, code), ("STOP", "nearly_success"))
+
+        self._set_loop_guard("1")
+        sig, _r, code = self.checker._full_eval_continue_or_stop(fe, reason="t")
         self.assertEqual((sig, code), ("CONTINUE", "full_eval_regression"))
 
 
