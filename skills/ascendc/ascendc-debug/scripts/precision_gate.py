@@ -97,6 +97,24 @@ def _load_session_branch(task_dir: Path):
         return None
 
 
+def _merge_common_checks(branch_output: dict, common_outcome) -> dict:
+    """Preserve common-layer evidence when branch gate decides the loop signal.
+
+    Common failures are returned before branch dispatch.  On common pass, branch
+    output remains authoritative for gate/loop_signal, while checks keep both
+    common invariants (AST/hash/C++/structure) and branch-specific facts.
+    """
+    merged = dict(branch_output)
+    checks = {}
+    if isinstance(common_outcome.checks, dict):
+        checks.update(common_outcome.checks)
+    branch_checks = branch_output.get("checks")
+    if isinstance(branch_checks, dict):
+        checks.update(branch_checks)
+    merged["checks"] = checks
+    return merged
+
+
 def _dispatch(step: str, task_dir: Path, op_name: str, attempt: int) -> dict:
     """主调度：通用层 → 分支层。返回单个 dict (gate 输出)。"""
     # 1. 通用层
@@ -136,7 +154,7 @@ def _dispatch(step: str, task_dir: Path, op_name: str, attempt: int) -> dict:
         return common_outcome.to_gate_output()
 
     branch_outcome = method(task_dir=task_dir, attempt=attempt)
-    return branch_outcome.to_gate_output()
+    return _merge_common_checks(branch_outcome.to_gate_output(), common_outcome)
 
 
 # ================================================================
