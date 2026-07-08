@@ -24,3 +24,5 @@ projects_*_*.tar.gz
 # Local device-env-setup config (per-user)
 CLAUDE.md
 .DS_Store
+# Local precision knowledge base generated from experiments
+skills/ascendc/ascendc-debug/references/precision_knowledge_base.json
