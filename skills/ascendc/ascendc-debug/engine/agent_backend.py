@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import uuid
 from pathlib import Path
@@ -311,6 +312,28 @@ def _build_claude_cmd(prompt: str, *, claude_bin: str, model: Optional[str],
     return cmd
 
 
+def _session_result_path(task_dir: Path, attempt: int, session_id: str) -> Path:
+    """Return an append-only result path for a single Claude session.
+
+    `_claude_result_attemptN.json` is kept as the compatibility/latest file for
+    existing consumers. The per-session archive avoids losing same-attempt
+    retries caused by provider/API errors.
+    """
+    safe_session = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in session_id)
+    return task_dir / "precision_tuning" / "claude_results" / (
+        f"attempt{attempt}_{safe_session}.json"
+    )
+
+
+def _sync_latest_result_file(src: Path, dst: Path) -> None:
+    """Best-effort copy from append-only archive to the legacy latest path."""
+    try:
+        if src.exists():
+            shutil.copyfile(src, dst)
+    except OSError:
+        pass
+
+
 def spawn_diagnose_agent(
     action: Action,
     task_dir: Path,
@@ -337,7 +360,9 @@ def spawn_diagnose_agent(
     failure_type = args.get("failure_type", "")
     wd = Path(workdir) if workdir is not None else Path(task_dir)
     session_id = str(uuid.uuid4())
-    result_file = Path(task_dir) / f"_claude_result_attempt{attempt}.json"
+    result_file = _session_result_path(Path(task_dir), attempt, session_id)
+    latest_result_file = Path(task_dir) / f"_claude_result_attempt{attempt}.json"
+    result_file.parent.mkdir(parents=True, exist_ok=True)
 
     prompt = _build_prompt(Path(task_dir), op_name, failure_type, attempt, npu)
     effort = effort if effort is not None else os.environ.get(_EFFORT_ENV)
@@ -354,14 +379,24 @@ def spawn_diagnose_agent(
             _run(cmd, stdout=out, stderr=subprocess.PIPE, timeout=timeout_sec,
                  check=False, text=True)
     except subprocess.TimeoutExpired:
+        _sync_latest_result_file(result_file, latest_result_file)
         return {"success": False, "claude_state": "timeout", "fatal": False,
-                "error": f"claude 调用超时 (>{timeout_sec}s)", "session_id": session_id}
+                "error": f"claude 调用超时 (>{timeout_sec}s)",
+                "session_id": session_id,
+                "result_path": str(result_file),
+                "latest_result_path": str(latest_result_file)}
     except Exception as e:  # noqa: BLE001 — 拉起失败转结构化结果，不让 runner 裸死
         return {"success": False, "claude_state": "spawn_failed", "fatal": True,
-                "error": f"拉起 claude 失败: {e}", "session_id": session_id}
+                "error": f"拉起 claude 失败: {e}",
+                "session_id": session_id,
+                "result_path": str(result_file),
+                "latest_result_path": str(latest_result_file)}
 
+    _sync_latest_result_file(result_file, latest_result_file)
     result = _classify_claude_result(result_file)
     result["session_id"] = session_id
+    result["result_path"] = str(result_file)
+    result["latest_result_path"] = str(latest_result_file)
     _write_kb_usage_trace(Path(task_dir), attempt, result.get("final_response"))
     return result
 

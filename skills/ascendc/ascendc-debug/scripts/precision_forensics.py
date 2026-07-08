@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 """
 precision_forensics.py — 精度取证数值分析
 
@@ -22,6 +24,7 @@ precision_forensics.py — 精度取证数值分析
 """
 
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 import re
@@ -38,6 +41,48 @@ SCRIPT_DIR   = Path(__file__).resolve().parent          # scripts/
 SKILL_DIR    = SCRIPT_DIR.parent                        # ascendc-debug/
 REPO_ROOT    = SKILL_DIR.parent.parent.parent           # AscendOpGenAgent/
 VERIF_SCRIPT = REPO_ROOT / "utils" / "verification_ascendc.py"
+
+
+def _record_ablate_blocked(task_name: str, task_dir: str, attempt: int) -> Path:
+    """Record an agent-side attempt to call a disabled forensics component.
+
+    In the no_engine_forensics/no_forensics ablation, the engine skips its
+    deterministic forensics action. This guard also blocks direct agent Bash
+    calls to precision_forensics.py so the arm stays experimentally clean.
+    """
+    tuning_dir = Path(task_dir) / "precision_tuning"
+    tuning_dir.mkdir(parents=True, exist_ok=True)
+    path = tuning_dir / "ablate_blocked.json"
+    event = {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "component": "precision_forensics",
+        "reason": "ABLATE_FORENSICS=1",
+        "task_name": task_name,
+        "task_dir": str(Path(task_dir).resolve()),
+        "attempt": attempt,
+        "argv": sys.argv,
+        "pid": os.getpid(),
+        "ppid": os.getppid(),
+    }
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, ValueError):
+        existing = {}
+    if not isinstance(existing, dict):
+        existing = {}
+    events = existing.get("events")
+    if not isinstance(events, list):
+        events = []
+    events.append(event)
+    payload = {
+        "version": "1.0",
+        "status": "blocked",
+        "component": "precision_forensics",
+        "events": events,
+        "blocked_count": len(events),
+    }
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return path
 
 
 # ============================================================
@@ -1256,6 +1301,13 @@ def main():
     parser.add_argument("--attempt", type=int, default=0)
     args = parser.parse_args()
     task_dir = args.task_dir or str(REPO_ROOT / args.task_name)
+    if os.environ.get("ABLATE_FORENSICS") == "1":
+        blocked_path = _record_ablate_blocked(args.task_name, task_dir, args.attempt)
+        print(
+            "[FORENSICS] skipped because ABLATE_FORENSICS=1; "
+            f"blocked evidence: {blocked_path}"
+        )
+        return
     PrecisionForensics(args.task_name, task_dir, args.attempt).run()
 
 
