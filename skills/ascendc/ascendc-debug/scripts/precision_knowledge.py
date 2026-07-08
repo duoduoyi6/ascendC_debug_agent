@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 """
 precision_knowledge.py — 精度问题知识库管理
 

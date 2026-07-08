@@ -24,3 +24,5 @@ projects_*_*.tar.gz
 # Local device-env-setup config (per-user)
 CLAUDE.md
 .DS_Store
+# 精度知识库(敏感数据,本地持有,不入库)
+skills/ascendc/ascendc-debug/references/precision_knowledge_base.json
