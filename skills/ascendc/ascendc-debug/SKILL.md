@@ -480,7 +480,8 @@ print(decomp if decomp else 'NO_DECOMP')
 在对全部 kernel 文件有了完整认知（Phase B 已读完）、但还未开始结构化比对之前，对 representative case 跑一次带中间值输出的探针，使 Phase C 的逐步比对能同时呈现"规范期望"与"代码实测"。
 
 **跳过条件（4 条全满足才可跳过，缺任一必须执行）**：
-1. `attempt > 0`（首轮永不跳过）
+1. **首轮**快路径：`attempt == 0` 默认**跳过**探针（例外：`primary_hint == nan_inf_contamination`
+   时首轮即须执行）；`attempt > 0` 时本条不成立，须结合下列 2~4 条判定
 2. `primary_hint` 与上一轮相同（问题性质未变）
 3. 上一轮 `[INSTRUMENTATION_FINDINGS]` 已存在且覆盖了 Phase B 识别出的疑似阶段
 4. Phase B 阅读中未发现上一轮未覆盖的新疑似路径
@@ -827,16 +828,27 @@ L5_PROBE, ROOT_CAUSE, CAUSAL_CHAIN_ANALYSIS, FIX_PLAN, TARGET_FILES, EXPERIMENT_
 
 ---
 
-### Sub-step 2.6: 插桩定位（默认执行，4 条全满足才可跳过）
+### Sub-step 2.6: 插桩定位（首轮默认跳过；attempt ≥ 1 默认执行，4 条全满足才可跳过）
 
-#### 跳过条件（4 条**同时满足**才可跳过，缺任意一条必须执行）
+#### 首轮快路径（attempt == 0）：默认**跳过**插桩
+
+首轮走静态诊断快路径，**不做插桩定位**，仅凭 forensics/code 静态证据 + Phase A/B 分析给出
+修复。用"首轮修复是否失败"作为"困难算子"的天然信号——简单算子首轮即中，无谓的插桩开销
+被省掉；只有首轮没修好、进入 attempt ≥ 1 的算子才值得插桩深挖。
+`[L5_PROBE]` section 仍须产出，写跳过版：「状态: 跳过（理由: 首轮快路径，未插桩）」，
+不触发 Gate-A 缺失。
+
+例外（首轮即须插桩，满足任一即执行）：
+- `primary_hint == nan_inf_contamination`（溢出传播类，静态证据不足以定位首现点，必须插桩）。
+
+#### attempt ≥ 1（首轮已失败）：默认执行，4 条**同时满足**才可跳过
 
 1. Phase B+ 已产出 `[L5_PROBE]`（非"跳过理由"版本，是实测数值版本）
 2. `[CAUSAL_CHAIN_ANALYSIS]` 的"错误首现区间"已精确定位到单个 K-Step
 3. `[ROOT_CAUSE]` 置信度 = HIGH 且修复位置已精确到代码行号
 4. `primary_hint ≠ nan_inf_contamination`（溢出传播类问题必须用插桩追踪，不可跳过）
 
-**首轮（attempt == 0）且 Phase B+ 未执行时：跳过条件 1 永不成立，必须执行。**
+**attempt ≥ 1 且 Phase B+ 未执行时：跳过条件 1 永不成立，必须执行。**
 
 **职责边界**：Sub-step 2.6 是 Phase B+ 的补充精化，不是替代。Phase B+ 做三阶段粗粒度探针（P1/P2/P3）；Sub-step 2.6 在 Phase B+ 已定位的可疑阶段内做 API 级二分搜索，精确到单行。
 
