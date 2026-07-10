@@ -276,10 +276,13 @@ def cmd_verify(args) -> int:
 
     # 1. hash 对比
     for fname in WRAPPER_FILES:
-        hash_file = baseline_dir / f"{fname}.sha256"
-        if not hash_file.exists():
+        # 对基线副本实时重算，不信任存储的 .sha256 文本（agent 可篡改文本使其等于
+        # 被改文件的 hash）。与 engine gate (gates/common.py:check_anticheat) 对齐：
+        # 两条校验路径都独立重算基线副本，不读存储 hash。
+        base_file = baseline_dir / fname
+        if not base_file.exists():
             continue
-        base_hash = hash_file.read_text().strip()
+        base_hash = sha256sum(base_file)
         cur = task_dir / fname
         if not cur.exists():
             reasons.append(f"DELETED:{fname}")
