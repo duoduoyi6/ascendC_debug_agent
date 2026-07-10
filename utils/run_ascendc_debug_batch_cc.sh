@@ -230,6 +230,181 @@ except Exception:
 PY
 }
 
+task_elapsed_has_task() {
+    local target_dir="$1"
+    awk -F '\t' -v td="$target_dir" 'NR > 1 && $2 == td { found = 1 } END { exit(found ? 0 : 1) }' "$TASK_ELAPSED"
+}
+
+report_has_op_row() {
+    local op_name="$1"
+    grep -F "| $op_name |" "$REPORT" >/dev/null 2>&1
+}
+
+infer_missing_task_row() {
+    local target_dir="$1"
+    python3 - "$OUTPUT_DIR" "$target_dir" <<'PY'
+import json
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+output_dir = Path(sys.argv[1])
+task_dir = Path(sys.argv[2])
+op_name = task_dir.name
+
+status_path = task_dir / "debug_status.json"
+status = {}
+if status_path.exists():
+    try:
+        status = json.loads(status_path.read_text())
+    except Exception:
+        status = {}
+
+outcome = status.get("session_outcome") or "missing_debug_status"
+start_human = ""
+end_human = ""
+elapsed = ""
+engine_rc = ""
+worker = "unknown"
+
+def iso_to_human(value):
+    if not value:
+        return ""
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return str(value)
+
+start_human = iso_to_human(status.get("started_at"))
+end_human = iso_to_human(status.get("ended_at"))
+if status.get("started_at") and status.get("ended_at"):
+    try:
+        s = datetime.fromisoformat(status["started_at"].replace("Z", "+00:00"))
+        e = datetime.fromisoformat(status["ended_at"].replace("Z", "+00:00"))
+        elapsed = str(max(0, int((e - s).total_seconds())))
+    except Exception:
+        pass
+
+for log_path in sorted(output_dir.glob("worker_*.log")):
+    try:
+        lines = log_path.read_text(errors="replace").splitlines()
+    except Exception:
+        continue
+    segment = []
+    in_segment = False
+    for line in lines:
+        if line.startswith("[task] op="):
+            in_segment = str(task_dir) in line
+            segment = [line] if in_segment else []
+            continue
+        if in_segment:
+            segment.append(line)
+    if not segment:
+        continue
+
+    name = log_path.name[len("worker_"):-len(".log")]
+    match = re.match(r"(.+)_npu([^_]+)$", name)
+    worker = f"{match.group(1)}@npu{match.group(2)}" if match else name
+
+    for line in segment:
+        m = re.search(r"\[task\] start=(.+)$", line)
+        if m:
+            start_human = m.group(1)
+        m = re.search(r"\[engine\] end=(.+?) elapsed=([0-9]+)s rc=([0-9-]+)", line)
+        if m:
+            end_human, elapsed, engine_rc = m.group(1), m.group(2), m.group(3)
+        m = re.search(r"\[task\] end=(.+?) elapsed=([0-9]+)s rc=([0-9-]+) outcome=([^ ]+)", line)
+        if m:
+            end_human, elapsed, engine_rc, outcome = m.group(1), m.group(2), m.group(3), m.group(4)
+    break
+
+if not engine_rc:
+    engine_rc = {
+        "success": "0",
+        "stopped_by_loop_limit": "3",
+        "provider_api_error": "8",
+    }.get(outcome, "1")
+
+cheat_verdict = "UNKNOWN"
+anticheat_path = task_dir / "_anticheat.json"
+if anticheat_path.exists():
+    try:
+        cheat_verdict = json.loads(anticheat_path.read_text()).get("verdict", "UNKNOWN")
+    except Exception:
+        pass
+
+print("\t".join([
+    op_name,
+    outcome,
+    elapsed or "0",
+    start_human or "<unknown>",
+    end_human or "<unknown>",
+    worker,
+    engine_rc,
+    cheat_verdict,
+]))
+PY
+}
+
+format_report_icon() {
+    local session_outcome="$1" status="$2" cheat_verdict="$3"
+    local cheat_mark=""
+    [[ "$cheat_verdict" == "CHEAT" ]] && cheat_mark=" / 🚨 CHEAT"
+    if [[ "$status" -eq 0 || ( "$status" -ge 1 && "$status" -le 7 ) ]]; then
+        case "$session_outcome" in
+            success)                       echo "✅ $session_outcome${cheat_mark}" ;;
+            stopped_by_loop_limit)         echo "⛔ $session_outcome${cheat_mark}" ;;
+            skipped_*)                     echo "⊘ $session_outcome${cheat_mark}" ;;
+            failed|stopped_*|crashed|timeout) echo "❌ $session_outcome${cheat_mark}" ;;
+            *)                             echo "⚠ $session_outcome${cheat_mark}" ;;
+        esac
+    elif [[ "$status" -eq 124 ]]; then
+        echo "⏱ engine_timeout${cheat_mark}"
+    elif [[ "$status" -eq 143 ]]; then
+        echo "🛑 terminated_by_sigterm${cheat_mark}"
+    elif [[ "$status" -eq 137 ]]; then
+        echo "💥 killed_by_sigkill${cheat_mark}"
+    elif [[ "$status" -eq 86 ]]; then
+        echo "🧊 stale_after_failure${cheat_mark}"
+    elif [[ "$status" -eq 8 || "$session_outcome" == "provider_api_error" ]]; then
+        echo "🚧 provider_api_error${cheat_mark}"
+    else
+        echo "❌ engine_rc=$status${cheat_mark}"
+    fi
+}
+
+reconcile_missing_report_rows() {
+    local task_dir op_name row_info session_outcome elapsed start_human end_human worker status cheat_verdict icon idx
+    for task_dir in "${TASK_LIST[@]}"; do
+        op_name=$(basename "$task_dir")
+        if task_elapsed_has_task "$task_dir" && report_has_op_row "$op_name"; then
+            continue
+        fi
+        row_info=$(infer_missing_task_row "$task_dir")
+        IFS=$'\t' read -r op_name session_outcome elapsed start_human end_human worker status cheat_verdict <<< "$row_info"
+        [[ "$status" =~ ^-?[0-9]+$ ]] || status=1
+        icon=$(format_report_icon "$session_outcome" "$status" "$cheat_verdict")
+
+        exec 9>"$LOCK"; flock -x 9
+        if ! report_has_op_row "$op_name"; then
+            idx=$(grep_count '^| [0-9]' "$REPORT")
+            idx=$((idx + 1))
+            echo "| $idx | $op_name | $icon | $elapsed | $worker | $start_human | $end_human |" >> "$REPORT"
+        else
+            idx=$(grep_count '^| [0-9]' "$REPORT")
+        fi
+        if ! task_elapsed_has_task "$task_dir"; then
+            printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+                "$idx" "$task_dir" "$op_name" "$session_outcome" "$elapsed" \
+                "$start_human" "$end_human" "$worker" "$status" >> "$TASK_ELAPSED"
+        fi
+        flock -u 9; exec 9>&-
+        echo "[reconcile] filled missing report row for $op_name outcome=$session_outcome elapsed=${elapsed}s"
+    done
+}
+
 grep_count() {
     local pattern="$1"
     local file="$2"
@@ -410,6 +585,21 @@ cleanup_task_processes() {
             set +e
             target="$1"
             token="$2"
+            safe_token=""
+            is_safe_token() {
+                case "$1" in
+                    ""|engine|python|python3|claude|bash|sh|timeout|docker|make|cmake|gmake|ninja)
+                        return 1
+                        ;;
+                esac
+                [ "${#1}" -ge 12 ] || return 1
+                return 0
+            }
+            if is_safe_token "$token"; then
+                safe_token="$token"
+            elif [ -n "$token" ]; then
+                echo "[cleanup] skip unsafe broad token=$token"
+            fi
             kill_by_pattern() {
                 sig="$1"; pat="$2"
                 [ -z "$pat" ] && return 0
@@ -436,14 +626,67 @@ cleanup_task_processes() {
                 done
             }
             kill_by_pattern TERM "$target"
-            kill_by_pattern TERM "$token"
+            kill_by_pattern TERM "$safe_token"
             kill_by_cwd TERM
             sleep 2
             kill_by_pattern KILL "$target"
-            kill_by_pattern KILL "$token"
+            kill_by_pattern KILL "$safe_token"
             kill_by_cwd KILL
         ' _ "$task_dir" "$token" || true
     } >> "$wlog" 2>&1
+}
+
+format_epoch_for_ausearch() {
+    local epoch="$1"
+    date -d "@$epoch" '+%m/%d/%Y %T' 2>/dev/null || date '+%m/%d/%Y %T'
+}
+
+collect_signal_audit_evidence() {
+    local task_dir="$1" op_name="$2" status="$3" start_epoch="$4" end_epoch="$5" host_pid="$6" wlog="$7"
+    local audit_dir="$task_dir/precision_tuning/signal_audit"
+    local ts te out raw_tail
+    mkdir -p "$audit_dir"
+    ts=$(format_epoch_for_ausearch "$((start_epoch > 120 ? start_epoch - 120 : start_epoch))")
+    te=$(format_epoch_for_ausearch "$((end_epoch + 120))")
+    out="$audit_dir/rc${status}_$(date '+%Y%m%d_%H%M%S').txt"
+    raw_tail="$audit_dir/rc${status}_audit_raw_tail_$(date '+%Y%m%d_%H%M%S').log"
+    {
+        echo "op_name=$op_name"
+        echo "task_dir=$task_dir"
+        echo "engine_rc=$status"
+        echo "host_cmd_pid=${host_pid:-unknown}"
+        echo "task_start_epoch=$start_epoch"
+        echo "task_end_epoch=$end_epoch"
+        echo "audit_window_start=$ts"
+        echo "audit_window_end=$te"
+        echo
+        echo "## auditctl -s"
+        auditctl -s 2>&1 || true
+        echo
+        echo "## auditctl -l"
+        auditctl -l 2>&1 || true
+        echo
+        echo "## host process snapshot"
+        if [[ -n "${host_pid:-}" ]]; then
+            ps -o pid,ppid,pgid,sid,stat,lstart,etime,comm,args -p "$host_pid" 2>&1 || true
+        else
+            echo "(host_cmd_pid unavailable)"
+        fi
+        echo
+        echo "## ausearch -k proc_kill"
+        if command -v ausearch >/dev/null 2>&1; then
+            ausearch -k proc_kill -ts "$ts" -te "$te" -i 2>&1 || true
+        else
+            echo "ausearch not found"
+        fi
+        echo
+        echo "## raw audit tail path"
+        echo "$raw_tail"
+    } > "$out" 2>&1
+    if [[ -r /var/log/audit/audit.log ]]; then
+        tail -5000 /var/log/audit/audit.log 2>/dev/null | grep 'proc_kill' > "$raw_tail" 2>/dev/null || true
+    fi
+    echo "[signal-audit] rc=$status host_cmd_pid=${host_pid:-unknown} evidence=$out raw_tail=$raw_tail" >> "$wlog"
 }
 
 # ══════════════════════════════════════════════════════════════════
@@ -513,6 +756,8 @@ run_engine_turn() {
                 "${AGENT_TIMEOUT_SEC:-}" "$ENTRY_FAILURE_TYPE" "$MAX_TURNS" \
                 "$MAX_TASK_TURNS" "$KB_PATH" >> "$wlog" 2>&1 &
     local cmd_pid=$!
+    LAST_ENGINE_HOST_PID="$cmd_pid"
+    echo "[engine] host_cmd_pid=$cmd_pid host_worker_pid=$$ host_parent_pid=$PPID" >> "$wlog"
     local turn_status=0 stale_stop=0
 
     # 停滞检测轮询（监控 runner 进程；runner 内部 spawn 的 claude/编译子进程由
@@ -522,7 +767,7 @@ run_engine_turn() {
         kill -0 "$cmd_pid" 2>/dev/null || break
         if should_stop_stale_after_failure "$task_dir" "$wlog"; then
             stale_stop=1
-            cleanup_task_processes "$container" "$task_dir" "engine" "$wlog"
+            cleanup_task_processes "$container" "$task_dir" "" "$wlog"
             kill -TERM "$cmd_pid" 2>/dev/null || true
             sleep 2
             kill -KILL "$cmd_pid" 2>/dev/null || true
@@ -579,8 +824,28 @@ run_worker() {
             echo "[task] start=$start_human"
         } >> "$wlog"
 
+        # ── 反作弊基线：在 engine/agent 介入前快照 reference/wrapper hash。
+        # anticheat.py snapshot 保留既有 baseline，不覆盖；因此重试/续跑不会污染基线。
+        docker exec "$container" bash -lc "
+            cd '$WORKDIR_IN_CONTAINER'
+            python3 '$ANTICHEAT_SCRIPT' snapshot '$task_dir' --json
+        " >> "$wlog" 2>&1 || true
+
+        # ── 基线写保护：snapshot 后把 .bench_baseline/ 置只读，从源头堵住 agent
+        # 篡改基线副本 / .sha256 的攻击面（目录 0555、文件 0444）。engine gate 与
+        # anticheat.py verify 都对基线副本实时重算，只读即锁死两条校验路径。
+        docker exec "$container" bash -lc "
+            cd '$WORKDIR_IN_CONTAINER'
+            bdir='$task_dir/.bench_baseline'
+            if [[ -d \"\$bdir\" ]]; then
+                find \"\$bdir\" -type f -exec chmod 0444 {} + 2>/dev/null || true
+                find \"\$bdir\" -type d -exec chmod 0555 {} + 2>/dev/null || true
+            fi
+        " >> "$wlog" 2>&1 || true
+
         # ── 单次引擎调用（方案 C：引擎自管 attempt 循环 / 漂移 / 退出产物） ──
         status=0
+        LAST_ENGINE_HOST_PID=""
         set +e
         run_engine_turn "$container" "$npu" "$task_dir" "$op_name" "$wlog"
         status=$?
@@ -590,9 +855,14 @@ run_worker() {
         end_human=$(date '+%F %T')
         elapsed=$((end - start))
 
-        # 超时后清理残留进程（runner + 其 spawn 的 claude/编译子进程）
+        if [[ "$status" -eq 137 || "$status" -eq 143 ]]; then
+            collect_signal_audit_evidence "$task_dir" "$op_name" "$status" "$start" "$end" "${LAST_ENGINE_HOST_PID:-}" "$wlog"
+        fi
+
+        # 异常退出后清理残留进程（runner + 其 spawn 的 claude/编译子进程）。
+        # 只按 task_dir/cwd 清理；不要用 "engine" 这类宽 token 误杀同容器其它任务。
         if [[ "$status" -eq 124 || "$status" -eq 137 || "$status" -eq 143 ]]; then
-            cleanup_task_processes "$container" "$task_dir" "engine" "$wlog"
+            cleanup_task_processes "$container" "$task_dir" "" "$wlog"
         fi
 
         local session_outcome
@@ -607,10 +877,17 @@ run_worker() {
 
         # ── 反作弊后置检测 ──
         local cheat_json cheat_verdict cheat_reasons cheat_mark
-        cheat_json=$(docker exec "$container" bash -lc "
-            cd '$WORKDIR_IN_CONTAINER'
-            python3 '$ANTICHEAT_SCRIPT' verify '$task_dir' --json 2>/dev/null
-        " 2>/dev/null || true)
+        if [[ -n "${ABLATE_ANTICHEAT:-}" ]]; then
+            cheat_json=""
+            cheat_verdict="SKIPPED"
+            cheat_reasons=""
+            echo "[anticheat] skipped by ABLATE_ANTICHEAT=1" >> "$wlog"
+        else
+            cheat_json=$(docker exec "$container" bash -lc "
+                cd '$WORKDIR_IN_CONTAINER'
+                python3 '$ANTICHEAT_SCRIPT' verify '$task_dir' --json 2>/dev/null
+            " 2>/dev/null || true)
+        fi
         cheat_verdict=$(echo "$cheat_json" | python3 -c "
 import sys, json
 try:
@@ -625,7 +902,29 @@ try:
 except Exception:
     print('')
 " 2>/dev/null || echo "")
-        [[ -n "$cheat_json" ]] && echo "$cheat_json" > "$task_dir/_anticheat.json"
+        if [[ -n "$cheat_json" ]]; then
+            if [[ -n "${ANTICHEAT_DETECT_ONLY:-}" ]]; then
+                mkdir -p "$task_dir/precision_tuning"
+                echo "$cheat_json" > "$task_dir/precision_tuning/anticheat_detect_only.json"
+                echo "[anticheat] detect-only verdict=$cheat_verdict reasons=$cheat_reasons" >> "$wlog"
+            else
+                echo "$cheat_json" > "$task_dir/_anticheat.json"
+                # _anticheat.json 是 engine 退出后的后置事实源；写入后重建 exit artifacts，
+                # 让 debug_status/reportable_success 能反映 post-run reference/hash 检测。
+                docker exec "$container" bash -lc "
+                    cd '$WORKDIR_IN_CONTAINER'
+                    PYTHONPATH='skills/ascendc/ascendc-debug'\${PYTHONPATH:+:\$PYTHONPATH} \
+                    python3 - '$task_dir' <<'PY'
+import sys
+from pathlib import Path
+from engine.exit_artifacts import write_exit_artifacts, write_run_summary, build_debug_status
+task_dir = Path(sys.argv[1])
+write_exit_artifacts(task_dir)
+write_run_summary(task_dir, build_debug_status(task_dir))
+PY
+                " >> "$wlog" 2>&1 || true
+            fi
+        fi
 
         cheat_mark=""
         if [[ "$cheat_verdict" == "CHEAT" ]]; then
@@ -645,9 +944,15 @@ except Exception:
                 *)                             icon="⚠ $session_outcome${cheat_mark}" ;;
             esac
             echo "[${container}@npu${npu}] ✅ ${op_name} session_outcome=${session_outcome} (${elapsed}s)"
-        elif [[ "$status" -eq 124 || "$status" -eq 137 || "$status" -eq 143 ]]; then
-            icon="⏱ 超时(engine)${cheat_mark}"
+        elif [[ "$status" -eq 124 ]]; then
+            icon="⏱ engine_timeout${cheat_mark}"
             echo "[${container}@npu${npu}] ⏱ ${op_name} ENGINE_TIMEOUT (${elapsed}s)"
+        elif [[ "$status" -eq 143 ]]; then
+            icon="🛑 terminated_by_sigterm${cheat_mark}"
+            echo "[${container}@npu${npu}] 🛑 ${op_name} ENGINE_SIGTERM (${elapsed}s)"
+        elif [[ "$status" -eq 137 ]]; then
+            icon="💥 killed_by_sigkill${cheat_mark}"
+            echo "[${container}@npu${npu}] 💥 ${op_name} ENGINE_SIGKILL (${elapsed}s)"
         elif [[ "$status" -eq 86 ]]; then
             icon="🧊 stale_after_failure${cheat_mark}"
             echo "[${container}@npu${npu}] 🧊 ${op_name} STALE (${elapsed}s)"
@@ -687,12 +992,15 @@ for i in "${!CONTAINER_ARR[@]}"; do
     pids+=("$!")
 done
 for p in "${pids[@]}"; do wait "$p" || true; done
+reconcile_missing_report_rows
 
 # ── 汇总 ──
 SUCCESS=$(grep_count "✅ success" "$REPORT")
 STOPPED_LOOP=$(grep_count "⛔ stopped_by_loop_limit" "$REPORT")
 SKIPPED=$(grep_count "⊘ skipped" "$REPORT")
-TIMEOUT_CNT=$(grep_count "⏱ 超时" "$REPORT")
+TIMEOUT_CNT=$(grep_count "⏱ engine_timeout" "$REPORT")
+SIGTERM_CNT=$(grep_count "🛑 terminated_by_sigterm" "$REPORT")
+SIGKILL_CNT=$(grep_count "💥 killed_by_sigkill" "$REPORT")
 STALE_CNT=$(grep_count "🧊 stale" "$REPORT")
 FAIL=$(grep_count "❌ " "$REPORT")
 PROVIDER_API=$(grep_count "🚧 provider_api_error" "$REPORT")
@@ -707,6 +1015,8 @@ CHEAT=$(grep_count "🚨 CHEAT" "$REPORT")
     echo "- stopped_by_loop_limit: $STOPPED_LOOP"
     echo "- skipped_*: $SKIPPED"
     echo "- engine timeout: $TIMEOUT_CNT"
+    echo "- terminated_by_sigterm: $SIGTERM_CNT"
+    echo "- killed_by_sigkill: $SIGKILL_CNT"
     echo "- stale_after_failure: $STALE_CNT"
     echo "- provider_api_error: $PROVIDER_API"
     echo "- failed / crashed / stopped_* / engine_rc!=0: $FAIL"
@@ -719,7 +1029,7 @@ CHEAT=$(grep_count "🚨 CHEAT" "$REPORT")
 } >> "$REPORT"
 
 echo "================================================================"
-echo "完成: SUCCESS=$SUCCESS TIMEOUT=$TIMEOUT_CNT STALE=$STALE_CNT FAILED=$FAIL CHEAT=$CHEAT / 共 $TOTAL"
+echo "完成: SUCCESS=$SUCCESS TIMEOUT=$TIMEOUT_CNT SIGTERM=$SIGTERM_CNT SIGKILL=$SIGKILL_CNT STALE=$STALE_CNT FAILED=$FAIL CHEAT=$CHEAT / 共 $TOTAL"
 if [[ -s "$FATAL" ]]; then
     echo "全局熔断: $(cat "$FATAL")"
 fi
