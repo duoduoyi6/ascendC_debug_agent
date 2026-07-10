@@ -280,6 +280,20 @@ def run_debug_session(
                 from engine.exit_artifacts import write_diagnosis_summary
                 attempt = int((decision.skill_args or {}).get("attempt", 0))
                 write_diagnosis_summary(task_dir, attempt)
+                # 问题 7: 串行覆盖保护。本轮 validate 后先存/更新 current_best，再判连续
+                # 无改善是否回滚 (决策 3: 单轮下降不回滚)。回滚用 best 覆盖工作区 kernel，
+                # 使下一轮 agent 在"当前最好"而非"改坏"的代码上继续。best-effort，全程吞
+                # 异常，绝不影响主循环 / 终态决策。
+                try:
+                    from engine import best_rollback as _br
+                    _br.save_current_best(task_dir, attempt)
+                    if _br.should_rollback(task_dir, attempt):
+                        best = _br.do_rollback(task_dir)
+                        if best is not None:
+                            transition.record_rollback(
+                                task_dir, from_attempt=attempt, best_metric=best)
+                except Exception:  # noqa: BLE001 — 保护逻辑绝不阻断主循环
+                    pass
             else:
                 gate_result = None
             continue

@@ -761,6 +761,63 @@ def _write_forensics_unavailable_report(
     return path
 
 
+def _latest_rollback_from_attempt(task_dir: Path) -> Optional[dict]:
+    """读 events，返回最近一条 rollback 事件 (无则 None)。独立读盘避免 import events 循环。"""
+    p = Path(task_dir) / ".debug_events" / "events.jsonl"
+    if not p.exists():
+        return None
+    last = None
+    try:
+        for line in p.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if e.get("type") == "rollback":
+                last = e
+    except OSError:
+        return None
+    return last
+
+
+def _reuse_forensics_after_rollback(
+    task_dir: Path, attempt: int, report: Path
+) -> Optional[dict]:
+    """回滚后复用: 若本轮紧跟回滚 (rollback.from_attempt == attempt-1)，把 best 轮的
+    forensics_report 复制成当前 attempt 名并返回复用结果 (不跑取证子进程)；否则 None。
+
+    best report 缺失/复制失败 → 返回 None 回退正常执行 (向正确性倾斜)。
+    """
+    rb = _latest_rollback_from_attempt(task_dir)
+    if rb is None or rb.get("from_attempt") != attempt - 1:
+        return None
+    best_attempt = rb.get("best_attempt")
+    if best_attempt is None:
+        return None
+    best_report = task_dir / "precision_tuning" / f"forensics_report_{best_attempt}.json"
+    if not best_report.exists():
+        return None
+    try:
+        if best_report != report:
+            report.write_bytes(best_report.read_bytes())
+    except OSError:
+        return None
+    if not report.exists():
+        return None
+    return {
+        "success": True,
+        "exit_code": 0,
+        "report_path": str(report),
+        "error": None,
+        "cached": True,
+        "reused_after_rollback": True,
+        "reused_from_attempt": best_attempt,
+    }
+
+
 def run_forensics(
     task_dir: Path,
     *,
@@ -783,6 +840,15 @@ def run_forensics(
     repo_root = Path(repo_root or _REPO_ROOT).resolve()
     input_normalization = _ensure_model_json_alias(task_dir)
     report = task_dir / "precision_tuning" / f"forensics_report_{attempt}.json"
+
+    # 问题 7: 回滚后复用。若本轮 (attempt) 紧跟一次 kernel 回滚 (best_rollback 已把源码恢复
+    # 成 best)，则本轮取证输入 == best 那轮，重跑必产同结果，且 build/ 残留的是改坏代码的 .so
+    # (与回滚后源码不一致，重跑会用错 .so 失真)。故直接复用 best 轮的 forensics_report，
+    # 跳过 prebuild + OperatorExecutor (省编译+取证)。best report 缺失 → 回退正常执行。
+    reused = _reuse_forensics_after_rollback(task_dir, attempt, report)
+    if reused is not None:
+        reused["input_normalization"] = input_normalization
+        return reused
 
     # 建议A: staleness 缓存。当前取证输入 (kernel 源码 + model_new) hash 命中上轮缓存，
     # 且上轮 report 仍在 → 复用，省一次昂贵子进程 (上限 1800s)。复用时把上轮 report 复制

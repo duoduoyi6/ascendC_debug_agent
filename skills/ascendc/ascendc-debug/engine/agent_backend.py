@@ -119,6 +119,32 @@ def _cheat_warning(task_dir: Path) -> str:
     )
 
 
+def _rollback_warning(task_dir: Path, attempt: int) -> str:
+    """问题 7: 若上一轮 (attempt-1) 触发了 kernel 回滚，注入提示到本轮 prompt。
+
+    回滚 = 连续无改善后 kernel 已被恢复到 current_best。告知 agent 当前代码是历史最佳
+    (非上一轮改坏的版本)，且最近方向未见效，须换思路——避免回滚后重走死路 (决策 4)。
+    失败方向明细由 agent 按 SKILL.md 指令自读 tuning_directions.json。
+    """
+    from engine.events import read_events
+    try:
+        events = read_events(task_dir)
+    except Exception:  # noqa: BLE001
+        return ""
+    rb = [e for e in events if e.get("type") == "rollback"
+          and e.get("from_attempt") == attempt - 1]
+    if not rb:
+        return ""
+    last = rb[-1]
+    return (
+        f"\n🔄 上一轮 (attempt {attempt - 1}) 连续无改善，kernel 已回滚到历史最佳"
+        f" (attempt {last.get('best_attempt')}，case_pass_rate={last.get('best_case_pass_rate')})。\n"
+        f"  - 当前 kernel/ 是目前最好的版本，不是上一轮改坏的版本。\n"
+        f"  - 最近几轮的修复方向未见效，本轮请换一个方向；先读 tuning_directions.json"
+        f" 确认哪些 fix_type 已 regressed，勿重复。\n"
+    )
+
+
 def _knowledge_search_context(task_dir: Path, attempt: int) -> str:
     """Return a compact KB retrieval summary injected by engine, if present."""
     path = task_dir / "precision_tuning" / "knowledge_search_log.json"
@@ -180,6 +206,7 @@ def _build_prompt(task_dir: Path, op_name: str, failure_type: str,
         f"  attempt: {attempt}\n"
     )
     return (head + _cheat_warning(task_dir)
+            + _rollback_warning(task_dir, attempt)
             + _knowledge_search_context(task_dir, attempt)
             + _SINGLE_ROUND_CONSTRAINT.replace("{task_dir}", str(task_dir))
             + (_NOPROBE_CONSTRAINT if os.environ.get("ABLATE_PROBE") == "1" else ""))

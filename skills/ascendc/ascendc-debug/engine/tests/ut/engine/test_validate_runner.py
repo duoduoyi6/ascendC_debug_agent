@@ -221,5 +221,73 @@ class TestRunFullEval(unittest.TestCase):
         self.assertIsNone(fe)
 
 
+class TestForensicsReuseAfterRollback(unittest.TestCase):
+    """问题 7: 回滚后复用 best 轮 forensics_report，不跑取证子进程 (省编译+取证)。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.task_dir = _make_task(Path(self._tmp.name))
+        os.environ.pop("ASCENDC_DEBUG_FORENSICS_NO_CACHE", None)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _run(self, attempt: int, fake: _FakeForensics) -> dict:
+        with mock.patch.object(validate_runner.subprocess, "run", fake):
+            return validate_runner.run_forensics(self.task_dir, attempt=attempt)
+
+    def test_reuse_best_report_no_subprocess(self) -> None:
+        from engine import transition
+        # best 轮(attempt 0)已有 forensics_report
+        (self.task_dir / "precision_tuning" / "forensics_report_0.json").write_text(
+            json.dumps({"attempt": 0, "primary_hint": "uniform_offset"}), encoding="utf-8")
+        # 上一轮(attempt 2)触发回滚到 best(attempt 0)
+        transition.record_rollback(
+            self.task_dir, from_attempt=2,
+            best_metric={"attempt": 0, "case_pass_rate": 50.0, "match_rate": "57.62"})
+        # 本轮 attempt=3 紧跟回滚 → 应复用 best 报告，不跑子进程
+        fake = _FakeForensics(self.task_dir)
+        r = self._run(3, fake)
+        self.assertTrue(r["success"])
+        self.assertEqual(fake.calls, 0, "回滚后应复用 best 报告，不跑取证子进程")
+        self.assertTrue(r.get("reused_after_rollback"))
+        self.assertEqual(r.get("reused_from_attempt"), 0)
+        # best 报告应被复制成当前 attempt 名，供 Gate-F/knowledge_search 读取
+        cur = self.task_dir / "precision_tuning" / "forensics_report_3.json"
+        self.assertTrue(cur.exists())
+        self.assertEqual(json.loads(cur.read_text())["primary_hint"], "uniform_offset")
+
+    def test_no_reuse_when_not_after_rollback(self) -> None:
+        # 无回滚事件 → 正常跑子进程
+        fake = _FakeForensics(self.task_dir)
+        r = self._run(1, fake)
+        self.assertEqual(fake.calls, 1)
+        self.assertFalse(r.get("reused_after_rollback"))
+
+    def test_fallback_when_best_report_missing(self) -> None:
+        from engine import transition
+        # 回滚事件指向 best attempt 0，但其 report 不存在 → 回退正常执行
+        transition.record_rollback(
+            self.task_dir, from_attempt=2,
+            best_metric={"attempt": 0, "case_pass_rate": 50.0, "match_rate": "57.62"})
+        fake = _FakeForensics(self.task_dir)
+        r = self._run(3, fake)
+        self.assertEqual(fake.calls, 1, "best 报告缺失应回退重跑")
+        self.assertFalse(r.get("reused_after_rollback"))
+
+    def test_no_reuse_when_rollback_not_immediately_prior(self) -> None:
+        from engine import transition
+        (self.task_dir / "precision_tuning" / "forensics_report_0.json").write_text(
+            json.dumps({"attempt": 0}), encoding="utf-8")
+        # 回滚发生在 from_attempt=2，但本轮是 attempt=5 (非紧邻) → 不复用
+        transition.record_rollback(
+            self.task_dir, from_attempt=2,
+            best_metric={"attempt": 0, "case_pass_rate": 50.0, "match_rate": "57.62"})
+        fake = _FakeForensics(self.task_dir)
+        r = self._run(5, fake)
+        self.assertEqual(fake.calls, 1)
+        self.assertFalse(r.get("reused_after_rollback"))
+
+
 if __name__ == "__main__":
     unittest.main()
