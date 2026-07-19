@@ -6,9 +6,14 @@ subprocess 链路用真实脚本做一个 smoke (验证 stdout 多行 JSON + 退
 """
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[4] / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from engine.gate_adapter import (
     GateResult,
@@ -16,6 +21,7 @@ from engine.gate_adapter import (
     parse_gate_output,
     run_gate,
 )
+from precision_gate import _merge_common_checks  # noqa: E402
 
 
 class TestParseBuildShape(unittest.TestCase):
@@ -28,11 +34,13 @@ class TestParseBuildShape(unittest.TestCase):
             "checks": {"curr_present": True, "curr_failed_step": "execute"},
             "loop_signal": "CONTINUE",
             "loop_reason": "build progress tracked via failed_step transition",
+            "failure_type": "build_failed",
         }
         r = parse_gate_output(raw)
         self.assertEqual(r.gate, "GATE-BUILD-V")
         self.assertTrue(r.passed)
         self.assertEqual(r.loop_signal, "CONTINUE")
+        self.assertEqual(r.failure_type, "build_failed")
         # build 分支无 stop_reason_code。
         self.assertIsNone(r.stop_reason_code)
         self.assertIsNone(r.attempt)
@@ -123,6 +131,37 @@ class TestTopLevelPrecedence(unittest.TestCase):
         r2 = parse_gate_output({"gate": "b", "passed": True})
         r1.checks["x"] = 1
         self.assertEqual(r2.checks, {})
+
+
+class TestPrecisionGateCommonMerge(unittest.TestCase):
+    def test_branch_output_keeps_common_checks(self) -> None:
+        class CommonOutcome:
+            checks = {
+                "ast_degrade_pass": True,
+                "anticheat_pass": True,
+                "hash_model_new_ascendc.py": True,
+            }
+
+        merged = _merge_common_checks(
+            {
+                "gate": "GATE-V",
+                "passed": True,
+                "loop_signal": "PASS",
+                "checks": {
+                    "precision_passed": True,
+                    "stop_reason_code": "precision_passed",
+                },
+            },
+            CommonOutcome(),
+        )
+
+        self.assertEqual(merged["gate"], "GATE-V")
+        self.assertEqual(merged["loop_signal"], "PASS")
+        self.assertTrue(merged["checks"]["ast_degrade_pass"])
+        self.assertTrue(merged["checks"]["anticheat_pass"])
+        self.assertTrue(merged["checks"]["hash_model_new_ascendc.py"])
+        self.assertTrue(merged["checks"]["precision_passed"])
+        self.assertEqual(merged["checks"]["stop_reason_code"], "precision_passed")
 
 
 class TestExtractFirstJson(unittest.TestCase):

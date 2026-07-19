@@ -40,7 +40,12 @@ class RunnerError(RuntimeError):
 
 
 # 引擎可派发的 Action 白名单 (对应 lingxi validate_action)。
-_AVAILABLE_PY_ACTIONS = ("precision_gate", "knowledge_search")
+_AVAILABLE_PY_ACTIONS = (
+    "precision_gate",
+    "knowledge_search",
+    "baseline_checkpoint",
+    "checkpoint_and_rollback",
+)
 _AVAILABLE_AGENTS = ("debug_worker",)
 
 
@@ -74,16 +79,64 @@ def _default_dispatcher(
     if action.kind == "py_action":
         gate_step = args.get("gate_step", "validate")
         attempt = int(args.get("attempt", 0))
+        if action.name == "baseline_checkpoint":
+            # attempt=-1 is deliberately outside the Agent attempt budget.  It
+            # objectively scores and snapshots the untouched input kernel.
+            from engine import best_rollback as br
+            objective = run_objective_validation(task_dir, attempt=-1)
+            # A baseline is trusted only after the same common anti-cheat/AST/
+            # structure checks used by validate.  This also makes an objective
+            # baseline success eligible for direct clean-success termination.
+            from scripts.gates.common import run_common
+            common_output = run_common(
+                "validate", task_dir, op_name, -1).to_gate_output()
+            common_gate = parse_gate_output(common_output)
+            if br.checkpoint_allowed(common_gate) and common_gate.passed:
+                checkpoint = br.ensure_current_best(task_dir, -1, force=True)
+            else:
+                checkpoint = {
+                    "success": False,
+                    "updated": False,
+                    "error": "baseline_common_gate_failed",
+                }
+            return {
+                "success": bool(checkpoint.get("success")),
+                "attempt": -1,
+                "objective_validation": objective,
+                "checkpoint": checkpoint,
+                "baseline_common_gate": common_output,
+                "failure_type": objective.get("failure_type"),
+                "import_subtype": objective.get("import_subtype"),
+                "verification_exit_code": objective.get("verification_exit_code"),
+            }
+        if action.name == "checkpoint_and_rollback":
+            from engine import best_rollback as br
+            state = DebugState.load(task_dir)
+            validate_result = _validate_result_for_attempt(state, attempt)
+            if validate_result is None:
+                return {"success": False, "error": "missing_validate_event",
+                        "attempt": attempt}
+            return br.process_validation_checkpoint(
+                task_dir, attempt, parse_gate_output(validate_result))
         # 修复 2 (6.11 文档): forensics step 先由 engine 主动产出 report，使下一拍
         # Gate-F 当轮可读到。执行失败只落 passed=False (方案 3 统一路径)——由
         # next_action 的 _completed_steps_this_attempt 排除出 completed → 重派，
         # 连续失败超限才 Done(stopped_by_gate)。不在此直接终止。
+        forensics_result = None
         if gate_step == "forensics":
             from engine.validate_runner import run_forensics
-            fr = run_forensics(task_dir, attempt=attempt)
-            if not fr["success"]:
-                return {"passed": False, "error": fr.get("error"),
-                        "gate": "GATE-FORENSICS-EXEC"}
+            forensics_result = run_forensics(
+                task_dir,
+                attempt=attempt,
+                failure_type=args.get("failure_type"),
+            )
+            if not forensics_result["success"]:
+                return {
+                    "passed": False,
+                    "error": forensics_result.get("error"),
+                    "gate": "GATE-FORENSICS-EXEC",
+                    "forensics": forensics_result,
+                }
         if action.name == "knowledge_search":
             from engine.knowledge_search import run_knowledge_search
             return run_knowledge_search(
@@ -95,12 +148,35 @@ def _default_dispatcher(
         objective = None
         if gate_step == "validate":
             objective = run_objective_validation(task_dir, attempt=attempt)
+            # Persist direction metadata before Gate-V writes round_summary and
+            # tuning_directions.  The diagnose event and validation JSON already
+            # exist at this point; a second post-event write remains idempotent.
+            from engine.exit_artifacts import write_diagnosis_summary
+            write_diagnosis_summary(task_dir, attempt)
         gr = run_gate(task_dir, step=gate_step, op_name=op_name, attempt=attempt)
         result = _gate_result_to_dict(gr)
+        if forensics_result is not None:
+            result["forensics"] = forensics_result
+            for key in (
+                "cache_hit", "reuse_kind", "forensics_reused",
+                "forensics_executed", "forensics_completed",
+                "prebuild_executed", "build_skipped", "build_skip_reason",
+                "reused_after_rollback", "reused_from_attempt",
+                "reused_best_attempt", "cached_from_attempt", "report_path",
+                "forensics_degraded", "diagnostic_evidence_kind",
+                "proceed_to_agent", "forensics_unavailable", "unavailable_reason",
+            ):
+                if key in forensics_result:
+                    result[key] = forensics_result[key]
         if objective is not None:
             result["objective_validation"] = objective
             result["failure_type"] = objective.get("failure_type")
             result["verification_exit_code"] = objective.get("verification_exit_code")
+        if args.get("validation_after_task_turn_cap") is True:
+            result["validation_after_task_turn_cap"] = True
+            result["task_turns_used_at_cap"] = args.get("task_turns_used")
+            result["task_turns_limit_at_cap"] = args.get("task_turns_limit")
+            result["max_turns_applied_at_cap"] = args.get("max_turns_applied")
         return result
     if action.kind == "spawn_agent":
         if agent_callback is None:
@@ -136,6 +212,7 @@ def _gate_result_to_dict(gr: GateResult) -> dict:
         "loop_reason": gr.loop_reason,
         "stop_reason_code": gr.stop_reason_code,
         "prerequisite_error": gr.prerequisite_error,
+        "failure_type": gr.failure_type,
         "import_subtype": checks.get("import_subtype"),
         # 真探针回退兜底标记 (供统计/消融区分"真探针通过"vs"连续失败回退")。
         "l5_probe_degraded": checks.get("l5_probe_degraded"),
@@ -271,7 +348,8 @@ def run_debug_session(
                         "claude_state": result.get("claude_state"),
                         "api_error_status": result.get("api_error_status"),
                     }))
-            # validate 步: 缓存 GateResult 喂下一拍；其余步清空。
+            # validate only records objective/gate evidence.  Best checkpoint
+            # and rollback are a separate replayable action selected next.
             if decision.step == "validate":
                 gate_result = _result_to_gate(result)
                 # 项 12b: 本轮 validate 完成 (final_response/changed_files/validation
@@ -282,6 +360,19 @@ def run_debug_session(
                 write_diagnosis_summary(task_dir, attempt)
             else:
                 gate_result = None
+            # Preserve the historical human-readable rollback event.  The
+            # action_completed result is authoritative, so a crash before this
+            # convenience event does not lose recovery semantics.
+            if decision.step == "checkpoint_and_rollback" and result.get("rolled_back"):
+                transition.record_rollback(
+                    task_dir,
+                    from_attempt=int(result["from_attempt"]),
+                    best_metric={
+                        "attempt": result.get("best_attempt"),
+                        "case_pass_rate": result.get("best_case_pass_rate"),
+                        "match_rate": result.get("best_match_rate"),
+                    },
+                )
             continue
 
         raise RunnerError(f"未知 decision 类型: {type(decision).__name__}")
@@ -306,6 +397,21 @@ def _reconcile_dangling(task_dir: Path, state: DebugState) -> None:
         transition.record_action_completed(
             task_dir, action, ev.get("action_id"),
             {"success": False, "reason": "crash-recovery: 上次进程在此步崩溃，已收尾"})
+
+
+def _validate_result_for_attempt(state: DebugState, attempt: int) -> Optional[dict]:
+    """Return the latest persisted validate result for an exact attempt."""
+    current_attempt = None
+    found = None
+    for event in state.events:
+        if event.get("type") == "attempt_started":
+            current_attempt = event.get("attempt")
+            continue
+        if event.get("type") != "action_completed" or current_attempt != attempt:
+            continue
+        if (event.get("action") or {}).get("step") == "validate":
+            found = event.get("result") or {}
+    return found
 
 
 def _terminate(task_dir: Path, decision, *,

@@ -106,6 +106,8 @@ def _read_log_summary(log_path: Path, attempt: int) -> dict:
             "checklist_count": e.get("checklist_count"),
             "fallback_to_full_load": e.get("fallback_to_full_load"),
             "top_titles": (e.get("top_titles") or [])[:3],
+            "top_ids": (e.get("top_ids") or [])[:3],
+            "retrieved": (e.get("retrieved") or [])[:3],
             "match_reasons": (e.get("match_reasons") or [])[:3],
         }
         for e in data

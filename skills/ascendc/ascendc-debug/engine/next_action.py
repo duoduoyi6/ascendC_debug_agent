@@ -60,10 +60,28 @@ def _max_forensics_retries_per_attempt() -> int:
 def _max_task_turns() -> Optional[int]:
     """任务级累计 agentic turn 数硬闸 (修复 4b-B 方案B)。
 
-    env 未设时不启用；engine/batch CLI 当前默认会设置 ASCENDC_DEBUG_MAX_TASK_TURNS=480。
+    env 未设时不启用；engine/batch CLI 当前默认会设置硬上限 600，
+    并由 ASCENDC_DEBUG_SOFT_TASK_TURNS=480 控制无客观改善时的软预算。
     用 turns 而非金额: turns 模型无关，与单 attempt --max-turns 同量纲，批跑切模型时不漂移。
     """
     raw = os.environ.get("ASCENDC_DEBUG_MAX_TASK_TURNS")
+    if raw is None or raw == "":
+        return None
+    try:
+        v = int(raw)
+        return v if v >= 1 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _soft_task_turns() -> Optional[int]:
+    """Return the evidence-gated task turn budget.
+
+    The soft budget prevents stagnant/provider-error retries from consuming the
+    full hard allowance.  A task may use the hard allowance only after durable
+    objective evidence shows that continuing is justified.
+    """
+    raw = os.environ.get("ASCENDC_DEBUG_SOFT_TASK_TURNS")
     if raw is None or raw == "":
         return None
     try:
@@ -107,6 +125,74 @@ def _total_agent_turns(state: DebugState) -> int:
         if isinstance(turns, int) and turns > 0:
             total += turns
     return total
+
+
+def _has_turn_budget_extension_evidence(state: DebugState) -> bool:
+    """Whether objective progress justifies extending soft turns to the hard cap.
+
+    Accepted evidence is deliberately engine-owned and durable:
+      * checkpoint_and_rollback promoted a post-baseline best implementation;
+      * full-eval reached at least 90% passing cases or 99.9% match rate.
+
+    Agent prose, KB hits, and diagnose success are not sufficient because none
+    of them proves correctness progress.
+    """
+    for event in state.events:
+        if event.get("type") != "action_completed":
+            continue
+        action = event.get("action") or {}
+        result = event.get("result") or {}
+        step = action.get("step")
+        if step == "checkpoint_and_rollback":
+            checkpoint = result.get("checkpoint") or {}
+            best_attempt = result.get("best_attempt")
+            if best_attempt is None:
+                best_attempt = (checkpoint.get("best_metric") or {}).get("attempt")
+            if checkpoint.get("updated") is True and isinstance(best_attempt, int) \
+                    and best_attempt >= 0:
+                return True
+        if step != "validate":
+            continue
+        objective = result.get("objective_validation") or {}
+        full_eval = objective.get("full_eval") or {}
+        passed = full_eval.get("passed_cases")
+        total = full_eval.get("total_cases")
+        if isinstance(passed, int) and isinstance(total, int) and total > 0 \
+                and passed / total >= 0.9:
+            return True
+        match_rate = full_eval.get("match_rate")
+        try:
+            if match_rate is not None and float(match_rate) >= 99.9:
+                return True
+        except (TypeError, ValueError):
+            pass
+    return False
+
+
+def _task_turn_budget(state: DebugState) -> tuple[Optional[int], str]:
+    """Return the active task budget and its tier (disabled/soft/hard)."""
+    hard = _max_task_turns()
+    if hard is None:
+        return None, "disabled"
+    soft = _soft_task_turns()
+    if soft is None or soft >= hard:
+        return hard, "hard"
+    if _has_turn_budget_extension_evidence(state):
+        return hard, "hard_extended"
+    return soft, "soft"
+
+
+def _task_turn_budget_metadata(state: DebugState) -> dict:
+    """Build immutable per-action budget metadata for backend enforcement."""
+    used = _total_agent_turns(state)
+    limit, tier = _task_turn_budget(state)
+    remaining = None if limit is None else max(0, limit - used)
+    return {
+        "task_turns_used": used,
+        "task_turns_limit": limit,
+        "task_turns_remaining": remaining,
+        "task_turn_budget_tier": tier,
+    }
 
 
 def _is_degenerate_round(result: dict) -> bool:
@@ -262,9 +348,22 @@ def _completed_steps_this_attempt(state: DebugState) -> set:
             step = (e.get("action") or {}).get("step")
             result = e.get("result") or {}
             if step == "diagnose_and_fix" and result.get("success") is False:
+                # A session clipped exactly by the remaining task-turn budget
+                # may already have written a useful kernel.  Count diagnose as
+                # exhausted (never retry it), then allow the deterministic
+                # validate/checkpoint steps to judge those changes once.
+                if _is_task_budget_boundary_turn_cap(result):
+                    done.add(step)
                 continue
-            # forensics gate passed=false 不计入 completed，允许重派 (修复 2/3)。
+            if step == "checkpoint_and_rollback" and result.get("success") is False:
+                continue
+            # Deterministic compile/device-runtime failures cannot be repaired by
+            # rerunning forensics against unchanged source.  validate_runner
+            # persists their logs as degraded diagnostic evidence; treat that as
+            # a completed prerequisite and let the matching Agent consume it.
             if step == "forensics" and result.get("passed") is False:
+                if _is_usable_degraded_forensics(result):
+                    done.add(step)
                 continue
             # audit (Gate-A) 降级豁免: 无论 passed 与否都计入 completed (不进上面
             # 的 forensics 排除分支)。Gate-A 缺 section → passed=False，但它只产审计
@@ -273,6 +372,40 @@ def _completed_steps_this_attempt(state: DebugState) -> set:
             if step:
                 done.add(step)
     return done
+
+
+def _is_usable_degraded_forensics(result: dict) -> bool:
+    """Whether failed Gate-F still produced usable deterministic evidence."""
+    forensics = result.get("forensics") or {}
+    unavailable = (
+        result.get("forensics_unavailable") is True
+        or forensics.get("forensics_unavailable") is True
+    )
+    reason = result.get("unavailable_reason") or forensics.get("unavailable_reason")
+    proceed = result.get("proceed_to_agent")
+    if proceed is None:
+        proceed = forensics.get("proceed_to_agent")
+    report_path = result.get("report_path") or forensics.get("report_path")
+    build_result = result.get("build_result") or forensics.get("build_result")
+    evidence_kind = (
+        result.get("diagnostic_evidence_kind")
+        or forensics.get("diagnostic_evidence_kind")
+    )
+    # ``proceed_to_agent`` is explicit in new events.  The report fallback also
+    # makes old interrupted build streams resumable after this fix.  Runtime
+    # degradation is deliberately stricter: it requires the explicit marker
+    # and classified evidence kind written by validate_runner.
+    if unavailable and reason == "build_failed":
+        return proceed is True or (
+            bool(report_path) and isinstance(build_result, dict)
+        )
+    if unavailable and reason == "runtime_error":
+        return (
+            proceed is True
+            and bool(report_path)
+            and evidence_kind == "runtime_error_log"
+        )
+    return False
 
 
 def _failed_forensics_calls_this_attempt(state: DebugState) -> int:
@@ -285,7 +418,7 @@ def _failed_forensics_calls_this_attempt(state: DebugState) -> int:
         if (e.get("action") or {}).get("step") != "forensics":
             continue
         result = e.get("result") or {}
-        if result.get("passed") is False:
+        if result.get("passed") is False and not _is_usable_degraded_forensics(result):
             count += 1
     return count
 
@@ -321,8 +454,92 @@ def _diagnose_budget_exceeded_this_attempt(state: DebugState) -> Optional[int]:
     return None
 
 
+def _is_task_budget_boundary_turn_cap(result: dict) -> bool:
+    """Whether max-turns was the dynamic task-budget remainder, not session cap."""
+    if result.get("claude_state") != "max_turns_exceeded":
+        return False
+    if result.get("task_budget_boundary_hit") is True:
+        return True
+    try:
+        applied = int(result.get("max_turns_applied"))
+        remaining = int(result.get("task_turns_remaining"))
+    except (TypeError, ValueError):
+        return False
+    return remaining > 0 and applied >= remaining
+
+
+def _task_budget_boundary_turn_cap_this_attempt(state: DebugState) -> Optional[dict]:
+    """Return the current attempt's boundary-clipped diagnose result, if any."""
+    for event in reversed(state.events):
+        if event.get("type") == "attempt_started":
+            return None
+        if event.get("type") != "action_completed":
+            continue
+        if (event.get("action") or {}).get("step") != "diagnose_and_fix":
+            continue
+        result = event.get("result") or {}
+        return result if _is_task_budget_boundary_turn_cap(result) else None
+    return None
+
+
 def _has_attempt_started_event(state: DebugState) -> bool:
     return any(e.get("type") == "attempt_started" for e in state.events)
+
+
+def _successful_action_exists(state: DebugState, step: str) -> bool:
+    return any(
+        event.get("type") == "action_completed"
+        and (event.get("action") or {}).get("step") == step
+        and (event.get("result") or {}).get("success") is not False
+        for event in state.events
+    )
+
+
+def _latest_successful_action_result(state: DebugState, step: str) -> Optional[dict]:
+    """Return the latest successful result for a named engine step."""
+    for event in reversed(state.events):
+        if event.get("type") != "action_completed":
+            continue
+        if (event.get("action") or {}).get("step") != step:
+            continue
+        result = event.get("result") or {}
+        if result.get("success") is not False:
+            return result
+    return None
+
+
+def _protection_actions_enabled(state: DebugState) -> bool:
+    """Production event streams start with session_started.
+
+    Keeping synthetic counter-only states compatible is useful for pure routing
+    tests and external callers that use next_action as a signal mapper.  Every
+    runner-owned session, including old sessions resumed after this upgrade,
+    has session_started and therefore gets the recovery barrier.
+    """
+    return any(event.get("type") == "session_started" for event in state.events)
+
+
+def _failed_action_calls(state: DebugState, step: str, *, current_attempt_only: bool) -> int:
+    count = 0
+    for event in reversed(state.events):
+        if current_attempt_only and event.get("type") == "attempt_started":
+            break
+        if event.get("type") != "action_completed":
+            continue
+        if (event.get("action") or {}).get("step") != step:
+            continue
+        if (event.get("result") or {}).get("success") is False:
+            count += 1
+    return count
+
+
+def _protection_action(step: str, failure_type: str, attempt: int) -> Action:
+    return Action(
+        kind="py_action",
+        name=step,
+        step=step,
+        skill_args={"failure_type": failure_type, "attempt": attempt},
+    )
 
 
 def _budget_limit_decision(state: DebugState, failure_type: str) -> Optional[Done]:
@@ -336,12 +553,32 @@ def _budget_limit_decision(state: DebugState, failure_type: str) -> Optional[Don
     # 撞轮次上限优先归 stopped_by_loop_limit (更精确)，仅未撞轮次但累计 turns 超标时
     # 才归 stopped_by_budget。本函数只在续跑路径 (gate CONTINUE / 兜底) 前被调用，
     # gate PASS/STOP 直接 return 不经此 → 天然满足「终判优先于预算闸」(H1)。
-    max_turns = _max_task_turns()
-    if max_turns is not None:
+    return _turn_budget_limit_decision(state)
+
+
+def _turn_budget_limit_decision(state: DebugState) -> Optional[Done]:
+    """Check only the task-level turn budget.
+
+    A newly persisted ``attempt_started`` event already consumed the decision to
+    enter that attempt.  Rechecking MAX_ATTEMPTS before its first action would
+    count the boundary but skip the actual Agent round (for example, configured
+    5 would execute only attempts 0-3).  The global/branch limits therefore stay
+    in the pre-Continue path, while this narrower check protects only turns at
+    the start of an already-authorized attempt.
+    """
+    limit, tier = _task_turn_budget(state)
+    if limit is not None:
         used = _total_agent_turns(state)
-        if used >= max_turns:
+        if used >= limit:
+            if tier == "soft":
+                reason = (
+                    f"任务累计 agentic turns={used} 达软预算 {limit}，"
+                    "且无客观改善/near-success/best checkpoint 更新证据"
+                )
+            else:
+                reason = f"任务累计 agentic turns={used} 达硬上限 {limit}"
             return Done(session_outcome="stopped_by_budget",
-                        reason=f"任务累计 agentic turns={used} 达上限 {max_turns}")
+                        reason=reason)
     return None
 
 
@@ -349,7 +586,9 @@ def _route_label(failure_type: Optional[str]) -> Optional[str]:
     return _BRANCH_LABEL.get(failure_type or "")
 
 
-def _make_action_for_step(step: str, failure_type: str, attempt: int) -> Action:
+def _make_action_for_step(step: str, failure_type: str, attempt: int,
+                          *, budget_metadata: Optional[dict] = None,
+                          action_metadata: Optional[dict] = None) -> Action:
     """把轮内 step 名构造成具体 Action。
 
     forensics / validate → py_action (跑确定性脚本: precision_gate.py --step)。
@@ -357,19 +596,25 @@ def _make_action_for_step(step: str, failure_type: str, attempt: int) -> Action:
     knowledge_search → py_action (跑 precision_knowledge.py search, 写检索日志)。
     diagnose_and_fix → spawn_agent (拉起 constructive/discovery worker 诊断+改 kernel)。
     """
+    common_args = {"failure_type": failure_type, "attempt": attempt}
+    if action_metadata:
+        common_args.update(action_metadata)
     if step == "diagnose_and_fix":
+        skill_args = dict(common_args)
+        if budget_metadata:
+            skill_args.update(budget_metadata)
         return Action(
             kind="spawn_agent",
             name="debug_worker",
             step=step,
-            skill_args={"failure_type": failure_type, "attempt": attempt},
+            skill_args=skill_args,
         )
     if step == "knowledge_search":
         return Action(
             kind="py_action",
             name="knowledge_search",
             step=step,
-            skill_args={"failure_type": failure_type, "attempt": attempt},
+            skill_args=common_args,
         )
     # forensics/audit/validate 共用 precision_gate 派发器，仅 gate_step 不同。
     if step == "forensics":
@@ -382,8 +627,7 @@ def _make_action_for_step(step: str, failure_type: str, attempt: int) -> Action:
         kind="py_action",
         name="precision_gate",
         step=step,
-        skill_args={"failure_type": failure_type, "attempt": attempt,
-                    "gate_step": gate_step},
+        skill_args={**common_args, "gate_step": gate_step},
     )
 
 
@@ -438,8 +682,12 @@ def debug_next_action(state: DebugState, gate_result: Optional[GateResult] = Non
                     f" (agent_turns={exceeded_turns})，停止本任务防重复重试"
                 ),
             )
-        limited = _budget_limit_decision(state, ft)
-        if limited is not None and _total_agent_turns(state) > 0:
+        # This attempt boundary was already authorized by the previous
+        # validate/CONTINUE decision.  Only the task-turn budget may stop it
+        # before diagnose; MAX_ATTEMPTS is checked before recording the next
+        # boundary, otherwise the final configured attempt becomes a ghost.
+        limited = _turn_budget_limit_decision(state)
+        if limited is not None:
             return limited
         failed_agent_calls = _failed_diagnose_calls_this_attempt(state)
         if failed_agent_calls > _max_agent_retries_per_attempt():
@@ -456,6 +704,20 @@ def debug_next_action(state: DebugState, gate_result: Optional[GateResult] = Non
             )
 
     if "validate" in completed:
+        # Gate terminal/continue decisions may only happen after the durable
+        # checkpoint/rollback action.  On resume a dangling or failed action is
+        # replayed, so validate evidence can never outrun its source side effect.
+        if _protection_actions_enabled(state) and "checkpoint_and_rollback" not in completed:
+            failures = _failed_action_calls(
+                state, "checkpoint_and_rollback", current_attempt_only=True)
+            if failures > 2:
+                return Abort(
+                    category="checkpoint_recovery_failed",
+                    reason=f"checkpoint/rollback 恢复连续失败 {failures} 次",
+                    details={"session_outcome": "crashed", "attempt": state.total_attempts - 1},
+                )
+            return _protection_action(
+                "checkpoint_and_rollback", ft, state.total_attempts - 1)
         gate = _resolve_gate(state, gate_result)
         if gate is not None:
             sig = gate.loop_signal
@@ -491,9 +753,42 @@ def debug_next_action(state: DebugState, gate_result: Optional[GateResult] = Non
                 details={"session_outcome": "crashed"},
             )
 
-    # ---- 3. 尚未开始任何 attempt → 起第一轮 ----
+    # ---- 3. 尚未开始任何 attempt → 客观验证并保存原始 baseline，再起第一轮 ----
     if state.total_attempts == 0:
-        return Continue(next_attempt=0, next_failure_type=ft,
+        if (_protection_actions_enabled(state)
+                and not _successful_action_exists(state, "baseline_checkpoint")):
+            failures = _failed_action_calls(
+                state, "baseline_checkpoint", current_attempt_only=False)
+            if failures > 2:
+                return Abort(
+                    category="baseline_checkpoint_failed",
+                    reason=f"原始 kernel baseline 连续验证/保存失败 {failures} 次",
+                    details={"session_outcome": "crashed"},
+                )
+            return _protection_action("baseline_checkpoint", ft, -1)
+        baseline = _latest_successful_action_result(state, "baseline_checkpoint") or {}
+        baseline_ft = baseline.get("failure_type") or ft
+        if baseline_ft == "success":
+            # baseline_checkpoint includes objective validation plus common
+            # anti-cheat/AST/structure checks, so this is a clean pre-Agent pass.
+            common = baseline.get("baseline_common_gate") or {}
+            if common.get("passed") is True:
+                return Done(
+                    session_outcome="success",
+                    reason="原始 kernel baseline 已 clean success",
+                )
+            return Abort(
+                category="baseline_clean_evidence_missing",
+                reason="baseline objective success，但缺少 common clean 证据",
+                details={"session_outcome": "crashed"},
+            )
+        if baseline_ft in _NONWHITELIST_OUTCOME:
+            return Done(session_outcome=_NONWHITELIST_OUTCOME[baseline_ft],
+                        reason=f"baseline failure_type={baseline_ft} 不在白名单")
+        if baseline_ft not in DEBUGGABLE_FAILURE_TYPES:
+            return Done(session_outcome="skipped_unsupported_type",
+                        reason=f"未知 baseline failure_type={baseline_ft}")
+        return Continue(next_attempt=0, next_failure_type=baseline_ft,
                         reason="session 首轮")
 
     # 人工构造/损坏状态可能只有 counters 没有 attempt_started 事件，此时只能按预算闸收敛。
@@ -518,6 +813,30 @@ def debug_next_action(state: DebugState, gate_result: Optional[GateResult] = Non
 
     for step in _round_sequence(ft):
         if step not in completed:
+            if step == "diagnose_and_fix":
+                limited = _turn_budget_limit_decision(state)
+                if limited is not None:
+                    return limited
+                return _make_action_for_step(
+                    step,
+                    ft,
+                    state.total_attempts - 1,
+                    budget_metadata=_task_turn_budget_metadata(state),
+                )
+            if step == "validate":
+                clipped = _task_budget_boundary_turn_cap_this_attempt(state)
+                if clipped is not None:
+                    return _make_action_for_step(
+                        step,
+                        ft,
+                        state.total_attempts - 1,
+                        action_metadata={
+                            "validation_after_task_turn_cap": True,
+                            "task_turns_used": _total_agent_turns(state),
+                            "task_turns_limit": clipped.get("task_turns_limit"),
+                            "max_turns_applied": clipped.get("max_turns_applied"),
+                        },
+                    )
             return _make_action_for_step(step, ft, state.total_attempts - 1)
 
     # ---- 5. 本轮全部 step 完成但无 gate 信号 (异常) → 兜底当作需继续 ----
@@ -563,10 +882,14 @@ def _dispatch_loop_signal(state: DebugState, gate: GateResult):
         outcome = _STOP_OUTCOME.get(gate.stop_reason_code or "", "failed")
         return Done(session_outcome=outcome,
                     reason=f"Gate-V STOP: {gate.stop_reason_code or 'unspecified'}")
-    # CONTINUE: 进下一轮，failure_type 取「下一轮入口的最新 ft」。这里用当前 ft；
-    # runner 在落 attempt_started 前会刷新 verify_status，故真实 ft 由下一拍 reload 决定。
+    # CONTINUE: objective validation is the authority for the next branch.  The
+    # state projection is event-only and therefore still contains the current
+    # attempt's type at this point; using it would silently discard branch drift.
+    next_failure_type = gate.failure_type
+    if next_failure_type not in DEBUGGABLE_FAILURE_TYPES:
+        next_failure_type = state.current_failure_type
     return Continue(next_attempt=state.total_attempts,
-                    next_failure_type=state.current_failure_type,
+                    next_failure_type=next_failure_type,
                     reason=f"Gate-V CONTINUE: {gate.loop_reason or ''}")
 
 

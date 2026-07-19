@@ -26,9 +26,10 @@ def _state(*, current_ft, total_attempts=0, per_branch=None, events=None) -> Deb
     return DebugState(task_dir=None, cf=cf, events=list(events or []))
 
 
-def _gate(loop_signal, stop_reason_code=None) -> GateResult:
+def _gate(loop_signal, stop_reason_code=None, failure_type=None) -> GateResult:
     return GateResult(gate="GATE-V", passed=(loop_signal == "PASS"),
-                      loop_signal=loop_signal, stop_reason_code=stop_reason_code)
+                      loop_signal=loop_signal, stop_reason_code=stop_reason_code,
+                      failure_type=failure_type)
 
 
 def _attempt_ev(ft):
@@ -37,6 +38,10 @@ def _attempt_ev(ft):
 
 def _completed_ev(step, result=None):
     return {"type": "action_completed", "action": {"step": step}, "result": result or {}}
+
+
+def _session_ev(ft="precision_failed"):
+    return {"type": "session_started", "entry_failure_type": ft}
 
 
 class TestRouting(unittest.TestCase):
@@ -103,6 +108,21 @@ class TestBudgetGates(unittest.TestCase):
         d = debug_next_action(st)
         self.assertIsInstance(d, Done)
         self.assertEqual(d.session_outcome, "stopped_by_loop_limit")
+
+    def test_fifth_started_attempt_executes_before_budget_stop(self) -> None:
+        # MAX_ATTEMPTS=5 means five real Agent rounds (attempt 0-4), not four
+        # rounds plus a ghost attempt_started=4 immediately followed by Done.
+        ft = "precision_failed"
+        st = _state(
+            current_ft=ft,
+            total_attempts=5,
+            per_branch={ft: 5},
+            events=[_attempt_ev(ft) for _ in range(5)],
+        )
+        d = debug_next_action(st)
+        self.assertIsInstance(d, Action)
+        self.assertEqual(d.step, "forensics")
+        self.assertEqual(d.skill_args["attempt"], 4)
 
     def test_branch_hard_cap_build(self) -> None:
         # build cap=3，撞上即停 (此时全局 total=3 < 5，不触发闸1)。
@@ -180,6 +200,70 @@ class TestRoundSequence(unittest.TestCase):
         d = debug_next_action(_state(current_ft="precision_failed", total_attempts=0))
         self.assertIsInstance(d, Continue)
         self.assertEqual(d.next_attempt, 0)
+
+    def test_runner_event_stream_requires_baseline_before_attempt0(self) -> None:
+        st = _state(current_ft="precision_failed", total_attempts=0,
+                    events=[_session_ev()])
+        d = debug_next_action(st)
+        self.assertIsInstance(d, Action)
+        self.assertEqual(d.step, "baseline_checkpoint")
+        st.events.append(_completed_ev("baseline_checkpoint", {"success": True}))
+        d = debug_next_action(st)
+        self.assertIsInstance(d, Continue)
+        self.assertEqual(d.next_attempt, 0)
+
+    def test_attempt0_uses_baseline_failure_type_drift(self) -> None:
+        st = _state(current_ft="precision_failed", total_attempts=0,
+                    events=[_session_ev(), _completed_ev(
+                        "baseline_checkpoint",
+                        {"success": True, "failure_type": "runtime_error"})])
+        d = debug_next_action(st)
+        self.assertIsInstance(d, Continue)
+        self.assertEqual(d.next_failure_type, "runtime_error")
+
+    def test_clean_baseline_terminates_before_agent(self) -> None:
+        st = _state(current_ft="precision_failed", total_attempts=0,
+                    events=[_session_ev(), _completed_ev(
+                        "baseline_checkpoint",
+                        {"success": True, "failure_type": "success",
+                         "baseline_common_gate": {"passed": True}})])
+        d = debug_next_action(st)
+        self.assertIsInstance(d, Done)
+        self.assertEqual(d.session_outcome, "success")
+
+    def test_clean_baseline_without_common_evidence_aborts(self) -> None:
+        st = _state(current_ft="precision_failed", total_attempts=0,
+                    events=[_session_ev(), _completed_ev(
+                        "baseline_checkpoint",
+                        {"success": True, "failure_type": "success"})])
+        d = debug_next_action(st)
+        self.assertIsInstance(d, Abort)
+        self.assertEqual(d.category, "baseline_clean_evidence_missing")
+
+    def test_unsupported_baseline_does_not_start_attempt(self) -> None:
+        st = _state(current_ft="precision_failed", total_attempts=0,
+                    events=[_session_ev(), _completed_ev(
+                        "baseline_checkpoint",
+                        {"success": True, "failure_type": "execution_aborted"})])
+        d = debug_next_action(st)
+        self.assertIsInstance(d, Done)
+        self.assertEqual(d.session_outcome, "skipped_unsupported_type")
+
+    def test_validate_requires_replayable_protection_action_before_pass(self) -> None:
+        events = [_session_ev(), _attempt_ev("precision_failed"),
+                  _completed_ev("validate", {"loop_signal": "PASS", "gate": "GATE-V"})]
+        st = _state(current_ft="precision_failed", total_attempts=1,
+                    per_branch={"precision_failed": 1}, events=events)
+        d = debug_next_action(st, _gate("PASS"))
+        self.assertIsInstance(d, Action)
+        self.assertEqual(d.step, "checkpoint_and_rollback")
+        st.events.append(_completed_ev("checkpoint_and_rollback", {"success": False}))
+        self.assertEqual(debug_next_action(st, _gate("PASS")).step,
+                         "checkpoint_and_rollback")
+        st.events.append(_completed_ev("checkpoint_and_rollback", {"success": True}))
+        d = debug_next_action(st, _gate("PASS"))
+        self.assertIsInstance(d, Done)
+        self.assertEqual(d.session_outcome, "success")
 
     def test_step_progression(self) -> None:
         ft = "precision_failed"
@@ -276,6 +360,21 @@ class TestDriftRouting(unittest.TestCase):
         self.assertIsInstance(d, Continue)
         self.assertEqual(d.next_failure_type, "build_failed")
 
+    def test_continue_uses_objective_validation_failure_type(self) -> None:
+        # The current attempt is precision, but objective validation found that
+        # the Agent introduced a compile failure.  The next attempt must enter
+        # the build branch instead of inheriting stale precision state.
+        st = _state(current_ft="precision_failed", total_attempts=1,
+                    per_branch={"precision_failed": 1},
+                    events=[_attempt_ev("precision_failed"),
+                            _completed_ev("forensics"),
+                            _completed_ev("diagnose_and_fix"),
+                            _completed_ev("validate")])
+        d = debug_next_action(
+            st, _gate("CONTINUE", failure_type="build_failed"))
+        self.assertIsInstance(d, Continue)
+        self.assertEqual(d.next_failure_type, "build_failed")
+
 
 class TestGatePrecedenceOverBudget(unittest.TestCase):
     """H1: 本轮 gate 终判 (PASS/STOP) 优先于预算闸。
@@ -355,6 +454,83 @@ class TestForensicsRetry(unittest.TestCase):
         self.assertIsInstance(d, Action)
         self.assertEqual(d.step, "knowledge_search")
 
+    def test_build_failure_degraded_forensics_advances_to_agent(self) -> None:
+        # A deterministic compile failure has no runnable kernel for precision
+        # forensics.  The existing build log is usable evidence, so do not
+        # rerun unchanged compilation and do not block the build-fix Agent.
+        ft = "build_failed"
+        degraded = _completed_ev("forensics", {
+            "passed": False,
+            "gate": "GATE-BUILD-F",
+            "forensics": {
+                "forensics_unavailable": True,
+                "unavailable_reason": "build_failed",
+                "proceed_to_agent": True,
+                "report_path": "/tmp/forensics_report_1.json",
+            },
+        })
+        st = _state(current_ft=ft, total_attempts=1, per_branch={ft: 1},
+                    events=[_attempt_ev(ft), degraded])
+        d = debug_next_action(st)
+        self.assertIsInstance(d, Action)
+        self.assertEqual(d.step, "diagnose_and_fix")
+        self.assertEqual(d.skill_args["failure_type"], "build_failed")
+
+    def test_degraded_build_evidence_is_not_counted_as_retry_failure(self) -> None:
+        ft = "build_failed"
+        events = [_attempt_ev(ft)]
+        for _ in range(3):
+            events.append(_completed_ev("forensics", {
+                "passed": False,
+                "forensics_unavailable": True,
+                "unavailable_reason": "build_failed",
+                "proceed_to_agent": True,
+                "report_path": "/tmp/build-evidence.json",
+            }))
+        st = _state(current_ft=ft, total_attempts=1, per_branch={ft: 1},
+                    events=events)
+        d = debug_next_action(st)
+        self.assertIsInstance(d, Action)
+        self.assertEqual(d.step, "diagnose_and_fix")
+
+    def test_runtime_error_log_degradation_advances_to_agent(self) -> None:
+        ft = "runtime_error"
+        degraded = _completed_ev("forensics", {
+            "passed": False,
+            "gate": "GATE-RUNTIME-F",
+            "forensics": {
+                "forensics_unavailable": True,
+                "unavailable_reason": "runtime_error",
+                "forensics_degraded": True,
+                "diagnostic_evidence_kind": "runtime_error_log",
+                "proceed_to_agent": True,
+                "report_path": "/tmp/forensics_report_1.json",
+            },
+        })
+        st = _state(current_ft=ft, total_attempts=1, per_branch={ft: 1},
+                    events=[_attempt_ev(ft), degraded])
+        d = debug_next_action(st)
+        self.assertIsInstance(d, Action)
+        self.assertEqual(d.step, "diagnose_and_fix")
+        self.assertEqual(d.skill_args["failure_type"], "runtime_error")
+
+    def test_unclassified_runtime_forensics_failure_still_retries(self) -> None:
+        ft = "runtime_error"
+        failed = _completed_ev("forensics", {
+            "passed": False,
+            "gate": "GATE-FORENSICS-EXEC",
+            "forensics": {
+                "forensics_unavailable": True,
+                "unavailable_reason": "runtime_error",
+                "report_path": "/tmp/forensics_report_1.json",
+            },
+        })
+        st = _state(current_ft=ft, total_attempts=1, per_branch={ft: 1},
+                    events=[_attempt_ev(ft), failed])
+        d = debug_next_action(st)
+        self.assertIsInstance(d, Action)
+        self.assertEqual(d.step, "forensics")
+
 
 class TestValidateNoSignalAborts(unittest.TestCase):
     """修复 3 ④: validate 完成但 gate loop_signal=None = gate 协议错误 → Abort，
@@ -420,16 +596,23 @@ class TestTaskTurnsBudget(unittest.TestCase):
     """
 
     _ENV = "ASCENDC_DEBUG_MAX_TASK_TURNS"
+    _SOFT_ENV = "ASCENDC_DEBUG_SOFT_TASK_TURNS"
 
     def setUp(self) -> None:
         self._saved = os.environ.get(self._ENV)
+        self._saved_soft = os.environ.get(self._SOFT_ENV)
         os.environ.pop(self._ENV, None)
+        os.environ.pop(self._SOFT_ENV, None)
 
     def tearDown(self) -> None:
         if self._saved is None:
             os.environ.pop(self._ENV, None)
         else:
             os.environ[self._ENV] = self._saved
+        if self._saved_soft is None:
+            os.environ.pop(self._SOFT_ENV, None)
+        else:
+            os.environ[self._SOFT_ENV] = self._saved_soft
 
     def _state_continue_with_turns(self, turns_per_attempt, *, ft="precision_failed"):
         """构造 N 轮已完成、最后一轮 validate 完成的 state；各轮 diagnose 带 agent_turns。
@@ -491,6 +674,215 @@ class TestTaskTurnsBudget(unittest.TestCase):
         st = _state(current_ft=ft, total_attempts=1, per_branch={ft: 1}, events=evs)
         d = debug_next_action(st, _gate("CONTINUE"))
         self.assertIsInstance(d, Continue)  # 累计 0 < 10，不停
+
+    def test_soft_budget_stops_without_objective_progress(self) -> None:
+        os.environ[self._ENV] = "600"
+        os.environ[self._SOFT_ENV] = "480"
+        st = self._state_continue_with_turns([240, 240])
+        d = debug_next_action(st, _gate("CONTINUE"))
+        self.assertIsInstance(d, Done)
+        self.assertEqual(d.session_outcome, "stopped_by_budget")
+        self.assertIn("软预算 480", d.reason)
+
+    def test_best_checkpoint_extends_soft_budget_to_hard_cap(self) -> None:
+        os.environ[self._ENV] = "600"
+        os.environ[self._SOFT_ENV] = "480"
+        st = self._state_continue_with_turns([256, 252])
+        st.events.append(_completed_ev("checkpoint_and_rollback", {
+            "success": True,
+            "checkpoint": {
+                "updated": True,
+                "best_metric": {"attempt": 1, "case_pass_rate": 90.0},
+            },
+            "best_attempt": 1,
+        }))
+        d = debug_next_action(st, _gate("CONTINUE"))
+        self.assertIsInstance(d, Continue)
+
+    def test_extended_task_stops_at_hard_cap(self) -> None:
+        os.environ[self._ENV] = "600"
+        os.environ[self._SOFT_ENV] = "480"
+        st = self._state_continue_with_turns([300, 300])
+        st.events.append(_completed_ev("checkpoint_and_rollback", {
+            "success": True,
+            "checkpoint": {
+                "updated": True,
+                "best_metric": {"attempt": 1, "case_pass_rate": 90.0},
+            },
+            "best_attempt": 1,
+        }))
+        d = debug_next_action(st, _gate("CONTINUE"))
+        self.assertIsInstance(d, Done)
+        self.assertEqual(d.session_outcome, "stopped_by_budget")
+        self.assertIn("硬上限 600", d.reason)
+
+    def test_near_success_full_eval_extends_soft_budget(self) -> None:
+        os.environ[self._ENV] = "600"
+        os.environ[self._SOFT_ENV] = "480"
+        st = self._state_continue_with_turns([256, 252])
+        st.events.append(_completed_ev("validate", {
+            "objective_validation": {
+                "full_eval": {"passed_cases": 9, "total_cases": 10,
+                              "match_rate": 99.99},
+            },
+        }))
+        d = debug_next_action(st, _gate("CONTINUE"))
+        self.assertIsInstance(d, Continue)
+
+    def test_diagnose_action_carries_remaining_soft_budget(self) -> None:
+        os.environ[self._ENV] = "600"
+        os.environ[self._SOFT_ENV] = "480"
+        ft = "precision_failed"
+        st = _state(
+            current_ft=ft,
+            total_attempts=1,
+            per_branch={ft: 1},
+            events=[
+                _attempt_ev(ft),
+                _completed_ev("forensics"),
+                _completed_ev("knowledge_search"),
+                _completed_ev("audit"),
+                _completed_ev("diagnose_and_fix", {
+                    "success": False,
+                    "claude_state": "api_error_400",
+                    "agent_turns": 404,
+                }),
+            ],
+        )
+        d = debug_next_action(st)
+        self.assertIsInstance(d, Action)
+        self.assertEqual(d.step, "diagnose_and_fix")
+        self.assertEqual(d.skill_args["task_turns_used"], 404)
+        self.assertEqual(d.skill_args["task_turns_remaining"], 76)
+        self.assertEqual(d.skill_args["task_turn_budget_tier"], "soft")
+
+    def _boundary_capped_state(self):
+        ft = "precision_failed"
+        events = [
+            _attempt_ev(ft),
+            _completed_ev("diagnose_and_fix", {
+                "success": True,
+                "claude_state": "ok",
+                "agent_turns": 404,
+            }),
+            _completed_ev("validate", {"loop_signal": "CONTINUE"}),
+            _completed_ev("checkpoint_and_rollback", {
+                "success": True,
+                "checkpoint": {"updated": False},
+                "best_attempt": -1,
+            }),
+            _attempt_ev(ft),
+            _completed_ev("forensics"),
+            _completed_ev("knowledge_search"),
+            _completed_ev("audit"),
+            _completed_ev("diagnose_and_fix", {
+                "success": False,
+                "claude_state": "max_turns_exceeded",
+                "agent_turns": 76,
+                "max_turns_applied": "76",
+                "task_turns_used": 404,
+                "task_turns_limit": 480,
+                "task_turns_remaining": 76,
+                "task_turn_budget_tier": "soft",
+                "session_turn_cap_hit": True,
+                "task_budget_boundary_hit": True,
+            }),
+        ]
+        return _state(
+            current_ft=ft,
+            total_attempts=2,
+            per_branch={ft: 2},
+            events=events,
+        )
+
+    def test_task_boundary_max_turns_runs_validation_once(self) -> None:
+        os.environ[self._ENV] = "600"
+        os.environ[self._SOFT_ENV] = "480"
+        d = debug_next_action(self._boundary_capped_state())
+        self.assertIsInstance(d, Action)
+        self.assertEqual(d.step, "validate")
+        self.assertTrue(d.skill_args["validation_after_task_turn_cap"])
+        self.assertEqual(d.skill_args["task_turns_used"], 480)
+        self.assertEqual(d.skill_args["task_turns_limit"], 480)
+        self.assertEqual(d.skill_args["max_turns_applied"], "76")
+
+    def test_task_boundary_validation_without_progress_stops(self) -> None:
+        os.environ[self._ENV] = "600"
+        os.environ[self._SOFT_ENV] = "480"
+        st = self._boundary_capped_state()
+        st.events.extend([
+            _completed_ev("validate", {
+                "loop_signal": "CONTINUE",
+                "objective_validation": {
+                    "full_eval": {"passed_cases": 4, "total_cases": 10,
+                                  "match_rate": 40.0},
+                },
+            }),
+            _completed_ev("checkpoint_and_rollback", {
+                "success": True,
+                "checkpoint": {"updated": False},
+                "best_attempt": -1,
+            }),
+        ])
+        d = debug_next_action(st, _gate("CONTINUE"))
+        self.assertIsInstance(d, Done)
+        self.assertEqual(d.session_outcome, "stopped_by_budget")
+        self.assertIn("软预算 480", d.reason)
+
+    def test_task_boundary_validation_progress_extends_to_hard_budget(self) -> None:
+        os.environ[self._ENV] = "600"
+        os.environ[self._SOFT_ENV] = "480"
+        st = self._boundary_capped_state()
+        st.events.extend([
+            _completed_ev("validate", {
+                "loop_signal": "CONTINUE",
+                "objective_validation": {
+                    "full_eval": {"passed_cases": 9, "total_cases": 10,
+                                  "match_rate": 99.99},
+                },
+            }),
+            _completed_ev("checkpoint_and_rollback", {
+                "success": True,
+                "checkpoint": {
+                    "updated": True,
+                    "best_metric": {"attempt": 1, "case_pass_rate": 90.0},
+                },
+                "best_attempt": 1,
+            }),
+        ])
+        d = debug_next_action(st, _gate("CONTINUE"))
+        self.assertIsInstance(d, Continue)
+
+    def test_ordinary_session_max_turns_still_stops_without_validation(self) -> None:
+        os.environ[self._ENV] = "600"
+        os.environ[self._SOFT_ENV] = "480"
+        ft = "precision_failed"
+        st = _state(
+            current_ft=ft,
+            total_attempts=1,
+            per_branch={ft: 1},
+            events=[
+                _attempt_ev(ft),
+                _completed_ev("forensics"),
+                _completed_ev("knowledge_search"),
+                _completed_ev("audit"),
+                _completed_ev("diagnose_and_fix", {
+                    "success": False,
+                    "claude_state": "max_turns_exceeded",
+                    "agent_turns": 240,
+                    "max_turns_applied": "240",
+                    "task_turns_used": 0,
+                    "task_turns_limit": 480,
+                    "task_turns_remaining": 480,
+                    "task_turn_budget_tier": "soft",
+                    "session_turn_cap_hit": True,
+                    "task_budget_boundary_hit": False,
+                }),
+            ],
+        )
+        d = debug_next_action(st)
+        self.assertIsInstance(d, Done)
+        self.assertEqual(d.session_outcome, "stopped_by_budget")
 
 
 def _audit_missing_attempt(ft="precision_failed"):

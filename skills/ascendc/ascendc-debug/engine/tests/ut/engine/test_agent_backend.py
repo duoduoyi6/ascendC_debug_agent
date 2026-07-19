@@ -17,6 +17,7 @@ from pathlib import Path
 
 from engine.agent_backend import (
     _build_prompt,
+    _finalize_probe_policy,
     make_agent_callback,
     spawn_diagnose_agent,
 )
@@ -65,6 +66,9 @@ class TestCommandConstruction(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--allowedTools") + 1], "Bash,Read")
         self.assertIn("--output-format", cmd)
         self.assertEqual(cmd[cmd.index("--output-format") + 1], "json")
+        self.assertNotIn("--bare", cmd)
+        self.assertIn("--setting-sources", cmd)
+        self.assertEqual(cmd[cmd.index("--setting-sources") + 1], "project")
         # prompt 是最后一个位置参数，含本轮 failure_type + attempt + 单轮约束。
         prompt = cmd[-1]
         self.assertIn("build_failed", prompt)
@@ -99,6 +103,70 @@ class TestTurnsWiring(unittest.TestCase):
             _run=_fake_run_factory({"is_error": False}, cap))
         self.assertNotIn("--max-turns", cap["cmd"])
 
+    def test_task_remaining_clamps_session_max_turns(self) -> None:
+        cap = {}
+        action = _diagnose_action("precision_failed", 2)
+        action = Action(
+            kind=action.kind,
+            name=action.name,
+            step=action.step,
+            skill_args={**action.skill_args, "task_turns_used": 524,
+                        "task_turns_limit": 600, "task_turns_remaining": 76,
+                        "task_turn_budget_tier": "hard_extended"},
+        )
+        result = spawn_diagnose_agent(
+            action, self.task_dir, "add", 2, max_turns="240",
+            _run=_fake_run_factory({"is_error": False}, cap))
+        cmd = cap["cmd"]
+        self.assertEqual(cmd[cmd.index("--max-turns") + 1], "76")
+        self.assertEqual(result["max_turns_applied"], "76")
+        self.assertEqual(result["task_turns_remaining"], 76)
+
+    def test_dynamic_task_boundary_hit_is_observable(self) -> None:
+        cap = {}
+        action = _diagnose_action("precision_failed", 2)
+        action = Action(
+            kind=action.kind,
+            name=action.name,
+            step=action.step,
+            skill_args={**action.skill_args, "task_turns_used": 404,
+                        "task_turns_limit": 480, "task_turns_remaining": 76,
+                        "task_turn_budget_tier": "soft"},
+        )
+        result = spawn_diagnose_agent(
+            action, self.task_dir, "add", 2, max_turns="240",
+            _run=_fake_run_factory({
+                "is_error": True,
+                "subtype": "error_max_turns",
+                "num_turns": 76,
+            }, cap),
+        )
+        self.assertEqual(result["claude_state"], "max_turns_exceeded")
+        self.assertTrue(result["session_turn_cap_hit"])
+        self.assertTrue(result["task_budget_boundary_hit"])
+
+    def test_ordinary_session_cap_is_not_task_boundary(self) -> None:
+        cap = {}
+        action = _diagnose_action("precision_failed", 0)
+        action = Action(
+            kind=action.kind,
+            name=action.name,
+            step=action.step,
+            skill_args={**action.skill_args, "task_turns_used": 0,
+                        "task_turns_limit": 480, "task_turns_remaining": 480,
+                        "task_turn_budget_tier": "soft"},
+        )
+        result = spawn_diagnose_agent(
+            action, self.task_dir, "add", 0, max_turns="240",
+            _run=_fake_run_factory({
+                "is_error": True,
+                "subtype": "error_max_turns",
+                "num_turns": 240,
+            }, cap),
+        )
+        self.assertTrue(result["session_turn_cap_hit"])
+        self.assertFalse(result["task_budget_boundary_hit"])
+
     def test_no_usd_budget_flag_ever(self) -> None:
         # 护栏: usd 闸已彻底移除 (换模型即失效)，命令行永不出现 --max-budget-usd。
         cap = {}
@@ -129,6 +197,23 @@ class TestResultClassification(unittest.TestCase):
         self.assertTrue(r["success"])
         self.assertEqual(r["claude_state"], "ok")
         self.assertIn("session_id", r)
+        self.assertIn("result_path", r)
+        self.assertIn("latest_result_path", r)
+
+    def test_result_archived_per_session_and_latest_kept(self) -> None:
+        r1 = self._spawn({"is_error": False, "stop_reason": "end_turn", "result": "first"})
+        r2 = self._spawn({"is_error": False, "stop_reason": "end_turn", "result": "second"})
+
+        p1 = Path(r1["result_path"])
+        p2 = Path(r2["result_path"])
+        latest = self.task_dir / "_claude_result_attempt0.json"
+        self.assertTrue(p1.exists())
+        self.assertTrue(p2.exists())
+        self.assertNotEqual(p1, p2)
+        self.assertTrue(latest.exists())
+        self.assertEqual(json.loads(latest.read_text(encoding="utf-8"))["result"], "second")
+        self.assertEqual(json.loads(p1.read_text(encoding="utf-8"))["result"], "first")
+        self.assertEqual(json.loads(p2.read_text(encoding="utf-8"))["result"], "second")
 
     def test_pause_turn_not_success(self) -> None:
         # pause_turn = 本轮未自然结束，不算正常完成 (runner 据此不当作干净一轮)。
@@ -157,6 +242,19 @@ class TestResultClassification(unittest.TestCase):
         self.assertFalse(r["success"])
         self.assertEqual(r["claude_state"], "invalid_claude_result")
 
+    def test_nonzero_empty_result_persists_stderr(self) -> None:
+        def _fail(cmd, stdout=None, stderr=None, timeout=None, check=False, text=True):
+            class _R:
+                returncode = 1
+                stderr = "--agent custom-agent not found"
+            return _R()
+        r = spawn_diagnose_agent(
+            _diagnose_action(), self.task_dir, "add", 0, _run=_fail)
+        self.assertFalse(r["success"])
+        self.assertEqual(r["claude_return_code"], 1)
+        self.assertIn("not found", r["error"])
+        self.assertEqual(Path(r["stderr_path"]).read_text(), "--agent custom-agent not found")
+
     def test_spawn_exception_fatal(self) -> None:
         def _boom(*a, **k):
             raise OSError("claude not found")
@@ -178,6 +276,24 @@ class TestResultClassification(unittest.TestCase):
         r = self._spawn({"is_error": False, "stop_reason": "end_turn",
                          "result": "## 诊断总结\n根因: CAST_NONE 应改 CAST_ROUND"})
         self.assertEqual(r["final_response"], "## 诊断总结\n根因: CAST_NONE 应改 CAST_ROUND")
+
+    def test_structured_attempt_metadata_extracted_before_truncation(self) -> None:
+        response = "x" * 5000 + """
+[ENGINE_ATTEMPT_METADATA]
+fix_type: fix_reduce_accumulation
+direction_verdict: switch
+direction_reason: prior vector path regressed
+probe_status: skipped
+probe_reason: first round fast path
+kb_used_ids: kb-0123456789ab, kb-abcdef012345
+"""
+        r = self._spawn({"is_error": False, "result": response})
+        self.assertEqual(r["direction_verdict"], "switch")
+        self.assertEqual(r["fix_type"], "fix_reduce_accumulation")
+        self.assertEqual(
+            r["attempt_metadata"]["kb_used_ids"],
+            ["kb-0123456789ab", "kb-abcdef012345"],
+        )
 
     def test_final_response_truncated(self) -> None:
         from engine.agent_backend import _FINAL_RESPONSE_MAXLEN
@@ -202,7 +318,45 @@ class TestResultClassification(unittest.TestCase):
         r3 = self._spawn({"is_error": False, "stop_reason": "pause_turn", "result": "半截"})
         self.assertIsNone(r3["final_response"])
 
-# PLACEHOLDER_INTEGRATION
+    def test_probe_policy_record_written_and_audited(self) -> None:
+        response = """done
+[ENGINE_ATTEMPT_METADATA]
+fix_type: initial_static_fix
+direction_verdict: initial
+direction_reason: forensics evidence
+probe_status: skipped
+probe_reason: first round fast path
+kb_used_ids: none
+"""
+        r = self._spawn({"is_error": False, "result": response})
+        self.assertEqual(r["probe_policy"], "skip")
+        self.assertEqual(r["probe_status"], "skipped")
+        self.assertTrue(r["probe_policy_pass"])
+        record = json.loads(Path(r["probe_record_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(record["reason"], "first_round_fast_path")
+        self.assertEqual(record["observation_source"], "structured_metadata")
+
+    def test_probe_policy_marks_partial_footer_incomplete(self) -> None:
+        policy = {
+            "schema_version": 1,
+            "attempt": 0,
+            "failure_type": "precision_failed",
+            "policy": "skip",
+            "reason": "first_round_fast_path",
+            "primary_hint": "all_wrong",
+            "instruction": "skip",
+            "enforcement": "prompt_contract_with_posthoc_audit",
+            "created_at": "2026-07-14T00:00:00+00:00",
+        }
+        metadata = {"probe_status": "skipped"}
+        record = _finalize_probe_policy(
+            self.task_dir,
+            policy,
+            "[ENGINE_ATTEMPT_METADATA]\nprobe_status: skipped",
+            metadata,
+        )
+        self.assertTrue(record["policy_pass"])
+        self.assertFalse(record["metadata_complete"])
 
 
 class TestCallbackIntoRunner(unittest.TestCase):
@@ -314,6 +468,36 @@ class TestKbUsageTrace(unittest.TestCase):
         trace = self._read_trace()
         self.assertEqual(trace[0]["cited_titles"], [])
 
+    def test_retrieved_injected_and_declared_used_ids_are_separate(self) -> None:
+        self._write_kb_log([{
+            "attempt": 0,
+            "call_index": 0,
+            "top_titles": ["TileGemm", "VecAdd"],
+            "top_ids": ["kb-0123456789ab", "kb-abcdef012345"],
+            "match_reasons": [
+                {"knowledge_id": "kb-0123456789ab", "title": "TileGemm"},
+                {"knowledge_id": "kb-abcdef012345", "title": "VecAdd"},
+            ],
+        }])
+        response = """采用第一个知识修复。
+[ENGINE_ATTEMPT_METADATA]
+fix_type: tile_fix
+direction_verdict: initial
+direction_reason: matched tiling evidence
+probe_status: skipped
+probe_reason: first round fast path
+kb_used_ids: kb-0123456789ab
+"""
+        spawn_diagnose_agent(
+            _diagnose_action("precision_failed", 0), self.task_dir, "op", 0,
+            _run=self._fake_run(response))
+        trace = self._read_trace()[0]
+        self.assertEqual(
+            trace["retrieved_ids"], ["kb-0123456789ab", "kb-abcdef012345"])
+        self.assertEqual(trace["injected_ids"], trace["retrieved_ids"])
+        self.assertEqual(trace["declared_used_ids"], ["kb-0123456789ab"])
+        self.assertTrue(trace["usage_trace_complete"])
+
 
 class TestNoprobeInjection(unittest.TestCase):
     """ABLATE_PROBE=1 时 _build_prompt 末尾追加 noprobe 约束 (no_probe/baseline arm)。
@@ -343,14 +527,49 @@ class TestNoprobeInjection(unittest.TestCase):
         self.assertIn("禁用插桩", prompt)
         self.assertIn("[L5_PROBE]", prompt)
 
-    def test_probe_default_no_constraint(self) -> None:
+    def test_probe_default_uses_first_round_fast_path(self) -> None:
         self._set_probe(None)
         with tempfile.TemporaryDirectory() as d:
             prompt = _build_prompt(Path(d), "FakeOp", "precision_failed", 0, "0")
-        self.assertNotIn("禁用插桩", prompt)
+        self.assertNotIn("ABLATE_PROBE: 本次调用禁用插桩", prompt)
+        self.assertIn("policy: skip", prompt)
+        self.assertIn("first_round_fast_path", prompt)
+        self.assertIn("[ENGINE_ATTEMPT_METADATA]", prompt)
+
+    def test_nan_inf_first_round_requires_probe(self) -> None:
+        self._set_probe(None)
+        with tempfile.TemporaryDirectory() as d:
+            task = Path(d)
+            (task / "precision_tuning").mkdir()
+            (task / "precision_tuning" / "forensics_report_0.json").write_text(
+                json.dumps({"attempt": 0, "primary_hint": "nan_inf_contamination"}),
+                encoding="utf-8",
+            )
+            prompt = _build_prompt(task, "FakeOp", "precision_failed", 0, "0")
+        self.assertIn("policy: required", prompt)
+        self.assertIn("nan_inf_contamination_exception", prompt)
+
+    def test_later_attempt_receives_direction_history(self) -> None:
+        self._set_probe(None)
+        with tempfile.TemporaryDirectory() as d:
+            task = Path(d)
+            (task / "precision_tuning").mkdir()
+            (task / "precision_tuning" / "tuning_directions.json").write_text(
+                json.dumps({"entries": [{
+                    "attempt": 0,
+                    "fix_type": "tiling_only",
+                    "direction_verdict": "initial",
+                    "direction_reason": "suspected tail",
+                    "outcome": "regressed",
+                    "case_pass_rate": 20.0,
+                }]}),
+                encoding="utf-8",
+            )
+            prompt = _build_prompt(task, "FakeOp", "precision_failed", 1, "0")
+        self.assertIn("近期修复方向与客观结果", prompt)
+        self.assertIn("fix_type=tiling_only", prompt)
+        self.assertIn("outcome=regressed", prompt)
 
 
 if __name__ == "__main__":
     unittest.main()
-
-

@@ -53,6 +53,18 @@ def record_attempt_started(task_dir: Path, cont: Continue) -> None:
     })
 
 
+def record_rollback(task_dir: Path, *, from_attempt: int, best_metric: dict) -> None:
+    """落 kernel 回滚事件 (问题 7): 连续无改善后用 current_best 覆盖工作区。
+    供审计 + agent_backend 注入"已回滚、失败方向勿重复"到下一轮 prompt。"""
+    EventWriter(task_dir).append({
+        "type": "rollback",
+        "from_attempt": from_attempt,
+        "best_attempt": best_metric.get("attempt"),
+        "best_case_pass_rate": best_metric.get("case_pass_rate"),
+        "best_match_rate": best_metric.get("match_rate"),
+    })
+
+
 def _action_payload(action: Action) -> dict:
     return {
         "kind": action.kind,

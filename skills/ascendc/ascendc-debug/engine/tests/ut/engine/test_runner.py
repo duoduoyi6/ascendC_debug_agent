@@ -8,6 +8,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from engine.events import read_events
 from engine.runner import RunnerError, run_debug_session, validate_action
@@ -81,6 +82,92 @@ class TestChangedFilesDiff(unittest.TestCase):
         self.assertEqual(r["changed_files"], ["kernel/new.cpp"])
 
 
+class TestForensicsObservability(unittest.TestCase):
+    def test_default_dispatcher_preserves_reuse_metadata(self) -> None:
+        import engine.runner as runner
+        from engine.gate_adapter import GateResult
+
+        action = Action(
+            kind="py_action", name="precision_gate", step="forensics",
+            skill_args={"gate_step": "forensics", "attempt": 3},
+        )
+        forensics_result = {
+            "success": True,
+            "cache_hit": True,
+            "reuse_kind": "rollback",
+            "forensics_reused": True,
+            "forensics_executed": False,
+            "forensics_completed": True,
+            "prebuild_executed": False,
+            "build_skipped": True,
+            "build_skip_reason": "rollback_forensics_reuse",
+            "reused_after_rollback": True,
+            "reused_from_attempt": 1,
+            "report_path": "/tmp/forensics_report_3.json",
+        }
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch("engine.validate_runner.run_forensics",
+                           return_value=forensics_result), \
+                mock.patch.object(
+                    runner, "run_gate",
+                    return_value=GateResult(gate="GATE-F", passed=True)):
+            result = runner._default_dispatcher(action, Path(d), "FakeOp", None)
+
+        self.assertTrue(result["forensics_reused"])
+        self.assertEqual(result["reuse_kind"], "rollback")
+        self.assertTrue(result["build_skipped"])
+        self.assertEqual(result["forensics"], forensics_result)
+
+    def test_default_dispatcher_preserves_runtime_degrade_metadata(self) -> None:
+        import engine.runner as runner
+        from engine.gate_adapter import GateResult
+
+        action = Action(
+            kind="py_action", name="precision_gate", step="forensics",
+            skill_args={
+                "gate_step": "forensics",
+                "attempt": 1,
+                "failure_type": "runtime_error",
+            },
+        )
+        forensics_result = {
+            "success": True,
+            "forensics_unavailable": True,
+            "unavailable_reason": "runtime_error",
+            "forensics_degraded": True,
+            "diagnostic_evidence_kind": "runtime_error_log",
+            "proceed_to_agent": True,
+            "forensics_executed": True,
+            "forensics_completed": False,
+            "report_path": "/tmp/forensics_report_1.json",
+        }
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch("engine.validate_runner.run_forensics",
+                           return_value=forensics_result), \
+                mock.patch.object(
+                    runner, "run_gate",
+                    return_value=GateResult(gate="GATE-F", passed=False)):
+            result = runner._default_dispatcher(action, Path(d), "FakeOp", None)
+
+        self.assertTrue(result["forensics_degraded"])
+        self.assertTrue(result["proceed_to_agent"])
+        self.assertEqual(result["unavailable_reason"], "runtime_error")
+        self.assertEqual(result["diagnostic_evidence_kind"], "runtime_error_log")
+        self.assertEqual(result["forensics"], forensics_result)
+
+    def test_result_to_gate_preserves_objective_failure_type(self) -> None:
+        import engine.runner as runner
+
+        gate = runner._result_to_gate({
+            "gate": "GATE-V",
+            "passed": True,
+            "loop_signal": "CONTINUE",
+            "failure_type": "build_failed",
+        })
+        self.assertIsNotNone(gate)
+        self.assertEqual(gate.failure_type, "build_failed")
+
+
 class TestValidateAction(unittest.TestCase):
     def test_unknown_py_action_rejected(self) -> None:
         with self.assertRaises(RunnerError):
@@ -115,10 +202,11 @@ class TestFullSession(unittest.TestCase):
         # 首轮 PASS → success。
         status, disp = self._run([_gate("PASS")])
         self.assertEqual(status["session_outcome"], "success")
-        # precision_failed 序列: forensics → knowledge_search → audit → diagnose_and_fix → validate。
+        # 原始 baseline → round → durable checkpoint/rollback barrier。
         steps = [s for _, s in disp.calls]
-        self.assertEqual(steps, ["forensics", "knowledge_search", "audit",
-                                 "diagnose_and_fix", "validate"])
+        self.assertEqual(steps, ["baseline_checkpoint", "forensics",
+                                 "knowledge_search", "audit", "diagnose_and_fix",
+                                 "validate", "checkpoint_and_rollback"])
 
     def test_session_continue_then_pass(self) -> None:
         # 第一轮 CONTINUE，第二轮 PASS → success，2 轮。

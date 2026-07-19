@@ -54,6 +54,7 @@ type 枚举 (精度专项):
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -63,6 +64,22 @@ from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = _SCRIPT_DIR.parent.parent.parent.parent
+
+_KNOWLEDGE_ID_RE = re.compile(r"^kb-[0-9a-f]{12}$")
+
+
+def _knowledge_id(entry: dict) -> str:
+    """Return a stable ID, preserving explicit IDs and deriving legacy ones.
+
+    Existing knowledge bases do not need a bulk rewrite: legacy entries receive a
+    deterministic title-based ID at read time.  New/merged entries persist the ID.
+    """
+    explicit = entry.get("knowledge_id") or entry.get("id")
+    if isinstance(explicit, str) and _KNOWLEDGE_ID_RE.fullmatch(explicit.lower()):
+        return explicit.lower()
+    normalized = " ".join(str(entry.get("title") or "").strip().lower().split())
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
+    return f"kb-{digest}"
 
 
 VALID_TYPES = [
@@ -456,6 +473,7 @@ def search_knowledge_base(kb_path: str, op_type: str | None = None,
         "matched_entries": [
             {
                 "index": valid.index(s["entry"]) if s["entry"] in valid else -1,
+                "knowledge_id": _knowledge_id(s["entry"]),
                 "score": s["score"],
                 "match_reason": s.get("reasons", []),
                 "title": s["entry"]["title"],
@@ -470,6 +488,7 @@ def search_knowledge_base(kb_path: str, op_type: str | None = None,
         ],
         "checklists": [
             {
+                "knowledge_id": _knowledge_id(cl),
                 "title": cl["title"],
                 "patterns": cl.get("patterns", []),
                 "op_types": cl.get("op_types", []),
@@ -764,6 +783,8 @@ def dump_success_knowledge(kb_path: str, task_dir: str, op_name: str,
         if target_idx is None:
             print(f"[KB] ⚠️ 未找到目标条目 (title): {merge_target_title}", file=sys.stderr)
             return None
+        # Merge must preserve the target's identity even when the title is edited.
+        entry["knowledge_id"] = _knowledge_id(kb[target_idx])
         kb[target_idx] = entry
         print(f"[KB] ✅ 已合并更新条目:")
         print(f"  原 title: {merge_target_title}")
@@ -771,6 +792,7 @@ def dump_success_knowledge(kb_path: str, task_dir: str, op_name: str,
         print(f"  type: {entry['type']}")
         print(f"  kb_size: {len(kb)} 条 (条目数不变)")
     else:  # action == "new"
+        entry["knowledge_id"] = _knowledge_id(entry)
         existing_titles = {e.get("title") for e in kb}
         if entry["title"] in existing_titles:
             print(f"[KB] ⚠️ 知识条目已存在 (title 重复), 跳过: {entry['title']}")
@@ -823,6 +845,17 @@ def _append_search_log(log_dir: str, call_index: int, op_type, pattern,
             existing_entries = []
 
     matched = result.get("matched_entries", [])
+    retrieved = [
+        {
+            "rank": rank,
+            "knowledge_id": e.get("knowledge_id") or _knowledge_id(e),
+            "title": e["title"],
+            "score": e["score"],
+            "reason": e.get("match_reason", []),
+            "kind": "entry",
+        }
+        for rank, e in enumerate(matched[:top_k], start=1)
+    ]
     entry = {
         "attempt": attempt,
         "call_index": call_index,
@@ -839,9 +872,12 @@ def _append_search_log(log_dir: str, call_index: int, op_type, pattern,
         "checklist_count": len(result.get("checklists", [])),
         "fallback_to_full_load": result.get("fallback_to_full_load", False),
         "top_titles": [e["title"] for e in matched[:top_k]],
+        "top_ids": [e["knowledge_id"] for e in retrieved],
+        "retrieved": retrieved,
         # why-matched: 每条命中的维度, 供 trace 解释 + 离线评估召回质量 (问题7)
         "match_reasons": [
-            {"title": e["title"], "score": e["score"],
+            {"knowledge_id": e.get("knowledge_id") or _knowledge_id(e),
+             "title": e["title"], "score": e["score"],
              "reason": e.get("match_reason", [])}
             for e in matched[:top_k]
         ],

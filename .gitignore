@@ -7,7 +7,11 @@ kernel_meta/*
 __pycache__
 triton_ascend_output
 framework_profile*
-.claude
+.claude/*
+!.claude/agents/
+.claude/agents/*
+!.claude/agents/ascendc-debug-agent-constructive.md
+!.claude/agents/ascendc-debug-agent-discovery.md
 output*
 build/
 extra-info/
@@ -24,5 +28,6 @@ projects_*_*.tar.gz
 # Local device-env-setup config (per-user)
 CLAUDE.md
 .DS_Store
-# 精度知识库(敏感数据,本地持有,不入库)
+
+# Local precision knowledge base generated from experiments
 skills/ascendc/ascendc-debug/references/precision_knowledge_base.json

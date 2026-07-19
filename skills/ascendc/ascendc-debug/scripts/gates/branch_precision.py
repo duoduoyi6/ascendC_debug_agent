@@ -631,6 +631,17 @@ class _LegacyPrecisionChecker:
         diagnostics = summary.get("diagnostics", {})
         diagnostics["forensics_hint"] = forensics_hint
         diagnostics["op_type"] = op_type
+        diagnosis_path = os.path.join(
+            self.tuning_dir, f"diagnosis_summary_attempt_{self.attempt}.json")
+        if os.path.exists(diagnosis_path):
+            try:
+                with open(diagnosis_path, encoding="utf-8") as f:
+                    diagnosis = json.load(f)
+                for key in ("fix_type", "direction_verdict", "direction_reason"):
+                    if diagnostics.get(key) is None and diagnosis.get(key) is not None:
+                        diagnostics[key] = diagnosis[key]
+            except (json.JSONDecodeError, OSError):
+                pass
         summary["diagnostics"] = diagnostics
 
         index = summary.get("index", {})
@@ -657,6 +668,7 @@ class _LegacyPrecisionChecker:
 
         fix_type = None
         direction_verdict = None
+        direction_reason = None
         forensics_hint = None
         improvement_ratio = None
         absolute_improvement = None
@@ -671,6 +683,7 @@ class _LegacyPrecisionChecker:
                 diag = summary.get("diagnostics", {})
                 fix_type = diag.get("fix_type")
                 direction_verdict = diag.get("direction_verdict")
+                direction_reason = diag.get("direction_reason")
                 forensics_hint = diag.get("forensics_hint")
                 metrics = summary.get("metrics", {})
                 improvement_ratio = metrics.get("improvement_ratio")
@@ -694,7 +707,8 @@ class _LegacyPrecisionChecker:
         else:
             outcome = "stagnant"
 
-        direction_reason = self._extract_direction_reason()
+        if direction_reason is None:
+            direction_reason = self._extract_direction_reason()
 
         new_entry = {
             "attempt":               self.attempt,

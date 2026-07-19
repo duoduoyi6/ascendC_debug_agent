@@ -56,8 +56,29 @@ class TestDebugStatus(unittest.TestCase):
                     "started_at", "ended_at", "attempts_used", "entry_failure_type",
                     "final_failure_type", "final_verify_status_path", "notes",
                     "objective_success", "anti_cheat_pass", "ast_degrade_pass",
-                    "reportable_success", "success_category"}
+                    "reportable_success", "success_category",
+                    "probe_policy_compliant", "probe_policy_violations",
+                    "probe_policy_unknown", "probe_policy_records"}
         self.assertEqual(set(s), expected)
+
+    def test_probe_policy_summary_distinguishes_violation_and_unknown(self) -> None:
+        tr.record_session_started(self.task_dir, op_name="add", agent="constructive",
+                                  entry_failure_type="precision_failed")
+        tuning = self.task_dir / "precision_tuning"
+        tuning.mkdir()
+        (tuning / "probe_policy_attempt0.json").write_text(json.dumps({
+            "attempt": 0, "policy": "skip", "observed_status": "executed",
+            "policy_pass": False,
+        }), encoding="utf-8")
+        (tuning / "probe_policy_attempt1.json").write_text(json.dumps({
+            "attempt": 1, "policy": "conditional", "observed_status": "unknown",
+            "policy_pass": None,
+        }), encoding="utf-8")
+        tr.record_decision(self.task_dir, Done(session_outcome="failed", reason="x"))
+        status = build_debug_status(self.task_dir)
+        self.assertFalse(status["probe_policy_compliant"])
+        self.assertEqual(status["probe_policy_violations"], 1)
+        self.assertEqual(status["probe_policy_unknown"], 1)
 
     def test_no_terminal_event_is_crashed(self) -> None:
         # 异常中断 (无终态事件) → crashed。
@@ -384,6 +405,42 @@ class TestDiagnosisSummary(unittest.TestCase):
         self.assertEqual(d["changed_files"], [])
         self.assertNotIn("validation", d)
         self.assertNotIn("root_cause", d)
+
+    def test_direction_metadata_extracted_from_final_response(self) -> None:
+        response = """[FIX_PLAN]
+采用 FIX_PRECISION_ACCUMULATE_FP32
+[DIRECTION_ASSESSMENT]
+本轮是否延续上一轮方向: 否
+换方向理由: 上一轮仅调整 tiling，没有修复累加精度
+"""
+        _record_diagnose(self.task_dir, 1, {
+            "success": True, "final_response": response, "changed_files": ["kernel/k.h"]})
+        d = build_diagnosis_summary(self.task_dir, 1)
+        self.assertEqual(d["fix_type"], "FIX_PRECISION_ACCUMULATE_FP32")
+        self.assertEqual(d["direction_verdict"], "否")
+        self.assertIn("累加精度", d["direction_reason"])
+
+    def test_structured_direction_metadata_preferred(self) -> None:
+        _record_diagnose(self.task_dir, 1, {
+            "success": True,
+            "final_response": "普通总结，不包含旧模板",
+            "attempt_metadata": {
+                "fix_type": "reduce_fp32_accumulation",
+                "direction_verdict": "switch",
+                "direction_reason": "previous tiling direction regressed",
+                "probe_status": "executed",
+                "kb_used_ids": ["kb-0123456789ab"],
+            },
+            "probe_policy": "conditional",
+            "probe_policy_pass": True,
+            "changed_files": ["kernel/k.h"],
+        })
+        d = build_diagnosis_summary(self.task_dir, 1)
+        self.assertEqual(d["schema_version"], 2)
+        self.assertEqual(d["fix_type"], "reduce_fp32_accumulation")
+        self.assertEqual(d["direction_verdict"], "switch")
+        self.assertEqual(d["probe_status"], "executed")
+        self.assertEqual(d["probe_policy"], "conditional")
 
     def test_validation_only(self) -> None:
         # diagnose result 无 final_response (timeout 早返回路径)，但 validation 已产出。

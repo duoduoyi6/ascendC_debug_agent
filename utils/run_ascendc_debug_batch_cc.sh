@@ -39,7 +39,8 @@ TIMEOUT_SEC="5400"          # 单任务超时（秒），默认 1.5 小时
 MAX_ATTEMPTS="5"            # ASCENDC_DEBUG_MAX_ATTEMPTS 默认值
 MAX_RESUMES="3"             # pause_turn 最大恢复次数
 MAX_TURNS="240"             # 单 attempt agentic turn 数硬上限；默认 240。模型无关，是失控（cache_read/cost 累积）的治本闸
-MAX_TASK_TURNS="720"        # 跨 attempt 累计 agentic turn 数硬上限；默认 720
+SOFT_TASK_TURNS="480"       # 无客观改善证据时的任务级软预算
+MAX_TASK_TURNS="600"        # 有客观改善证据后的任务级硬上限
 KB_PATH=""                  # success 且无作弊时候选知识入库路径；空=不启用
 AGENT_TIMEOUT_SEC=""        # 单次 diagnose agent 调用超时（秒，空=不限）；引擎管 wall-clock
 STALE_AFTER_FAILURE_SEC="3600"   # 失败后停滞多久判定为 stale
@@ -47,6 +48,8 @@ STALE_CHECK_INTERVAL_SEC="60"    # 停滞检测间隔
 WORKDIR_IN_CONTAINER="/home/c00959374/AscendOpGenAgent"
 TILELANG_ENV_SH="/home/c00959374/tilelang/tilelang-ascend/set_env.sh"
 CLAUDE_ENV_SH=""            # API 凭证脚本路径（可选）
+PROVIDER_POOL_CONFIG=""     # mixed-provider key pool；空时尝试从 experiment_manifest 推断
+MIXED_PROVIDER_MIN_REMAINING="10"
 CLAUDE_BIN="claude"
 AGENT="constructive"        # 引擎 CLI 接受 constructive(AAAI 主力)/discovery 短名或完整 spec 名
 ALLOWED_TOOLS="Bash,Read,Write,Edit,Glob,Grep,Skill"
@@ -67,6 +70,7 @@ while [[ $# -gt 0 ]]; do
         --max-resumes)            MAX_RESUMES="$2"; shift 2 ;;
         --agent-timeout)          AGENT_TIMEOUT_SEC="$2"; shift 2 ;;
         --max-turns)              MAX_TURNS="$2"; shift 2 ;;
+        --soft-task-turns)        SOFT_TASK_TURNS="$2"; shift 2 ;;
         --max-task-turns)         MAX_TASK_TURNS="$2"; shift 2 ;;
         --kb-path)                KB_PATH="$2"; shift 2 ;;
         --stale-after-failure)    STALE_AFTER_FAILURE_SEC="$2"; shift 2 ;;
@@ -74,6 +78,8 @@ while [[ $# -gt 0 ]]; do
         --workdir)                WORKDIR_IN_CONTAINER="$2"; shift 2 ;;
         --tilelang-env)           TILELANG_ENV_SH="$2"; shift 2 ;;
         --claude-env)             CLAUDE_ENV_SH="$2"; shift 2 ;;
+        --provider-pool-config)   PROVIDER_POOL_CONFIG="$2"; shift 2 ;;
+        --mixed-provider-min-remaining) MIXED_PROVIDER_MIN_REMAINING="$2"; shift 2 ;;
         --claude-bin)             CLAUDE_BIN="$2"; shift 2 ;;
         --agent)                  AGENT="$2"; shift 2 ;;
         --allowed-tools)          ALLOWED_TOOLS="$2"; shift 2 ;;
@@ -151,14 +157,60 @@ LOCK="$OUTPUT_DIR/.lock"
 REPORT="$OUTPUT_DIR/batch_report.md"
 TASK_ELAPSED="$OUTPUT_DIR/task_elapsed.tsv"
 FATAL="$OUTPUT_DIR/.fatal"
+PROVIDER_FAILURES="$OUTPUT_DIR/provider_failures.jsonl"
+MIXED_PROVIDER_MODE="0"
+PROVIDER_ASSIGNMENTS=""
 
-# ── 初始化队列（按原始顺序写入） ──
+infer_provider_pool_config() {
+    [[ -n "$PROVIDER_POOL_CONFIG" ]] && return 0
+    local run_root manifest
+    run_root=$(dirname "$(dirname "$OUTPUT_DIR")")
+    manifest="$run_root/experiment_manifest.json"
+    [[ -f "$manifest" ]] || return 0
+    PROVIDER_POOL_CONFIG=$(python3 - "$manifest" <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+    print(data.get("key_config") or data.get("args", {}).get("key_config", ""))
+except Exception:
+    print("")
+PY
+)
+}
+
+# ── 初始化队列：优先按实时额度为每个 task 固定分配 provider ──
+TASKS_REQUESTED="$OUTPUT_DIR/.tasks_requested"
+printf "%s\n" "${TASK_LIST[@]}" > "$TASKS_REQUESTED"
+infer_provider_pool_config
 : > "$QUEUE"
-for td in "${TASK_LIST[@]}"; do
-    echo "$td" >> "$QUEUE"
-done
+if [[ -n "$PROVIDER_POOL_CONFIG" && -f "$PROVIDER_POOL_CONFIG" ]]; then
+    set +e
+    python3 "$(dirname "$0")/assign_mixed_providers.py" \
+        --key-config "$PROVIDER_POOL_CONFIG" \
+        --tasks-file "$TASKS_REQUESTED" \
+        --output "$OUTPUT_DIR" \
+        --queue "$QUEUE" \
+        --min-remaining "$MIXED_PROVIDER_MIN_REMAINING"
+    assign_rc=$?
+    set -e
+    if [[ "$assign_rc" -eq 0 ]]; then
+        MIXED_PROVIDER_MODE="1"
+        PROVIDER_ASSIGNMENTS="$OUTPUT_DIR/provider_assignments.json"
+    elif [[ "$assign_rc" -eq 3 ]]; then
+        echo "provider_api_error provider_pool_exhausted" > "$FATAL"
+        PROVIDER_ASSIGNMENTS="$OUTPUT_DIR/provider_assignments.json"
+    else
+        echo "[provider] mixed assignment unavailable rc=$assign_rc; using cycle default" >&2
+    fi
+fi
+if [[ "$MIXED_PROVIDER_MODE" != "1" && ! -s "$FATAL" ]]; then
+    for td in "${TASK_LIST[@]}"; do
+        printf "%s\t%s\t%s\n" "$td" "cycle_default" "$CLAUDE_ENV_SH" >> "$QUEUE"
+    done
+fi
 : > "$LOCK"
-: > "$FATAL"
+[[ -e "$FATAL" ]] || : > "$FATAL"
+: > "$PROVIDER_FAILURES"
 
 # ── 初始化报告 ──
 {
@@ -173,9 +225,12 @@ done
     echo "- entry_failure_type: ${ENTRY_FAILURE_TYPE:-<auto/resume>}"
     echo "- model: ${MODEL:-<env default>}"
     echo "- claude env: ${CLAUDE_ENV_SH:-<none>}"
+    echo "- provider mode: $([[ "$MIXED_PROVIDER_MODE" == "1" ]] && echo mixed_sticky || echo cycle_default)"
+    echo "- provider assignments: ${PROVIDER_ASSIGNMENTS:-<none>}"
     echo "- tilelang env: $TILELANG_ENV_SH"
     echo "- timeout: ${TIMEOUT_SEC}s/task"
     echo "- max_turns: ${MAX_TURNS:-<engine default>}"
+    echo "- soft_task_turns: ${SOFT_TASK_TURNS:-<none>}"
     echo "- max_task_turns: ${MAX_TASK_TURNS:-<none>}"
     echo "- kb_path: ${KB_PATH:-<none>}"
     echo "- stale_after_failure: ${STALE_AFTER_FAILURE_SEC}s"
@@ -695,6 +750,7 @@ collect_signal_audit_evidence() {
 # ══════════════════════════════════════════════════════════════════
 run_engine_turn() {
     local container="$1" npu="$2" task_dir="$3" op_name="$4" wlog="$5"
+    local task_claude_env="${6:-$CLAUDE_ENV_SH}" provider_name="${7:-cycle_default}"
     local skill_dir="$WORKDIR_IN_CONTAINER/skills/ascendc/ascendc-debug"
     local agent_short="$AGENT"
     local engine_start engine_start_human
@@ -703,7 +759,7 @@ run_engine_turn() {
     # AGENT 可能是完整 spec 名，引擎 CLI 接受 constructive/discovery 短名或完整名，原样透传。
 
     {
-        echo "[engine] task_dir=$task_dir op=$op_name agent=$agent_short npu=$npu"
+        echo "[engine] task_dir=$task_dir op=$op_name agent=$agent_short npu=$npu provider=$provider_name"
         echo "[engine] start=$engine_start_human"
     } >> "$wlog"
 
@@ -727,7 +783,8 @@ run_engine_turn() {
                 task_dir="$5"; op_name="$6"; agent="$7"; npu="$8"
                 model="$9"; claude_bin="${10}"; allowed_tools="${11}"
                 agent_timeout="${12}"; entry_failure_type="${13}"
-                max_turns="${14}"; max_task_turns="${15}"; kb_path="${16}"
+                max_turns="${14}"; soft_task_turns="${15}"
+                max_task_turns="${16}"; kb_path="${17}"
 
                 [ -n "$claude_env" ] && [ -f "$claude_env" ] && source "$claude_env"
                 [ -f "$tilelang_env" ] && source "$tilelang_env"
@@ -738,6 +795,7 @@ run_engine_turn() {
                 [ -n "$agent_timeout" ]      && extra_args+=(--agent-timeout-sec "$agent_timeout")
                 [ -n "$entry_failure_type" ] && extra_args+=(--entry-failure-type "$entry_failure_type")
                 [ -n "$max_turns" ]          && extra_args+=(--max-turns "$max_turns")
+                [ -n "$soft_task_turns" ]    && extra_args+=(--soft-task-turns "$soft_task_turns")
                 [ -n "$max_task_turns" ]     && extra_args+=(--max-task-turns "$max_task_turns")
                 [ -n "$kb_path" ]            && extra_args+=(--kb-path "$kb_path")
 
@@ -750,11 +808,11 @@ run_engine_turn() {
                     --claude-bin "$claude_bin" \
                     --allowed-tools "$allowed_tools" \
                     "${extra_args[@]}"
-            ' _ "$CLAUDE_ENV_SH" "$TILELANG_ENV_SH" "$WORKDIR_IN_CONTAINER" "$skill_dir" \
+            ' _ "$task_claude_env" "$TILELANG_ENV_SH" "$WORKDIR_IN_CONTAINER" "$skill_dir" \
                 "$task_dir" "$op_name" "$agent_short" "$npu" \
                 "${MODEL:-}" "$CLAUDE_BIN" "$ALLOWED_TOOLS" \
                 "${AGENT_TIMEOUT_SEC:-}" "$ENTRY_FAILURE_TYPE" "$MAX_TURNS" \
-                "$MAX_TASK_TURNS" "$KB_PATH" >> "$wlog" 2>&1 &
+                "$SOFT_TASK_TURNS" "$MAX_TASK_TURNS" "$KB_PATH" >> "$wlog" 2>&1 &
     local cmd_pid=$!
     LAST_ENGINE_HOST_PID="$cmd_pid"
     echo "[engine] host_cmd_pid=$cmd_pid host_worker_pid=$$ host_parent_pid=$PPID" >> "$wlog"
@@ -786,6 +844,26 @@ run_engine_turn() {
     return "$turn_status"
 }
 
+record_provider_failure() {
+    local task_dir="$1" op_name="$2" provider_name="$3" container="$4" npu="$5" status="$6"
+    python3 - "$PROVIDER_FAILURES" "$task_dir" "$op_name" "$provider_name" "$container" "$npu" "$status" <<'PY'
+import json, sys
+from datetime import datetime
+path, task, op, provider, container, npu, status = sys.argv[1:]
+with open(path, "a", encoding="utf-8") as f:
+    f.write(json.dumps({
+        "recorded_at": datetime.now().astimezone().isoformat(),
+        "task_dir": task,
+        "op_name": op,
+        "provider": provider,
+        "container": container,
+        "npu": npu,
+        "engine_rc": int(status),
+        "session_outcome": "provider_api_error",
+    }, ensure_ascii=False) + "\n")
+PY
+}
+
 # ══════════════════════════════════════════════════════════════════
 # Worker：从队列拉 task_dir，跨 docker 执行 Claude Code debug
 # ══════════════════════════════════════════════════════════════════
@@ -801,17 +879,19 @@ run_worker() {
             break
         fi
 
-        local task_dir=""
+        local queue_row="" task_dir="" provider_name="cycle_default" task_claude_env="$CLAUDE_ENV_SH"
         # 原子出队
         exec 9>"$LOCK"
         flock -x 9
         if [[ -s "$QUEUE" ]]; then
-            task_dir=$(head -n1 "$QUEUE")
+            queue_row=$(head -n1 "$QUEUE")
             sed -i '1d' "$QUEUE"
         fi
         flock -u 9
         exec 9>&-
 
+        [[ -z "$queue_row" ]] && break
+        IFS=$'\t' read -r task_dir provider_name task_claude_env <<< "$queue_row"
         [[ -z "$task_dir" ]] && break
         local op_name; op_name=$(basename "$task_dir")
 
@@ -820,7 +900,7 @@ run_worker() {
         start_human=$(date '+%F %T')
 
         {
-            echo "[task] op=$op_name task_dir=$task_dir"
+            echo "[task] op=$op_name task_dir=$task_dir provider=$provider_name provider_env=$task_claude_env"
             echo "[task] start=$start_human"
         } >> "$wlog"
 
@@ -847,7 +927,7 @@ run_worker() {
         status=0
         LAST_ENGINE_HOST_PID=""
         set +e
-        run_engine_turn "$container" "$npu" "$task_dir" "$op_name" "$wlog"
+        run_engine_turn "$container" "$npu" "$task_dir" "$op_name" "$wlog" "$task_claude_env" "$provider_name"
         status=$?
         set -e
 
@@ -868,7 +948,14 @@ run_worker() {
         local session_outcome
         session_outcome=$(read_debug_outcome "$task_dir" 2>/dev/null || echo "unknown")
         if [[ "$status" -eq 8 || "$session_outcome" == "provider_api_error" ]]; then
-            mark_fatal_error "provider_api_error task=${op_name} container=${container} npu=${npu}" "$wlog"
+            if [[ "$MIXED_PROVIDER_MODE" == "1" ]]; then
+                exec 8>"$LOCK"; flock -x 8
+                record_provider_failure "$task_dir" "$op_name" "$provider_name" "$container" "$npu" "$status"
+                flock -u 8; exec 8>&-
+                echo "[provider] task-local failure provider=$provider_name task=$op_name; other providers continue" >> "$wlog"
+            else
+                mark_fatal_error "provider_api_error task=${op_name} container=${container} npu=${npu}" "$wlog"
+            fi
         fi
 
         # 注: 旧 codex 语义的 progressed_to_new_failure_type 跨分支重入逻辑已移除——
@@ -1019,6 +1106,7 @@ CHEAT=$(grep_count "🚨 CHEAT" "$REPORT")
     echo "- killed_by_sigkill: $SIGKILL_CNT"
     echo "- stale_after_failure: $STALE_CNT"
     echo "- provider_api_error: $PROVIDER_API"
+    echo "- provider failure records: provider_failures.jsonl"
     echo "- failed / crashed / stopped_* / engine_rc!=0: $FAIL"
     echo "- 作弊 (🚨 CHEAT, 与 outcome 正交): $CHEAT"
     if [[ -s "$FATAL" ]]; then

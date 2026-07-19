@@ -597,6 +597,7 @@ def run_objective_validation(
         "verification_ran": verification_ran,
         "classify_exit_code": classify_proc.returncode,
         "failure_type": status.get("failure_type"),
+        "import_subtype": status.get("import_subtype"),
         "failed_step": status.get("failed_step"),
         "stdout_path": str(stdout_path),
         "stderr_path": str(stderr_path),
@@ -761,10 +762,215 @@ def _write_forensics_unavailable_report(
     return path
 
 
+def _latest_rollback_from_attempt(task_dir: Path) -> Optional[dict]:
+    """Return rollback evidence from either the legacy event or replayable action."""
+    try:
+        from engine.best_rollback import latest_rollback_record
+        return latest_rollback_record(task_dir)
+    except (ImportError, OSError, ValueError):
+        return None
+
+
+def _copy_forensics_report(
+    source: Path,
+    report: Path,
+    *,
+    attempt: int,
+    provenance: dict,
+) -> bool:
+    """复制缓存报告并把内部 attempt/provenance 改成当前轮。
+
+    Gate-F 同时校验文件名和 JSON 内的 attempt。字节复制历史报告会导致
+    ``forensics_report_N.json`` 内仍是旧 attempt，真实流水线会连续重试并停止。
+    """
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return False
+        payload["attempt"] = attempt
+        payload.update(provenance)
+        report.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    except (OSError, ValueError):
+        return False
+    return report.exists()
+
+
+def _reuse_forensics_after_rollback(
+    task_dir: Path, attempt: int, report: Path
+) -> Optional[dict]:
+    """回滚后复用与 best 源码相符的 forensics report。
+
+    每轮顺序是 forensics -> agent 修改 -> validate，因此 ``forensics_report_N`` 描述的是
+    attempt N 修改前的源码，而 current_best(attempt N) 保存的是修改后的源码。与 best
+    源码对应的是下一轮开始时生成的 ``forensics_report_{N+1}``，不是 report_N。
+
+    best report 缺失/复制失败 → 返回 None 回退正常执行 (向正确性倾斜)。
+    """
+    rb = _latest_rollback_from_attempt(task_dir)
+    if rb is None or rb.get("from_attempt") != attempt - 1:
+        return None
+    best_attempt = rb.get("best_attempt")
+    if best_attempt is None:
+        return None
+    try:
+        report_attempt = int(best_attempt) + 1
+    except (TypeError, ValueError):
+        return None
+    best_report = task_dir / "precision_tuning" / f"forensics_report_{report_attempt}.json"
+    if not best_report.exists():
+        return None
+    if not _copy_forensics_report(
+        best_report,
+        report,
+        attempt=attempt,
+        provenance={
+            "reused_after_rollback": True,
+            "reused_from_attempt": report_attempt,
+            "reused_best_attempt": best_attempt,
+        },
+    ):
+        return None
+    return {
+        "success": True,
+        "exit_code": 0,
+        "report_path": str(report),
+        "error": None,
+        "cached": True,
+        "reused_after_rollback": True,
+        "reused_from_attempt": report_attempt,
+        "reused_best_attempt": best_attempt,
+        "cache_hit": True,
+        "reuse_kind": "rollback",
+        "forensics_reused": True,
+        "forensics_executed": False,
+        "forensics_completed": True,
+        "prebuild_executed": False,
+        "build_skipped": True,
+        "build_skip_reason": "rollback_forensics_reuse",
+    }
+
+
+def _existing_build_failure_evidence(task_dir: Path) -> Optional[dict]:
+    """Load the compile log already produced by objective validation.
+
+    A build-failed branch cannot run precision forensics until the source
+    compiles.  Rebuilding unchanged source only repeats a deterministic error,
+    so the existing build log is the correct diagnostic input for the Agent.
+    """
+    status_path = task_dir / ".verify_status" / "latest.json"
+    try:
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if status.get("failure_type") != "build_failed":
+        return None
+    raw_log_path = status.get("log_path")
+    if not raw_log_path:
+        return None
+    log_path = Path(raw_log_path)
+    if not log_path.is_absolute():
+        log_path = task_dir / log_path
+    try:
+        log_text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return {
+        "exit_code": status.get("verification_exit_code", 1),
+        "stdout_path": None,
+        "stderr_path": str(log_path),
+        "stdout_tail": "",
+        "stderr_tail": log_text[-2000:],
+        "first_error_lines": _extract_first_error(log_text),
+        "source_status_path": str(status_path),
+    }
+
+
+_DETERMINISTIC_RUNTIME_ERROR_SIGNATURES = (
+    "aicore exception",
+    "acl stream synchronize failed",
+    "rtdevicesynchronize",
+    "runtime result = 507",
+    "error code:507",
+)
+
+
+def _degrade_deterministic_runtime_forensics(
+    report: Path,
+    *,
+    stderr_tail: Optional[str],
+) -> Optional[dict]:
+    """Turn a device runtime crash report into usable diagnostic evidence.
+
+    Precision forensics executes the same broken kernel as objective validation.
+    An AICore/ACL execution exception is therefore deterministic evidence for the
+    runtime-fix Agent, not a reason to execute the unchanged kernel three times.
+    Missing/malformed reports and unclassified child failures remain retryable.
+    """
+    try:
+        payload = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("status") != "error":
+        return None
+
+    evidence_text = "\n".join(
+        str(value)
+        for value in (
+            payload.get("error"),
+            payload.get("traceback"),
+            payload.get("primary_evidence"),
+            stderr_tail,
+        )
+        if value
+    )
+    lowered = evidence_text.lower()
+    classified_device_fault = (
+        "aicore exception" in lowered
+        or (
+            "acl stream synchronize failed" in lowered
+            and (
+                "runtime result = 507" in lowered
+                or "error code:507" in lowered
+            )
+        )
+    )
+    if not classified_device_fault:
+        return None
+    matched = [
+        signature
+        for signature in _DETERMINISTIC_RUNTIME_ERROR_SIGNATURES
+        if signature in lowered
+    ]
+
+    payload.update({
+        "forensics_degraded": True,
+        "forensics_unavailable": True,
+        "unavailable_reason": "runtime_error",
+        "diagnostic_evidence_kind": "runtime_error_log",
+        "proceed_to_agent": True,
+        "diagnostic_signatures": matched,
+        "degraded_at": _now_iso(),
+    })
+    try:
+        report.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError:
+        return None
+    return {
+        "error": payload.get("error") or stderr_tail,
+        "traceback": payload.get("traceback"),
+        "diagnostic_signatures": matched,
+        "source_report_path": str(report),
+    }
+
+
 def run_forensics(
     task_dir: Path,
     *,
     attempt: int,
+    failure_type: Optional[str] = None,
     repo_root: Optional[Path] = None,
     timeout: Optional[float] = None,
 ) -> dict:
@@ -784,6 +990,54 @@ def run_forensics(
     input_normalization = _ensure_model_json_alias(task_dir)
     report = task_dir / "precision_tuning" / f"forensics_report_{attempt}.json"
 
+    build_evidence = (
+        _existing_build_failure_evidence(task_dir)
+        if failure_type == "build_failed"
+        else None
+    )
+    if build_evidence is not None:
+        error = "using existing objective-validation build log as diagnostic evidence"
+        report_path = _write_forensics_unavailable_report(
+            task_dir,
+            attempt=attempt,
+            status="build_failed",
+            primary_hint="build_error",
+            error=error,
+            build_result=build_evidence,
+        )
+        return {
+            "success": True,
+            "exit_code": build_evidence.get("exit_code"),
+            "report_path": str(report_path),
+            "error": error,
+            "cached": False,
+            "forensics_unavailable": True,
+            "unavailable_reason": "build_failed",
+            "forensics_degraded": True,
+            "diagnostic_evidence_kind": "existing_build_log",
+            "proceed_to_agent": True,
+            "build_result": build_evidence,
+            "cache_hit": False,
+            "reuse_kind": None,
+            "forensics_reused": False,
+            "forensics_executed": False,
+            "forensics_completed": False,
+            "prebuild_executed": False,
+            "build_skipped": True,
+            "build_skip_reason": "existing_build_failure_evidence",
+            "input_normalization": input_normalization,
+        }
+
+    # 问题 7: 回滚后复用。若本轮 (attempt) 紧跟一次 kernel 回滚 (best_rollback 已把源码恢复
+    # 成 best)，则本轮取证输入 == best validate 后的源码，重跑必产同结果，且 build/ 残留的是
+    # 改坏代码的 .so (与回滚后源码不一致，重跑会用错 .so 失真)。故复用 best 后下一轮开始
+    # 时生成、与 best 源码对应的 forensics_report，
+    # 跳过 prebuild + OperatorExecutor (省编译+取证)。best report 缺失 → 回退正常执行。
+    reused = _reuse_forensics_after_rollback(task_dir, attempt, report)
+    if reused is not None:
+        reused["input_normalization"] = input_normalization
+        return reused
+
     # 建议A: staleness 缓存。当前取证输入 (kernel 源码 + model_new) hash 命中上轮缓存，
     # 且上轮 report 仍在 → 复用，省一次昂贵子进程 (上限 1800s)。复用时把上轮 report 复制
     # 成当前 attempt 名 (Gate-F 按 forensics_report_{attempt}.json 精确读取)。
@@ -797,12 +1051,15 @@ def run_forensics(
         if cache.get("src_hash") == src_hash and prev_attempt is not None:
             prev_report = task_dir / "precision_tuning" / f"forensics_report_{prev_attempt}.json"
             if prev_report.exists():
-                if prev_report != report:
-                    try:
-                        report.write_bytes(prev_report.read_bytes())
-                    except OSError:
-                        pass
-                if report.exists():
+                if _copy_forensics_report(
+                    prev_report,
+                    report,
+                    attempt=attempt,
+                    provenance={
+                        "cached": True,
+                        "cached_from_attempt": prev_attempt,
+                    },
+                ):
                     _forensics_cache_save(task_dir, src_hash=src_hash, attempt=attempt)
                     return {
                         "success": True,
@@ -811,12 +1068,24 @@ def run_forensics(
                         "error": None,
                         "cached": True,
                         "cached_from_attempt": prev_attempt,
+                        "cache_hit": True,
+                        "reuse_kind": "input_hash",
+                        "forensics_reused": True,
+                        "forensics_executed": False,
+                        "forensics_completed": True,
+                        "prebuild_executed": False,
+                        "build_skipped": True,
+                        "build_skip_reason": "forensics_cache_hit",
                         "input_normalization": input_normalization,
                     }
 
     prebuild_result = None
-    if os.environ.get("ASCENDC_DEBUG_FORENSICS_PREBUILD", "1") != "0":
-        if not _kernel_build_ready(task_dir):
+    prebuild_enabled = os.environ.get("ASCENDC_DEBUG_FORENSICS_PREBUILD", "1") != "0"
+    build_ready_before = _kernel_build_ready(task_dir)
+    prebuild_executed = False
+    if prebuild_enabled:
+        if not build_ready_before:
+            prebuild_executed = True
             prebuild_result = _run_forensics_prebuild(
                 task_dir,
                 attempt=attempt,
@@ -844,7 +1113,18 @@ def run_forensics(
                     "cached": False,
                     "forensics_unavailable": True,
                     "unavailable_reason": "build_failed",
+                    "forensics_degraded": True,
+                    "diagnostic_evidence_kind": "prebuild_log",
+                    "proceed_to_agent": True,
                     "build_result": prebuild_result,
+                    "cache_hit": False,
+                    "reuse_kind": None,
+                    "forensics_reused": False,
+                    "forensics_executed": False,
+                    "forensics_completed": False,
+                    "prebuild_executed": True,
+                    "build_skipped": False,
+                    "build_skip_reason": None,
                     "input_normalization": input_normalization,
                 }
 
@@ -864,6 +1144,40 @@ def run_forensics(
         exit_code = 124
         stderr_tail = f"forensics timeout after {timeout}s: {exc}"
     success = exit_code == 0 and report.exists()
+    runtime_evidence = None
+    if not success and failure_type == "runtime_error":
+        runtime_evidence = _degrade_deterministic_runtime_forensics(
+            report,
+            stderr_tail=stderr_tail,
+        )
+    if runtime_evidence is not None:
+        return {
+            "success": True,
+            "exit_code": exit_code,
+            "report_path": str(report),
+            "error": runtime_evidence.get("error"),
+            "cached": False,
+            "forensics_unavailable": True,
+            "unavailable_reason": "runtime_error",
+            "forensics_degraded": True,
+            "diagnostic_evidence_kind": "runtime_error_log",
+            "proceed_to_agent": True,
+            "runtime_result": runtime_evidence,
+            "build_result": prebuild_result,
+            "cache_hit": False,
+            "reuse_kind": None,
+            "forensics_reused": False,
+            "forensics_executed": True,
+            "forensics_completed": False,
+            "prebuild_executed": prebuild_executed,
+            "build_skipped": not prebuild_executed,
+            "build_skip_reason": (
+                "build_artifact_ready" if build_ready_before
+                else "prebuild_disabled" if not prebuild_enabled
+                else None
+            ),
+            "input_normalization": input_normalization,
+        }
     # 重跑成功 → 记录本轮 hash，使下轮 (源码未变时) 命中缓存。
     if success and use_cache and src_hash:
         _forensics_cache_save(task_dir, src_hash=src_hash, attempt=attempt)
@@ -874,5 +1188,17 @@ def run_forensics(
         "error": stderr_tail,
         "cached": False,
         "build_result": prebuild_result,
+        "cache_hit": False,
+        "reuse_kind": None,
+        "forensics_reused": False,
+        "forensics_executed": True,
+        "forensics_completed": success,
+        "prebuild_executed": prebuild_executed,
+        "build_skipped": not prebuild_executed,
+        "build_skip_reason": (
+            "build_artifact_ready" if build_ready_before
+            else "prebuild_disabled" if not prebuild_enabled
+            else None
+        ),
         "input_normalization": input_normalization,
     }

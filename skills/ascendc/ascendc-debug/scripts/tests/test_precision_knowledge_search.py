@@ -157,6 +157,28 @@ class TestSearchRecall(unittest.TestCase):
         self.assertIn("match_reason", r["matched_entries"][0])
         self.assertIn("op_name_keywords", r["query"])
 
+    def test_search_returns_stable_knowledge_id(self):
+        first = _silent_search(self.kb, op_type="matmul", pattern="all_wrong",
+                               op_name="006_QuantMatmul", top_k=3)
+        second = _silent_search(self.kb, op_type="matmul", pattern="all_wrong",
+                                op_name="006_QuantMatmul", top_k=3)
+        first_ids = [e["knowledge_id"] for e in first["matched_entries"]]
+        second_ids = [e["knowledge_id"] for e in second["matched_entries"]]
+        self.assertEqual(first_ids, second_ids)
+        self.assertTrue(all(i.startswith("kb-") and len(i) == 15 for i in first_ids))
+
+
+class TestKnowledgeId(unittest.TestCase):
+    def test_explicit_id_preserved(self):
+        entry = _entry("anything")
+        entry["knowledge_id"] = "kb-0123456789ab"
+        self.assertEqual(pk._knowledge_id(entry), "kb-0123456789ab")
+
+    def test_legacy_id_is_title_deterministic(self):
+        a = _entry("  Float16   Reduction ")
+        b = _entry("float16 reduction")
+        self.assertEqual(pk._knowledge_id(a), pk._knowledge_id(b))
+
 
 class TestTaskDirFallback(unittest.TestCase):
     def test_op_name_from_events(self):

@@ -76,15 +76,15 @@ def main(argv=None) -> int:
     ap.add_argument("--agent-timeout-sec", type=float, default=None,
                     help="单次 diagnose agent 调用超时 (秒)")
     # --max-turns: 单 attempt agentic turn 数硬闸，模型无关。
-    # 默认 180：V3 Kimi smoke 中复杂算子在 121 turns 被截断，120 偏紧；180 给
-    # hard case 留出诊断空间，同时保留硬闸，避免回到 240+ 的高 token 风险。
-    ap.add_argument("--max-turns", default="180",
-                    help="单 attempt agentic turn 数硬上限；默认 180")
-    # 跨 attempt 累计 turns 硬上限 (任务级)。单 attempt 闸 (--max-turns)
-    # 压不住多轮累计，此闸累加各 attempt 的 num_turns，超阈 Done(stopped_by_budget)。
-    # 默认 480，覆盖 2-4 轮正常修复空间；与单 attempt 闸同量纲。
-    ap.add_argument("--max-task-turns", type=int, default=480,
-                    help="跨 attempt 累计 agentic turn 数硬上限 (任务级)；默认 480")
+    # 默认 240；任务级 remaining budget 会在每次 spawn 前进一步动态截断它。
+    ap.add_argument("--max-turns", default="240",
+                    help="单 session agentic turn 数硬上限；默认 240")
+    # 跨 attempt 累计 turns: 480 软预算；只有 engine-owned objective progress
+    # 证据才扩展到 600 硬上限。单 session 仍受 --max-turns 约束。
+    ap.add_argument("--soft-task-turns", type=int, default=480,
+                    help="无客观改善证据时的任务级软预算；默认 480")
+    ap.add_argument("--max-task-turns", type=int, default=600,
+                    help="有客观改善证据后的任务级硬上限；默认 600")
     ap.add_argument("--entry-failure-type", default=None,
                     help="首次运行时注入入口 failure_type；例如 precision_failed")
     # KB 编排: precision_failed 每轮 forensics 后先做确定性 search，把命中摘要
@@ -98,6 +98,8 @@ def main(argv=None) -> int:
         os.environ["ASCENDC_DEBUG_MAX_ATTEMPTS"] = str(args.max_attempts)
     if args.max_task_turns is not None:
         os.environ["ASCENDC_DEBUG_MAX_TASK_TURNS"] = str(args.max_task_turns)
+    if args.soft_task_turns is not None:
+        os.environ["ASCENDC_DEBUG_SOFT_TASK_TURNS"] = str(args.soft_task_turns)
 
     agent_full = _resolve_agent_name(args.agent)
     workdir = Path(args.workdir) if args.workdir else Path(args.task_dir)

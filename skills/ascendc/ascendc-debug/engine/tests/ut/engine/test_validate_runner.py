@@ -79,6 +79,8 @@ class TestForensicsCache(unittest.TestCase):
         self.assertTrue(r0["success"])
         self.assertEqual(fake.calls, 1)
         self.assertFalse(r0.get("cached"))  # 重跑路径显式 cached=False
+        self.assertFalse(r0["cache_hit"])
+        self.assertTrue(r0["forensics_executed"])
 
         # 源码未变 → 第二轮复用，不跑子进程。
         r1 = self._run(1, fake)
@@ -86,8 +88,17 @@ class TestForensicsCache(unittest.TestCase):
         self.assertEqual(fake.calls, 1, "源码不变应复用，不应再跑子进程")
         self.assertTrue(r1.get("cached"))
         self.assertEqual(r1.get("cached_from_attempt"), 0)
+        self.assertTrue(r1["cache_hit"])
+        self.assertEqual(r1["reuse_kind"], "input_hash")
+        self.assertFalse(r1["forensics_executed"])
+        self.assertTrue(r1["build_skipped"])
         # 复用应把上轮 report 复制成当前 attempt 名 (Gate-F 精确文件名读取)。
-        self.assertTrue((self.task_dir / "precision_tuning" / "forensics_report_1.json").exists())
+        report = self.task_dir / "precision_tuning" / "forensics_report_1.json"
+        self.assertTrue(report.exists())
+        payload = json.loads(report.read_text())
+        self.assertEqual(payload["attempt"], 1)
+        self.assertTrue(payload["cached"])
+        self.assertEqual(payload["cached_from_attempt"], 0)
 
     def test_src_change_triggers_rerun(self) -> None:
         fake = _FakeForensics(self.task_dir)
@@ -99,6 +110,7 @@ class TestForensicsCache(unittest.TestCase):
         r1 = self._run(1, fake)
         self.assertEqual(fake.calls, 2, "源码改动应重跑")
         self.assertFalse(r1.get("cached"))
+
 
     def test_add_file_triggers_rerun(self) -> None:
         fake = _FakeForensics(self.task_dir)
@@ -127,6 +139,119 @@ class TestForensicsCache(unittest.TestCase):
         r1 = self._run(1, fake)
         self.assertEqual(fake.calls, 2, "上轮 report 缺失应回退重跑")
         self.assertFalse(r1.get("cached"))
+
+
+class TestBuildFailureForensicsDegrade(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.task_dir = _make_task(Path(self._tmp.name))
+        status_dir = self.task_dir / ".verify_status"
+        status_dir.mkdir()
+        self.log_path = self.task_dir / ".verify_logs" / "phase8_attempt0.log"
+        self.log_path.parent.mkdir()
+        self.log_path.write_text(
+            "kernel/op.cpp:42:7: error: invalid AscendC API call\n",
+            encoding="utf-8",
+        )
+        (status_dir / "latest.json").write_text(json.dumps({
+            "failure_type": "build_failed",
+            "failed_step": "compile",
+            "log_path": str(self.log_path),
+            "verification_exit_code": 1,
+        }), encoding="utf-8")
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_existing_build_log_skips_rebuild_and_proceeds_to_agent(self) -> None:
+        with mock.patch.object(validate_runner, "_run_forensics_prebuild") as prebuild, \
+                mock.patch.object(validate_runner.subprocess, "run") as child:
+            result = validate_runner.run_forensics(
+                self.task_dir, attempt=1, failure_type="build_failed")
+
+        prebuild.assert_not_called()
+        child.assert_not_called()
+        self.assertTrue(result["success"])
+        self.assertTrue(result["forensics_degraded"])
+        self.assertTrue(result["proceed_to_agent"])
+        self.assertEqual(result["diagnostic_evidence_kind"], "existing_build_log")
+        self.assertFalse(result["prebuild_executed"])
+        self.assertTrue(result["build_skipped"])
+        self.assertEqual(result["build_skip_reason"], "existing_build_failure_evidence")
+        report = json.loads(Path(result["report_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(report["status"], "build_failed")
+        self.assertIn("invalid AscendC API call", "\n".join(report["first_error_lines"]))
+
+
+class TestRuntimeFailureForensicsDegrade(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.task_dir = _make_task(Path(self._tmp.name))
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _failed_child(self, *, error: str):
+        def run(cmd, **kwargs):
+            attempt = int(cmd[cmd.index("--attempt") + 1])
+            report = (
+                self.task_dir / "precision_tuning"
+                / f"forensics_report_{attempt}.json"
+            )
+            report.write_text(json.dumps({
+                "version": "2.0",
+                "attempt": attempt,
+                "status": "error",
+                "error": error,
+                "traceback": error,
+                "outputs": [],
+                "primary_hint": "error",
+            }), encoding="utf-8")
+
+            class Result:
+                returncode = 1
+                stderr = error
+            return Result()
+        return run
+
+    def test_aicore_runtime_error_proceeds_to_agent_without_retry(self) -> None:
+        error = (
+            "RuntimeError: ACL stream synchronize failed, error code:507015; "
+            "rtDeviceSynchronize execution failed, reason=aicore exception"
+        )
+        with mock.patch.object(validate_runner, "_kernel_build_ready", return_value=True), \
+                mock.patch.object(
+                    validate_runner.subprocess, "run",
+                    self._failed_child(error=error),
+                ):
+            result = validate_runner.run_forensics(
+                self.task_dir, attempt=1, failure_type="runtime_error")
+
+        self.assertTrue(result["success"])
+        self.assertTrue(result["forensics_degraded"])
+        self.assertTrue(result["proceed_to_agent"])
+        self.assertEqual(result["unavailable_reason"], "runtime_error")
+        self.assertEqual(result["diagnostic_evidence_kind"], "runtime_error_log")
+        self.assertTrue(result["forensics_executed"])
+        self.assertFalse(result["forensics_completed"])
+        report = json.loads(Path(result["report_path"]).read_text(encoding="utf-8"))
+        self.assertTrue(report["proceed_to_agent"])
+        self.assertIn("aicore exception", report["diagnostic_signatures"])
+
+    def test_unclassified_child_failure_remains_retryable(self) -> None:
+        with mock.patch.object(validate_runner, "_kernel_build_ready", return_value=True), \
+                mock.patch.object(
+                    validate_runner.subprocess, "run",
+                    self._failed_child(
+                        error="temporary rtDeviceSynchronize command timeout"
+                    ),
+                ):
+            result = validate_runner.run_forensics(
+                self.task_dir, attempt=1, failure_type="runtime_error")
+
+        self.assertFalse(result["success"])
+        self.assertNotIn("forensics_degraded", result)
+        self.assertNotIn("proceed_to_agent", result)
 
 
 class TestRunFullEval(unittest.TestCase):
@@ -219,6 +344,86 @@ class TestRunFullEval(unittest.TestCase):
                                self._fake_run_logged(case_lines="", rc=0)):
             fe = self._call()
         self.assertIsNone(fe)
+
+
+class TestForensicsReuseAfterRollback(unittest.TestCase):
+    """问题 7: 回滚后复用 best 轮 forensics_report，不跑取证子进程 (省编译+取证)。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.task_dir = _make_task(Path(self._tmp.name))
+        os.environ.pop("ASCENDC_DEBUG_FORENSICS_NO_CACHE", None)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _run(self, attempt: int, fake: _FakeForensics) -> dict:
+        with mock.patch.object(validate_runner.subprocess, "run", fake):
+            return validate_runner.run_forensics(self.task_dir, attempt=attempt)
+
+    def test_reuse_best_report_no_subprocess(self) -> None:
+        from engine import transition
+        # report_0 是 attempt0 修复前；report_1 才对应 attempt0 validate 后保存的 best 源码。
+        (self.task_dir / "precision_tuning" / "forensics_report_0.json").write_text(
+            json.dumps({"attempt": 0, "primary_hint": "stale_before_best"}), encoding="utf-8")
+        (self.task_dir / "precision_tuning" / "forensics_report_1.json").write_text(
+            json.dumps({"attempt": 1, "primary_hint": "uniform_offset"}), encoding="utf-8")
+        # 上一轮(attempt 2)触发回滚到 best(attempt 0)
+        transition.record_rollback(
+            self.task_dir, from_attempt=2,
+            best_metric={"attempt": 0, "case_pass_rate": 50.0, "match_rate": "57.62"})
+        # 本轮 attempt=3 紧跟回滚 → 应复用 best 报告，不跑子进程
+        fake = _FakeForensics(self.task_dir)
+        r = self._run(3, fake)
+        self.assertTrue(r["success"])
+        self.assertEqual(fake.calls, 0, "回滚后应复用 best 报告，不跑取证子进程")
+        self.assertTrue(r.get("reused_after_rollback"))
+        self.assertEqual(r.get("reused_from_attempt"), 1)
+        self.assertEqual(r.get("reused_best_attempt"), 0)
+        self.assertTrue(r["cache_hit"])
+        self.assertEqual(r["reuse_kind"], "rollback")
+        self.assertTrue(r["forensics_reused"])
+        self.assertFalse(r["forensics_executed"])
+        self.assertFalse(r["prebuild_executed"])
+        self.assertTrue(r["build_skipped"])
+        # best 报告应被复制成当前 attempt 名，供 Gate-F/knowledge_search 读取
+        cur = self.task_dir / "precision_tuning" / "forensics_report_3.json"
+        self.assertTrue(cur.exists())
+        payload = json.loads(cur.read_text())
+        self.assertEqual(payload["primary_hint"], "uniform_offset")
+        self.assertEqual(payload["attempt"], 3)
+        self.assertTrue(payload["reused_after_rollback"])
+
+    def test_no_reuse_when_not_after_rollback(self) -> None:
+        # 无回滚事件 → 正常跑子进程
+        fake = _FakeForensics(self.task_dir)
+        r = self._run(1, fake)
+        self.assertEqual(fake.calls, 1)
+        self.assertFalse(r.get("reused_after_rollback"))
+
+    def test_fallback_when_best_report_missing(self) -> None:
+        from engine import transition
+        # 回滚事件指向 best attempt 0，但其 report 不存在 → 回退正常执行
+        transition.record_rollback(
+            self.task_dir, from_attempt=2,
+            best_metric={"attempt": 0, "case_pass_rate": 50.0, "match_rate": "57.62"})
+        fake = _FakeForensics(self.task_dir)
+        r = self._run(3, fake)
+        self.assertEqual(fake.calls, 1, "best 报告缺失应回退重跑")
+        self.assertFalse(r.get("reused_after_rollback"))
+
+    def test_no_reuse_when_rollback_not_immediately_prior(self) -> None:
+        from engine import transition
+        (self.task_dir / "precision_tuning" / "forensics_report_1.json").write_text(
+            json.dumps({"attempt": 1}), encoding="utf-8")
+        # 回滚发生在 from_attempt=2，但本轮是 attempt=5 (非紧邻) → 不复用
+        transition.record_rollback(
+            self.task_dir, from_attempt=2,
+            best_metric={"attempt": 0, "case_pass_rate": 50.0, "match_rate": "57.62"})
+        fake = _FakeForensics(self.task_dir)
+        r = self._run(5, fake)
+        self.assertEqual(fake.calls, 1)
+        self.assertFalse(r.get("reused_after_rollback"))
 
 
 if __name__ == "__main__":

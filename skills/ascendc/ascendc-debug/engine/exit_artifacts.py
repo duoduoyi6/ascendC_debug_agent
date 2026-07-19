@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -292,6 +293,40 @@ def _ast_degrade_pass(task_dir: Path, events: list[dict]) -> Optional[bool]:
     return bool(checks.get("ast_degrade_pass"))
 
 
+def _probe_policy_summary(task_dir: Path) -> dict:
+    tuning = Path(task_dir) / "precision_tuning"
+    records = []
+    try:
+        paths = sorted(tuning.glob("probe_policy_attempt*.json"))
+    except OSError:
+        paths = []
+    for path in paths:
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(record, dict):
+            records.append({
+                "attempt": record.get("attempt"),
+                "policy": record.get("policy"),
+                "observed_status": record.get("observed_status"),
+                "policy_pass": record.get("policy_pass"),
+                "record_path": str(path),
+            })
+    violations = sum(record.get("policy_pass") is False for record in records)
+    unknown = sum(record.get("policy_pass") is None for record in records)
+    if not records or unknown:
+        compliant = None if violations == 0 else False
+    else:
+        compliant = violations == 0
+    return {
+        "probe_policy_compliant": compliant,
+        "probe_policy_violations": violations,
+        "probe_policy_unknown": unknown,
+        "probe_policy_records": records,
+    }
+
+
 def _reportable_success(
     session_outcome: str,
     objective_success: bool,
@@ -363,8 +398,9 @@ def build_debug_status(task_dir: Path) -> dict:
     ast_degrade_pass = _ast_degrade_pass(task_dir, events)
     reportable_success = _reportable_success(
         outcome, objective_success, anti_cheat_pass, ast_degrade_pass, task_dir)
+    probe_summary = _probe_policy_summary(task_dir)
 
-    return {
+    status = {
         "schema_version": SCHEMA_VERSION,
         "session_outcome": outcome,
         "session_branch": _BRANCH_LABEL.get(entry_ft or "", None),
@@ -382,6 +418,8 @@ def build_debug_status(task_dir: Path) -> dict:
             objective_success, anti_cheat_pass, ast_degrade_pass, reportable_success),
         "notes": _terminal_reason(term),
     }
+    status.update(probe_summary)
+    return status
 
 
 def _terminal_reason(term: Optional[dict]) -> str:
@@ -410,7 +448,7 @@ def write_debug_status(task_dir: Path) -> Path:
 # best-effort: 任何文件缺失/读异常 → None/降级，绝不影响终态产物落地。
 # ---------------------------------------------------------------------------
 
-DIAGNOSIS_SCHEMA_VERSION = 1
+DIAGNOSIS_SCHEMA_VERSION = 2
 
 # 诊断摘要单 section 截断上限 (防 ROOT_CAUSE 长篇撑爆 trace；trace 是概览非全文)。
 _DIAGNOSIS_SECTION_MAXLEN = 600
@@ -438,6 +476,35 @@ def _extract_audit_section(content: str, tag: str) -> Optional[str]:
             end = min(end, pos)
     body = rest[:end].strip()
     return body or None
+
+
+def _extract_direction_metadata(content: str) -> dict[str, str]:
+    """Extract structured repair-direction fields from Agent/audit text."""
+    if not content:
+        return {}
+    out: dict[str, str] = {}
+    fix_scope = _extract_audit_section(content, "FIX_PLAN") or content
+    fix_match = re.search(r"\bFIX_PRECISION_[A-Z0-9_]+\b", fix_scope, re.IGNORECASE)
+    if fix_match:
+        out["fix_type"] = fix_match.group(0).upper()
+
+    direction = _extract_audit_section(content, "DIRECTION_ASSESSMENT") or content
+    for line in direction.splitlines():
+        stripped = line.strip().lstrip("-* ")
+        if "本轮是否延续上一轮方向" in stripped or "本轮是否延续" in stripped:
+            value = re.split(r"[:：]", stripped, maxsplit=1)
+            if len(value) == 2:
+                verdict = value[1].strip()[:1]
+                if verdict in ("是", "否"):
+                    out["direction_verdict"] = verdict
+        if "换方向理由" in stripped:
+            value = re.split(r"[:：]", stripped, maxsplit=1)
+            if len(value) == 2 and value[1].strip():
+                reason = value[1].strip()
+                if len(reason) > _DIAGNOSIS_SECTION_MAXLEN:
+                    reason = reason[:_DIAGNOSIS_SECTION_MAXLEN].rstrip() + " …(截断)"
+                out["direction_reason"] = reason
+    return out
 
 
 def _diagnose_result_for_attempt(events: list[dict], attempt: int) -> dict:
@@ -493,6 +560,7 @@ def _audit_enrichment(task_dir: Path, attempt: int) -> dict:
             if len(sec) > _DIAGNOSIS_SECTION_MAXLEN:
                 sec = sec[:_DIAGNOSIS_SECTION_MAXLEN].rstrip() + " …(截断)"
             out[key] = sec
+    out.update(_extract_direction_metadata(content))
     return out
 
 
@@ -514,16 +582,29 @@ def build_diagnosis_summary(
         "schema_version": DIAGNOSIS_SCHEMA_VERSION,
         "attempt": attempt,
     }
+    structured = diag.get("attempt_metadata")
+    if isinstance(structured, dict):
+        out["attempt_metadata"] = structured
+    for key in ("fix_type", "direction_verdict", "direction_reason",
+                "probe_status", "probe_policy", "probe_policy_pass"):
+        value = diag.get(key)
+        if value is None and isinstance(structured, dict):
+            value = structured.get(key)
+        if value is not None:
+            out[key] = value
     final_response = diag.get("final_response")
     if final_response:
         out["final_response"] = final_response
+        for key, value in _extract_direction_metadata(final_response).items():
+            out.setdefault(key, value)
     changed = diag.get("changed_files")
     if changed is not None:
         out["changed_files"] = changed
     validation = _validation_summary_for_attempt(task_dir, attempt)
     if validation:
         out["validation"] = validation
-    out.update(_audit_enrichment(task_dir, attempt))
+    for key, value in _audit_enrichment(task_dir, attempt).items():
+        out.setdefault(key, value)
 
     # 仅有 schema_version/attempt 两个骨架键 → 本轮无任何实质内容 → None。
     if set(out) <= {"schema_version", "attempt"}:

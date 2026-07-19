@@ -48,6 +48,10 @@ class GateResult:
     prerequisite_error: Optional[str] = None  # 前置校验失败原因 (退出码 2)
     attempt: Optional[int] = None
     max_attempts: Optional[int] = None
+    # Objective validation may move the task to another debug branch.  This is
+    # attached by runner after Gate-V and must survive event replay so the next
+    # attempt does not inherit a stale branch from the previous attempt.
+    failure_type: Optional[str] = None
     checks: dict = field(default_factory=dict)
 
 
@@ -72,6 +76,7 @@ def parse_gate_output(raw: dict) -> GateResult:
         prerequisite_error=pick("prerequisite_error"),
         attempt=pick("attempt"),
         max_attempts=pick("max_attempts"),
+        failure_type=pick("failure_type"),
         checks=checks,
     )
 

@@ -599,5 +599,37 @@ class TestFullEvalLoopSignal(unittest.TestCase):
         self.assertEqual((sig, code), ("CONTINUE", "full_eval_regression"))
 
 
+class TestDirectionMetadataFallback(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.task = Path(self._tmp.name) / "005_FakeOp"
+        self.tuning = self.task / "precision_tuning"
+        self.tuning.mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_diagnosis_summary_populates_tuning_direction(self) -> None:
+        (self.tuning / "diagnosis_summary_attempt_0.json").write_text(json.dumps({
+            "attempt": 0,
+            "fix_type": "FIX_PRECISION_ACCUMULATE_FP32",
+            "direction_verdict": "否",
+            "direction_reason": "改用 FP32 累加",
+        }), encoding="utf-8")
+        (self.tuning / "validation_result_attempt_0.json").write_text(json.dumps({
+            "match_rate": "50.0",
+        }), encoding="utf-8")
+        checker = _LegacyPrecisionChecker("FakeOp", str(self.task), attempt=0)
+        checker._write_round_summary(
+            "validation_failed", {"primary_hint": "scattered", "op_type": "fake"})
+        checker._write_tuning_directions("validation_failed")
+        entry = json.loads(
+            (self.tuning / "tuning_directions.json").read_text(encoding="utf-8")
+        )["entries"][0]
+        self.assertEqual(entry["fix_type"], "FIX_PRECISION_ACCUMULATE_FP32")
+        self.assertEqual(entry["direction_verdict"], "否")
+        self.assertEqual(entry["direction_reason"], "改用 FP32 累加")
+
+
 if __name__ == "__main__":
     unittest.main()

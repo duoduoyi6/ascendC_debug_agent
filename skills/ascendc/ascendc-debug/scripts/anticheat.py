@@ -19,6 +19,8 @@
   - CPP_ATEN_HEADER:<op>:      #include <ATen/ops/<op>.h>（算子头文件基本等于作弊意图）
   - CPP_TORCH_CALL:<op>:       kernel 里调 torch::<非白名单 op>
   - CPP_TENSOR_METHOD:<m>:     kernel 里用 tensor 计算方法（如 x.cumsum()、x.histc()）
+  - CPP_PYTHON_EXEC:<api>:     C++ 扩展导入时执行任意 Python 代码
+  - CPP_GLOBAL_MONKEY_PATCH:   C++/嵌入 Python 修改 torch/torch_npu 全局符号
   - NO_KERNEL_LAUNCH:          kernel/ 里找不到任何 <<<...>>> 或 aclrtLaunchKernel 触发
 
 退出码：verify 0=CLEAN, 1=CHEAT；snapshot/restore 始终 0（除非 IO 错误）。
@@ -71,6 +73,28 @@ ACLRT_LAUNCH_RE = re.compile(r"\b(aclrtLaunchKernel|ACLRT_LAUNCH_KERNEL|Launch[A
 BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 LINE_COMMENT_RE = re.compile(r"//[^\n]*")
 STRING_LITERAL_RE = re.compile(r'"(?:\\.|[^"\\])*"')
+PYTHON_EXEC_RES = (
+    ("PyRun_SimpleString", re.compile(r"\bPyRun_SimpleString(?:Flags)?\s*\(")),
+    ("PyRun_String", re.compile(r"\bPyRun_String(?:Flags)?\s*\(")),
+    ("PyEval_EvalCode", re.compile(r"\bPyEval_EvalCode\s*\(")),
+    ("pybind11::exec", re.compile(r"\b(?:pybind11|py)::exec\s*\(")),
+)
+PYBIND_ATTR_ASSIGN_RE = re.compile(
+    r"\b([A-Za-z_]\w*)\.attr\s*\(\s*[\"']([A-Za-z_]\w*)[\"']\s*\)\s*=(?!=)"
+)
+PYBIND_FRAMEWORK_IMPORT_RE = re.compile(
+    r"\b([A-Za-z_]\w*)\s*=\s*(?:(?:pybind11|py)::)?(?:module_?|module)::import\s*"
+    r"\(\s*[\"'](torch(?:_npu)?(?:\.[A-Za-z_]\w*)*)[\"']\s*\)"
+)
+FRAMEWORK_ASSIGN_RE = re.compile(
+    r"\b((?:torch|torch_npu)(?:\.[A-Za-z_]\w*)+)\s*=(?!=)"
+)
+FRAMEWORK_SETATTR_RE = re.compile(
+    r"\bsetattr\s*\(\s*(torch(?:_npu)?(?:\.[A-Za-z_]\w*)*)\s*,"
+)
+EMBEDDED_FRAMEWORK_IMPORT_RE = re.compile(
+    r"\bimport\s+(torch(?:_npu)?(?:\.[A-Za-z_]\w*)*)\s+as\s+([A-Za-z_]\w*)"
+)
 
 
 def repo_root() -> Path:
@@ -122,6 +146,11 @@ def _strip_comments_and_strings(src: str) -> str:
     return src
 
 
+def _strip_comments(src: str) -> str:
+    """Strip comments but preserve string literals for embedded-Python scanning."""
+    return LINE_COMMENT_RE.sub("", BLOCK_COMMENT_RE.sub("", src))
+
+
 def _line_of(src: str, pos: int) -> int:
     return src[:pos].count("\n") + 1
 
@@ -157,7 +186,59 @@ def _check_cpp_regression(task_dir: Path) -> dict:
             continue
         rel = str(path.relative_to(task_dir))
         files_scanned.append(rel)
+        src_with_strings = _strip_comments(raw)
         src = _strip_comments_and_strings(raw)
+
+        # Runtime Python execution from a pybind extension can redefine the
+        # protected reference API without changing wrapper hashes.  Treat the
+        # execution primitive itself as a violation; normal bindings use m.def
+        # and do not need PyRun/py::exec.
+        for api_name, pattern in PYTHON_EXEC_RES:
+            for m in pattern.finditer(src_with_strings):
+                violations.append({
+                    "file": rel, "line": _line_of(src_with_strings, m.start()),
+                    "type": "CPP_PYTHON_EXEC", "detail": api_name,
+                })
+
+        framework_aliases = {"torch", "torch_npu"}
+        framework_aliases.update(
+            m.group(1) for m in PYBIND_FRAMEWORK_IMPORT_RE.finditer(src_with_strings)
+        )
+        for m in PYBIND_ATTR_ASSIGN_RE.finditer(src_with_strings):
+            receiver, attribute = m.group(1), m.group(2)
+            if receiver not in framework_aliases and not re.search(
+                    r"(?:torch|npu)", receiver, re.IGNORECASE):
+                continue
+            violations.append({
+                "file": rel, "line": _line_of(src_with_strings, m.start()),
+                "type": "CPP_GLOBAL_MONKEY_PATCH",
+                "detail": f'{receiver}.attr("{attribute}") assignment',
+            })
+        for m in FRAMEWORK_ASSIGN_RE.finditer(src_with_strings):
+            violations.append({
+                "file": rel, "line": _line_of(src_with_strings, m.start()),
+                "type": "CPP_GLOBAL_MONKEY_PATCH", "detail": f"{m.group(1)} assignment",
+            })
+        embedded_aliases = {
+            m.group(2): m.group(1)
+            for m in EMBEDDED_FRAMEWORK_IMPORT_RE.finditer(src_with_strings)
+        }
+        for alias, module_name in embedded_aliases.items():
+            alias_assign_re = re.compile(
+                rf"\b({re.escape(alias)}(?:\.[A-Za-z_]\w*)+)\s*=(?!=)"
+            )
+            for m in alias_assign_re.finditer(src_with_strings):
+                canonical = module_name + m.group(1)[len(alias):]
+                violations.append({
+                    "file": rel, "line": _line_of(src_with_strings, m.start()),
+                    "type": "CPP_GLOBAL_MONKEY_PATCH",
+                    "detail": f"{canonical} assignment",
+                })
+        for m in FRAMEWORK_SETATTR_RE.finditer(src_with_strings):
+            violations.append({
+                "file": rel, "line": _line_of(src_with_strings, m.start()),
+                "type": "CPP_GLOBAL_MONKEY_PATCH", "detail": f"setattr({m.group(1)}, ...)",
+            })
 
         if TRIPLE_CHEVRON_RE.search(src) or ACLRT_LAUNCH_RE.search(src):
             launch_found = True

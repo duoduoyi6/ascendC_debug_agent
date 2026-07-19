@@ -655,8 +655,9 @@ class DiffAnalyzer:
                     "confidence": min(0.85, 0.5 + (ratio - 3) * 0.05),
                     "evidence": f"mismatch 均值({mmv:.4f})是正常({nmv:.4f})的{ratio:.1f}倍"}
         if ratio < 0.3:
+            inverse_ratio = float("inf") if ratio <= 0.0 else 1.0 / ratio
             return {"pattern": "magnitude_correlated",
-                    "confidence": min(0.85, 0.5 + (1 / ratio - 3) * 0.05),
+                    "confidence": min(0.85, 0.5 + (inverse_ratio - 3) * 0.05),
                     "evidence": f"mismatch 集中在小值区域"}
         return None
 
