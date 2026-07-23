@@ -70,8 +70,9 @@ V5 继承 V4 的可信成功、外部全量验证、反作弊、知识检索、�
 - 能在目标容器/NPU 上执行初始验证；
 - 初始失败可由统一 failure taxonomy 分类。
 
-启动前必须在隔离副本上对 27/27 算子执行初始验证，并以 round-robin 方式实际覆盖
-NPU 3、4、5、6、7。只有 `build_failed`、`import_failed`、`runtime_error`、
+启动前必须在隔离副本上对 27/27 算子执行 clean build 和初始验证，并以
+round-robin 方式实际覆盖 NPU 3、4、5、6、7。只有 `build_failed`、
+`import_failed`、`runtime_error`、
 `timeout`、`precision_failed` 五种可调试初始失败可纳入；验证成功、分类器错误和
 基础设施不可达均视为 preflight blocker。
 

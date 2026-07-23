@@ -61,7 +61,7 @@ def prepare_isolated_task(target: Target, work_dir: Path) -> None:
     shutil.copytree(target.source, work_dir, ignore=_ignore_copy)
 
 
-def _docker_verify(
+def _docker_build_and_verify(
     *,
     container: str,
     npu: str,
@@ -73,7 +73,8 @@ def _docker_verify(
     shell = (
         'set +e; [ -f "$1" ] && source "$1"; cd "$2"; '
         f"timeout --signal=TERM --kill-after=30 {timeout} "
-        'python3 utils/verification_ascendc.py "$3"'
+        'bash -lc \'python3 utils/build_ascendc.py "$1" --clean '
+        '&& python3 utils/verification_ascendc.py "$1"\' _ "$3"'
     )
     return subprocess.run(
         [
@@ -141,7 +142,7 @@ def evaluate_one(
     result_path.parent.mkdir(parents=True, exist_ok=True)
     prepare_isolated_task(target, work_dir)
 
-    verify = _docker_verify(
+    verify = _docker_build_and_verify(
         container=container,
         npu=npu,
         repo_root=repo_root,

@@ -28,8 +28,8 @@ the deployed Git commit to:
 
 Then run `prepare_v5_runtime.sh`. It builds/starts the container, regenerates
 fingerprints, verifies the actual model, proves all ablation profiles, runs the
-27-task initial-validation preflight across NPU 3-7, and makes source/KB inputs
-read-only.
+27-task clean-build and initial-validation preflight across NPU 3-7, and makes
+source/KB inputs read-only.
 
 Preparation does not start a formal arm. `launch_v5_ablation.sh` remains locked
 until `/root/v5_ablation_control_20260724/ARMED_BY_USER.txt` contains exactly
