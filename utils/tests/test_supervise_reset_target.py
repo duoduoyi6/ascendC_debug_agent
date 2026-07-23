@@ -75,5 +75,16 @@ class ResetTargetTests(unittest.TestCase):
             self.assertTrue((archive / "archive_manifest.json").exists())
 
 
+class SupervisorConfigurationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.text = SCRIPT.read_text(encoding="utf-8")
+
+    def test_kb_read_only_is_recorded_and_forwarded(self) -> None:
+        self.assertIn('parser.add_argument("--kb-read-only", action="store_true")', self.text)
+        self.assertIn('"kb_read_only": args.kb_read_only', self.text)
+        self.assertIn('cmd.append("--kb-read-only")', self.text)
+
+
 if __name__ == "__main__":
     unittest.main()

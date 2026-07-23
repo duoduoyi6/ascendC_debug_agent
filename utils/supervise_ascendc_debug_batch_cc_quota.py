@@ -542,6 +542,7 @@ def write_manifest(path: Path, args: argparse.Namespace, providers: list[Provide
             "max_task_turns": args.max_task_turns,
             "ablate_profile": args.ablate_profile,
             "kb_path": str(args.kb_path) if args.kb_path else None,
+            "kb_read_only": args.kb_read_only,
             "max_cycles": args.max_cycles,
             "agent": args.agent,
             "entry_failure_type": args.entry_failure_type,
@@ -575,6 +576,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--agent", default="constructive")
     parser.add_argument("--entry-failure-type", default="precision_failed")
     parser.add_argument("--kb-path", type=Path, default=None)
+    parser.add_argument("--kb-read-only", action="store_true")
     parser.add_argument("--tilelang-env", default="/home/wsx/tilelang-ascend/set_env.sh")
     parser.add_argument("--claude-bin", default="claude")
     parser.add_argument("--usage-timeout", type=int, default=10)
@@ -699,6 +701,8 @@ def main() -> int:
                 cmd.extend(["--ablate-profile", str(args.ablate_profile)])
             if args.kb_path:
                 cmd.extend(["--kb-path", str(args.kb_path)])
+            if args.kb_read_only:
+                cmd.append("--kb-read-only")
             if mixed_provider:
                 cmd.extend(
                     [
