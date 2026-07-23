@@ -104,8 +104,15 @@ ABLATE_PROFILE="${ABLATE_PROFILE:-full}"
 case "$ABLATE_PROFILE" in
     full)         ;;
     no_kb)        export ABLATE_KB=1; KB_PATH="" ;;
-    no_forensics) export ABLATE_FORENSICS=1 ;;
-    no_probe)     export ABLATE_PROBE=1 ;;
+    no_diagnostic_evidence)
+                  # V5 联合消融：关闭 engine-owned forensics（连带依赖它的
+                  # knowledge_search）和 L5 probe，但保留 diagnose_and_fix、
+                  # Gate-A、full-eval、loopguard、recovery 与 anti-cheat。
+                  export ABLATE_FORENSICS=1
+                  export ABLATE_PROBE=1 ;;
+    no_forensics|no_probe)
+                  echo "$ABLATE_PROFILE 已从 V5 正式矩阵移除；请使用 no_diagnostic_evidence"
+                  exit 1 ;;
     no_anticheat) export ABLATE_ANTICHEAT=1 ;;
     no_loopguard) export ABLATE_LOOP_GUARD=1 ;;
     debug_no_audit) export ABLATE_GATE_A=1 ;;

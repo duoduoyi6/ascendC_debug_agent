@@ -108,6 +108,23 @@ class TestAblationProfiles(unittest.TestCase):
     def test_no_kb_sets_hard_guard(self):
         self.assertIn("no_kb)        export ABLATE_KB=1; KB_PATH=\"\" ;;", self.text)
 
+    def test_no_diagnostic_evidence_disables_forensics_and_probe(self):
+        profile = self.text.split("no_diagnostic_evidence)", 1)[1].split(
+            "no_forensics|no_probe)", 1
+        )[0]
+        self.assertIn("export ABLATE_FORENSICS=1", profile)
+        self.assertIn("export ABLATE_PROBE=1", profile)
+        self.assertNotIn("export ABLATE_GATE_A=1", profile)
+        self.assertNotIn("export ABLATE_FULL_EVAL=1", profile)
+        self.assertNotIn("export ABLATE_LOOP_GUARD=1", profile)
+        self.assertNotIn("export ABLATE_RECOVERY=1", profile)
+        self.assertNotIn("export ABLATE_ANTICHEAT=1", profile)
+
+    def test_legacy_split_diagnostic_profiles_are_rejected(self):
+        self.assertIn("no_forensics|no_probe)", self.text)
+        self.assertIn("已从 V5 正式矩阵移除", self.text)
+        self.assertIn("请使用 no_diagnostic_evidence", self.text)
+
     def test_baseline_disables_recovery_and_kb(self):
         self.assertIn("export ABLATE_RECOVERY=1;  export ABLATE_KB=1", self.text)
 
