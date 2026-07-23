@@ -335,6 +335,22 @@ def run_debug_session(
             transition.record_action_completed(task_dir, decision, action_id, result)
             if (
                 decision.step == "diagnose_and_fix"
+                and result.get("ablation_violation")
+            ):
+                return _term(Abort(
+                    category="ablation_violation",
+                    reason=(
+                        "Agent added probe instrumentation while the engine "
+                        "probe policy required skip"
+                    ),
+                    details={
+                        "session_outcome": "ablation_violation",
+                        "probe_record_path": result.get("probe_record_path"),
+                        "probe_source_audit_path": result.get(
+                            "probe_source_audit_path"),
+                    }))
+            if (
+                decision.step == "diagnose_and_fix"
                 and result.get("provider_error")
             ):
                 return _term(Abort(

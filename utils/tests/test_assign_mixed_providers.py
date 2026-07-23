@@ -16,6 +16,7 @@ from assign_mixed_providers import (  # noqa: E402
     remaining_percent,
     weighted_assign,
     write_assignment,
+    write_fixed_assignment,
 )
 
 
@@ -111,6 +112,76 @@ class MixedProviderAssignmentTests(unittest.TestCase):
             self.assertEqual(payload["status"], "assigned")
             self.assertEqual(len(queue_text.splitlines()), 2)
             self.assertEqual((root / ".provider_env" / "a.env").stat().st_mode & 0o777, 0o600)
+
+    def test_fixed_assignment_reuses_exact_mapping_without_old_env_paths(self):
+        fixed = {
+            "provider_names": ["a", "b", "c"],
+            "assignments": [
+                {"task_dir": "/tasks/one", "provider": "b",
+                 "provider_env": "/stale/secret.env"},
+                {"task_dir": "/tasks/two", "provider": "a",
+                 "provider_env": "/stale/other.env"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            queue = root / ".queue"
+            payload = write_fixed_assignment(
+                output=root,
+                queue_path=queue,
+                tasks=["/tasks/one", "/tasks/two"],
+                providers=self.providers,
+                fixed_payload=fixed,
+                source_path=Path("/prior/provider_assignments.json"),
+            )
+            rows = queue.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(rows[0].split("\t")[:2], ["/tasks/one", "b"])
+            self.assertEqual(rows[1].split("\t")[:2], ["/tasks/two", "a"])
+            self.assertNotIn("/stale/", "\n".join(rows))
+            self.assertEqual(payload["policy"], "fixed_manifest")
+            self.assertEqual(
+                (root / ".provider_env" / "a.env").stat().st_mode & 0o777,
+                0o600,
+            )
+
+    def test_fixed_assignment_rejects_task_set_drift(self):
+        fixed = {
+            "provider_names": ["a", "b", "c"],
+            "assignments": [
+                {"task_dir": "/tasks/one", "provider": "a"},
+                {"task_dir": "/tasks/extra", "provider": "b"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaisesRegex(ValueError, "task set mismatch"):
+                write_fixed_assignment(
+                    output=root,
+                    queue_path=root / ".queue",
+                    tasks=["/tasks/one", "/tasks/two"],
+                    providers=self.providers,
+                    fixed_payload=fixed,
+                    source_path=Path("/prior/provider_assignments.json"),
+                )
+
+    def test_fixed_assignment_rejects_provider_pool_drift(self):
+        fixed = {
+            "provider_names": ["a", "b"],
+            "assignments": [
+                {"task_dir": "/tasks/one", "provider": "a"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaisesRegex(ValueError, "provider pool mismatch"):
+                write_fixed_assignment(
+                    output=root,
+                    queue_path=root / ".queue",
+                    tasks=["/tasks/one"],
+                    providers=self.providers,
+                    fixed_payload=fixed,
+                    source_path=Path("/prior/provider_assignments.json"),
+                )
 
 
 if __name__ == "__main__":

@@ -56,7 +56,7 @@ cp "{task_dir}/model_new_ascendc.py" \
 >
 > 本 Step 描述的「产出时机 / 顺序」由引擎主循环保证：Step 5/6 的实质动作（归档/全量验证/知识库写入）先完成，引擎抵达终态时最后重建退出产物。
 
-> **退出前最后一步（所有结局共用）**：无论 session 以 `success` / `failed` / `stopped_by_gate` / `stopped_by_loop_limit` / `stopped_by_budget` / `degenerate_no_progress` / `timeout` / `skipped_env_issue` / `skipped_unsupported_type` / `crashed` / `provider_api_error` 中哪种结局退出，引擎**必须**在退出前产出以下两份文件。任一缺失将导致本次 debug 叙事丢失、下游无法判定结果。
+> **退出前最后一步（所有结局共用）**：无论 session 以 `success` / `failed` / `stopped_by_gate` / `stopped_by_attempt_limit` / `stopped_by_branch_limit` / `stopped_by_budget` / `degenerate_no_progress` / `timeout` / `skipped_env_issue` / `skipped_unsupported_type` / `crashed` / `provider_api_error` / `ablation_violation` 中哪种结局退出，引擎**必须**在退出前产出以下两份文件。`stopped_by_loop_limit` 仅用于读取旧产物。任一缺失将导致本次 debug 叙事丢失、下游无法判定结果。
 >
 > 执行顺序：Step 5/6 的实质动作（归档/全量验证/知识库写入）先完成，Step 7 最后执行（需要其产出的数值写入 `debug_trace.md`），然后再输出 Step 5/6 的最终报告。
 
@@ -94,7 +94,7 @@ cp "{task_dir}/model_new_ascendc.py" \
 ### Attempt 1 ... N（同上）
 
 ## 3. 最终 Verdict（强制）
-- session_outcome: success / failed / stopped_by_gate / stopped_by_loop_limit / stopped_by_budget / degenerate_no_progress / timeout / skipped_env_issue / skipped_unsupported_type / crashed / provider_api_error
+- session_outcome: success / failed / stopped_by_gate / stopped_by_attempt_limit / stopped_by_branch_limit / stopped_by_budget / degenerate_no_progress / timeout / skipped_env_issue / skipped_unsupported_type / crashed / provider_api_error / ablation_violation
 - 退出时 verify_status 快照
 - 若 success: 确认全量 `.json.bak` 恢复后 verify 通过
 - 若 failed / stopped_*: 明确原因
@@ -132,7 +132,7 @@ cp "{task_dir}/model_new_ascendc.py" \
 ```json
 {
   "schema_version": 1,
-  "session_outcome": "success | failed | stopped_by_gate | stopped_by_loop_limit | stopped_by_budget | degenerate_no_progress | timeout | skipped_env_issue | skipped_unsupported_type | crashed | provider_api_error",
+  "session_outcome": "success | failed | stopped_by_gate | stopped_by_attempt_limit | stopped_by_branch_limit | stopped_by_budget | degenerate_no_progress | timeout | skipped_env_issue | skipped_unsupported_type | crashed | provider_api_error | ablation_violation",
   "session_branch": "1-P | 1-B | 1-I | 1-R | 1-T",
   "started_at": "<ISO>",
   "ended_at": "<ISO>",

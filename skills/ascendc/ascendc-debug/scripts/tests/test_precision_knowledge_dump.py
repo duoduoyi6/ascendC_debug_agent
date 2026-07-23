@@ -12,6 +12,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
@@ -73,6 +74,27 @@ class TestDerivedKeywordBackfill(unittest.TestCase):
         e, _, _ = _dump(self.tmp, "001_Op",
                         _candidate("x", patterns=["all_wrong"]))
         self.assertNotIn("derived_keywords", e)
+
+    def test_read_only_mode_rejects_dump_without_mutation(self):
+        candidate = _candidate(
+            "readonly", op_types=["matmul"], patterns=["all_wrong"])
+        with mock.patch.dict(
+                os.environ, {"ASCENDC_DEBUG_KB_READ_ONLY": "1"}):
+            entry, err, kb = _dump(
+                self.tmp, "006_QuantMatmul", candidate, kb_init=[])
+        self.assertIsNone(entry)
+        self.assertIn("READ_ONLY", err)
+        self.assertEqual(kb, [])
+
+    def test_no_kb_mode_rejects_dump_without_mutation(self):
+        candidate = _candidate(
+            "ablated", op_types=["matmul"], patterns=["all_wrong"])
+        with mock.patch.dict(os.environ, {"ABLATE_KB": "1"}):
+            entry, err, kb = _dump(
+                self.tmp, "006_QuantMatmul", candidate, kb_init=[])
+        self.assertIsNone(entry)
+        self.assertIn("ABLATE_KB", err)
+        self.assertEqual(kb, [])
 
 
 class TestRetrievabilitySelfCheck(unittest.TestCase):

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Assign cycle tasks across currently usable Kimi providers.
+"""Assign cycle tasks across Kimi providers.
 
-The assignment is deterministic and sticky for the lifetime of one task run.
+The default mode uses live quota. Fixed-manifest mode replays an exact prior
+task-to-provider mapping without querying quota.
 API keys are written only to mode-0600 env files; queue and manifest artifacts
 contain provider names and env paths, never key material.
 """
@@ -186,6 +187,95 @@ def write_assignment(
     }
 
 
+def write_fixed_assignment(
+    *,
+    output: Path,
+    queue_path: Path,
+    tasks: list[str],
+    providers: list[Provider],
+    fixed_payload: dict[str, Any],
+    source_path: Path,
+) -> dict[str, Any]:
+    """Recreate a prior task-to-provider mapping without querying live quota.
+
+    The prior manifest's env paths are intentionally ignored. Fresh mode-0600
+    env files are reconstructed from the current key config, while task and
+    provider identities must match exactly.
+    """
+    raw_assignments = fixed_payload.get("assignments")
+    if not isinstance(raw_assignments, list):
+        raise ValueError("fixed provider manifest has no assignments list")
+    if len(tasks) != len(set(tasks)):
+        raise ValueError("tasks file contains duplicate task paths")
+
+    mapping: dict[str, str] = {}
+    for item in raw_assignments:
+        if not isinstance(item, dict):
+            raise ValueError("fixed provider assignment must be an object")
+        task = item.get("task_dir")
+        provider_name = item.get("provider")
+        if not isinstance(task, str) or not task:
+            raise ValueError("fixed provider assignment has invalid task_dir")
+        if not isinstance(provider_name, str) or not provider_name:
+            raise ValueError(f"fixed provider assignment for {task!r} has no provider")
+        if task in mapping:
+            raise ValueError(f"duplicate fixed assignment for task {task}")
+        mapping[task] = provider_name
+
+    missing = sorted(set(tasks) - set(mapping))
+    extra = sorted(set(mapping) - set(tasks))
+    if missing or extra:
+        raise ValueError(
+            f"fixed task set mismatch: missing={missing}, extra={extra}"
+        )
+
+    provider_by_name = {provider.name: provider for provider in providers}
+    referenced = set(mapping.values())
+    unknown = sorted(referenced - set(provider_by_name))
+    if unknown:
+        raise ValueError(f"fixed mapping references unknown providers: {unknown}")
+    declared_names = fixed_payload.get("provider_names")
+    if isinstance(declared_names, list):
+        declared = {str(name) for name in declared_names}
+        configured = set(provider_by_name)
+        if declared != configured:
+            raise ValueError(
+                "provider pool mismatch between fixed manifest and key config: "
+                f"manifest={sorted(declared)}, config={sorted(configured)}"
+            )
+
+    env_root = output / ".provider_env"
+    env_paths: dict[str, Path] = {}
+    for provider_name in sorted(referenced):
+        provider = provider_by_name[provider_name]
+        env_path = env_root / f"{_safe_name(provider.name)}.env"
+        write_provider_env(env_path, provider)
+        env_paths[provider.name] = env_path
+
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+    with queue_path.open("w", encoding="utf-8") as queue:
+        for task in tasks:
+            provider_name = mapping[task]
+            queue.write(
+                f"{task}\t{provider_name}\t{env_paths[provider_name]}\n"
+            )
+
+    return {
+        "status": "assigned",
+        "policy": "fixed_manifest",
+        "fixed_assignment_source": str(source_path),
+        "usage": [],
+        "assignments": [
+            {
+                "task_dir": task,
+                "provider": mapping[task],
+                "provider_env": str(env_paths[mapping[task]]),
+            }
+            for task in tasks
+        ],
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--key-config", type=Path, required=True)
@@ -194,6 +284,15 @@ def main() -> int:
     parser.add_argument("--queue", type=Path, required=True)
     parser.add_argument("--min-remaining", type=float, default=10.0)
     parser.add_argument("--usage-timeout", type=int, default=20)
+    parser.add_argument(
+        "--fixed-assignments",
+        type=Path,
+        default=None,
+        help=(
+            "reuse an existing provider_assignments.json exactly; "
+            "skip live quota-based remapping"
+        ),
+    )
     args = parser.parse_args()
 
     tasks = [
@@ -202,15 +301,40 @@ def main() -> int:
         if line.strip()
     ]
     providers = load_providers(args.key_config)
-    usage = [query_kimi_usage(provider, args.usage_timeout) for provider in providers]
-    payload = write_assignment(
-        output=args.output,
-        queue_path=args.queue,
-        tasks=tasks,
-        providers=providers,
-        usage=usage,
-        min_remaining=max(0.0, args.min_remaining),
-    )
+    try:
+        if args.fixed_assignments is not None:
+            fixed_payload = json.loads(
+                args.fixed_assignments.read_text(encoding="utf-8")
+            )
+            payload = write_fixed_assignment(
+                output=args.output,
+                queue_path=args.queue,
+                tasks=tasks,
+                providers=providers,
+                fixed_payload=fixed_payload,
+                source_path=args.fixed_assignments,
+            )
+        else:
+            usage = [
+                query_kimi_usage(provider, args.usage_timeout)
+                for provider in providers
+            ]
+            payload = write_assignment(
+                output=args.output,
+                queue_path=args.queue,
+                tasks=tasks,
+                providers=providers,
+                usage=usage,
+                min_remaining=max(0.0, args.min_remaining),
+            )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        payload = {
+            "status": "invalid_fixed_assignment",
+            "policy": "fixed_manifest",
+            "error": str(exc),
+            "assignments": [],
+            "usage": [],
+        }
     payload.update(
         {
             "key_config": str(args.key_config),
@@ -223,6 +347,9 @@ def main() -> int:
     if payload["status"] == "assigned":
         print(manifest)
         return 0
+    if payload["status"] == "invalid_fixed_assignment":
+        print(payload["error"], file=sys.stderr)
+        return 4
     print("no provider has positive five-hour and weekly quota", file=sys.stderr)
     return 3
 

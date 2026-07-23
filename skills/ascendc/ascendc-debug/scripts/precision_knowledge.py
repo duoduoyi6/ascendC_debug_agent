@@ -109,6 +109,16 @@ VALID_PATTERNS = [
 REQUIRED_FIELDS = ["title", "feature", "reason", "fix", "type"]
 
 
+def _kb_disabled() -> bool:
+    """Hard guard for the no_kb arm, including direct Agent CLI calls."""
+    return os.environ.get("ABLATE_KB") == "1"
+
+
+def _kb_read_only() -> bool:
+    """Whether reads are allowed but mutation is forbidden."""
+    return os.environ.get("ASCENDC_DEBUG_KB_READ_ONLY") == "1"
+
+
 def _is_valid_entry(entry: dict) -> bool:
     """校验知识库条目格式：文本字段非空 + patterns/op_types 为 list。"""
     for k in REQUIRED_FIELDS:
@@ -160,6 +170,10 @@ def _jaccard(set_a: set, set_b: set) -> float:
 
 def load_knowledge_base(kb_path: str) -> list:
     """加载知识库, 返回条目列表"""
+    if _kb_disabled():
+        print("[KB] disabled by ABLATE_KB=1", file=sys.stderr)
+        print("[]")
+        return []
     if not os.path.exists(kb_path):
         print(f"[KB] ⚠️ 知识库文件不存在: {kb_path}, 使用空知识库", file=sys.stderr)
         return []
@@ -409,6 +423,12 @@ def search_knowledge_base(kb_path: str, op_type: str | None = None,
         "fallback_to_full_load": bool
       }
     """
+    if _kb_disabled():
+        result = _empty_search_result(op_type, pattern, position, top_k, op_name)
+        result["disabled_by_ablation"] = True
+        print("[KB-SEARCH] disabled by ABLATE_KB=1", file=sys.stderr)
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return result
     if not os.path.exists(kb_path):
         print(f"[KB-SEARCH] ⚠️ 知识库文件不存在: {kb_path}", file=sys.stderr)
         return _empty_search_result(op_type, pattern, position, top_k, op_name)
@@ -554,6 +574,15 @@ def check_similarity(kb_path: str, candidate_path: str,
         "suggestion": "new | review_needed"
       }
     """
+    if _kb_disabled():
+        result = {
+            "similar_entries": [],
+            "suggestion": "disabled",
+            "disabled_by_ablation": True,
+        }
+        print("[KB-CHECK] disabled by ABLATE_KB=1", file=sys.stderr)
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return result
     if not os.path.exists(candidate_path):
         print(f"[KB-CHECK] ⚠️ 候选条目文件不存在: {candidate_path}", file=sys.stderr)
         return {}
@@ -664,6 +693,14 @@ def dump_success_knowledge(kb_path: str, task_dir: str, op_name: str,
 
     读取: {task_dir}/precision_tuning/candidate_kb_entry.json
     """
+    if _kb_disabled():
+        print("[KB] dump rejected: ABLATE_KB=1", file=sys.stderr)
+        return None
+    if _kb_read_only():
+        print("[KB] dump rejected: ASCENDC_DEBUG_KB_READ_ONLY=1",
+              file=sys.stderr)
+        return None
+
     tuning_dir = os.path.join(task_dir, "precision_tuning")
 
     # 1. 读取候选条目

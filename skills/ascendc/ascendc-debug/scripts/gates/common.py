@@ -377,14 +377,16 @@ def run_common(step: str, task_dir: Path, op_name: str, attempt: int) -> GateOut
             ast_failed and not checks.get("ast_validator_errored")
         )
         if confirmed_cheat and step == "validate":
+            # detect-only is a pure observer: it may persist evidence, but may
+            # not alter either PASS/CONTINUE/STOP routing or the next prompt.
+            if os.environ.get("ANTICHEAT_DETECT_ONLY") == "1":
+                checks["anticheat_detect_only"] = True
+                checks["would_block_cheat_detected"] = bool(
+                    _read_correctness_passed(task_dir, attempt)
+                )
+                return GateOutcome(
+                    gate=f"GATE-COMMON-{step}", ok=ok, checks=checks)
             if _read_correctness_passed(task_dir, attempt):
-                # detect-only (baseline arm): 检测+记录照常，但不运行期阻断。带作弊的
-                # success 放行计入 objective_success，cheat_history 仍留证、exit_artifacts
-                # 仍据此标 success_category=cheat_or_invalid → 假阳性可见，量化反作弊拦截量。
-                if os.environ.get("ANTICHEAT_DETECT_ONLY") == "1":
-                    checks["anticheat_detect_only"] = True
-                    checks["would_block_cheat_detected"] = True
-                    return GateOutcome(gate=f"GATE-COMMON-{step}", ok=ok, checks=checks)
                 # stop_reason_code 经 checks 透传 (与 branch 层 _legacy_to_outcome 同路径:
                 # GateOutcome 无该字段，to_gate_output 输出 checks，parse_gate_output 再提升)。
                 checks["stop_reason_code"] = "cheat_detected"

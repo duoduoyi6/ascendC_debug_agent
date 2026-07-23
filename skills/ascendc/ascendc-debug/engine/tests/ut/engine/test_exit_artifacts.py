@@ -5,9 +5,11 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from engine import transition as tr
 from engine.exit_artifacts import (
@@ -69,6 +71,9 @@ class TestDebugStatus(unittest.TestCase):
         (tuning / "probe_policy_attempt0.json").write_text(json.dumps({
             "attempt": 0, "policy": "skip", "observed_status": "executed",
             "policy_pass": False,
+            "source_audit_pass": False,
+            "source_audit_path": "precision_tuning/probe_source_audit_attempt0.json",
+            "ablation_violation": True,
         }), encoding="utf-8")
         (tuning / "probe_policy_attempt1.json").write_text(json.dumps({
             "attempt": 1, "policy": "conditional", "observed_status": "unknown",
@@ -79,6 +84,41 @@ class TestDebugStatus(unittest.TestCase):
         self.assertFalse(status["probe_policy_compliant"])
         self.assertEqual(status["probe_policy_violations"], 1)
         self.assertEqual(status["probe_policy_unknown"], 1)
+        self.assertFalse(
+            status["probe_policy_records"][0]["source_audit_pass"])
+        self.assertTrue(
+            status["probe_policy_records"][0]["ablation_violation"])
+
+    def test_no_anticheat_ignores_stale_prior_run_evidence(self) -> None:
+        tr.record_session_started(self.task_dir, op_name="add", agent="constructive",
+                                  entry_failure_type="precision_failed")
+        tr.record_attempt_started(self.task_dir, Continue(0, "precision_failed"))
+        action = Action(kind="run_skill", name="validate", step="validate")
+        action_id = tr.new_action_id()
+        tr.record_action_started(self.task_dir, action, action_id)
+        tr.record_action_completed(
+            self.task_dir, action, action_id,
+            {"objective_validation": {"verification_exit_code": 0}})
+        tr.record_decision(self.task_dir, Done(session_outcome="success", reason="ok"))
+
+        tuning = self.task_dir / "precision_tuning"
+        tuning.mkdir()
+        (tuning / "cheat_history.json").write_text(json.dumps({
+            "cheating_attempts": [{"severity": "violation"}],
+        }), encoding="utf-8")
+        (self.task_dir / "_anticheat.json").write_text(json.dumps({
+            "verdict": "CHEAT",
+            "details": {"ast": {"status": "fail"}},
+        }), encoding="utf-8")
+
+        with mock.patch.dict(os.environ, {"ABLATE_ANTICHEAT": "1"}):
+            status = build_debug_status(self.task_dir)
+        self.assertTrue(status["objective_success"])
+        self.assertTrue(status["anti_cheat_pass"])
+        self.assertIsNone(status["ast_degrade_pass"])
+        self.assertFalse(status["reportable_success"])
+        self.assertEqual(
+            status["success_category"], "wrapper_assisted_success")
 
     def test_no_terminal_event_is_crashed(self) -> None:
         # 异常中断 (无终态事件) → crashed。

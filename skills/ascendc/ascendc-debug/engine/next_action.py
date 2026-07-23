@@ -174,6 +174,11 @@ def _task_turn_budget(state: DebugState) -> tuple[Optional[int], str]:
     hard = _max_task_turns()
     if hard is None:
         return None, "disabled"
+    # no_loopguard removes adaptive early termination.  Keep the declared hard
+    # safety cap, but do not let the evidence-gated soft tier change this arm's
+    # behavior.
+    if os.environ.get("ABLATE_LOOP_GUARD") == "1":
+        return hard, "hard_no_loopguard"
     soft = _soft_task_turns()
     if soft is None or soft >= hard:
         return hard, "hard"
@@ -247,7 +252,7 @@ def _degenerate_continue_streak(state: DebugState) -> int:
     return streak
 
 
-# 分支硬上限: 撞上即停 session (stopped_by_loop_limit)。precision 比其他分支宽，因为
+# 分支硬上限: 撞上即停 session (stopped_by_branch_limit)。precision 比其他分支宽，因为
 # 精度调优本就需要更多轮次试探；build/import/runtime/timeout 是确定性错误，3 轮够。
 # env ASCENDC_DEBUG_BRANCH_CAP_<FT>=<N> 可逐分支覆盖。
 _DEFAULT_BRANCH_CAP = {
@@ -297,7 +302,7 @@ _NONWHITELIST_OUTCOME = {
 # ---------------------------------------------------------------------------
 _STOP_OUTCOME = {
     "prerequisite_failure": "stopped_by_gate",
-    "max_attempts_reached": "stopped_by_loop_limit",
+    "max_attempts_reached": "stopped_by_attempt_limit",
     # 以下均归 failed；nearly_success / fp16_precision_ceiling 由 stop_reason_code
     # 字段在论文统计时单独拆「准通过」子类，session_outcome 仍是 failed。
     "harmful_regression": "failed",
@@ -331,7 +336,12 @@ def _round_sequence(failure_type: str) -> tuple[str, ...]:
     seq = _PRECISION_ROUND_SEQUENCE if failure_type == "precision_failed" else _ROUND_SEQUENCE
     skip = set()
     if os.environ.get("ABLATE_FORENSICS") == "1":
-        skip.add("forensics")
+        # knowledge_search consumes the structured forensics report.  Leaving it
+        # enabled would make no_forensics depend on manually/stale-created
+        # reports and would no longer be a strict ablation.
+        skip.update(("forensics", "knowledge_search"))
+    if os.environ.get("ABLATE_KB") == "1":
+        skip.add("knowledge_search")
     if os.environ.get("ABLATE_GATE_A") == "1":
         skip.add("audit")
     return tuple(s for s in seq if s not in skip) if skip else seq
@@ -516,6 +526,8 @@ def _protection_actions_enabled(state: DebugState) -> bool:
     runner-owned session, including old sessions resumed after this upgrade,
     has session_started and therefore gets the recovery barrier.
     """
+    if os.environ.get("ABLATE_RECOVERY") == "1":
+        return False
     return any(event.get("type") == "session_started" for event in state.events)
 
 
@@ -544,13 +556,13 @@ def _protection_action(step: str, failure_type: str, attempt: int) -> Action:
 
 def _budget_limit_decision(state: DebugState, failure_type: str) -> Optional[Done]:
     if state.total_attempts >= _max_attempts():
-        return Done(session_outcome="stopped_by_loop_limit",
+        return Done(session_outcome="stopped_by_attempt_limit",
                     reason=f"达全局 MAX_ATTEMPTS={_max_attempts()}")
     if state.branch_attempt(failure_type) >= _branch_cap(failure_type):
-        return Done(session_outcome="stopped_by_loop_limit",
+        return Done(session_outcome="stopped_by_branch_limit",
                     reason=f"分支 {failure_type} 撞硬上限 {_branch_cap(failure_type)}")
     # 修复 4b-B: 任务级累计 turns 闸 (env 未设时不启用)。放在 loop_limit 之后——
-    # 撞轮次上限优先归 stopped_by_loop_limit (更精确)，仅未撞轮次但累计 turns 超标时
+    # 撞轮次上限优先归对应 attempt/branch outcome，仅未撞轮次但累计 turns 超标时
     # 才归 stopped_by_budget。本函数只在续跑路径 (gate CONTINUE / 兜底) 前被调用，
     # gate PASS/STOP 直接 return 不经此 → 天然满足「终判优先于预算闸」(H1)。
     return _turn_budget_limit_decision(state)
@@ -665,7 +677,7 @@ def debug_next_action(state: DebugState, gate_result: Optional[GateResult] = Non
 
     # ---- 2. 本轮 validate 已完成 → gate 终判优先于预算闸 (H1) ----
     # 本轮是终态轮时，gate 的 PASS/STOP 才是真实结局，不能被预算闸覆盖成
-    # stopped_by_loop_limit。gate_result 缺失 (crash-resume) 时从事件流重建 (H2)。
+    # attempt/branch limit。gate_result 缺失 (crash-resume) 时从事件流重建 (H2)。
     completed = _completed_steps_this_attempt(state)
 
     if (

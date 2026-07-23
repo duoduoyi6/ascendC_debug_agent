@@ -221,9 +221,9 @@ class TestAntiCheatDetectOnly(unittest.TestCase):
                 os.environ["ANTICHEAT_DETECT_ONLY"] = prev
         self.addCleanup(_restore)
 
-    def _run_validate_cheat_success(self):
+    def _run_validate_cheat(self, *, correctness_passed=True):
         with tempfile.TemporaryDirectory() as d:
-            task = _make_task(Path(d), correctness_passed=True)
+            task = _make_task(Path(d), correctness_passed=correctness_passed)
             orig = common.check_ast_degrade
             common.check_ast_degrade = lambda _t: {
                 "ast_validator_present": True, "ast_degrade_pass": False}
@@ -239,7 +239,7 @@ class TestAntiCheatDetectOnly(unittest.TestCase):
     def test_detect_only_success_plus_cheat_not_blocked(self) -> None:
         # detect-only: success + 作弊 → 不 STOP，放行 (与 B 场景默认阻断对照)。
         self._set_detect_only("1")
-        outcome, hist = self._run_validate_cheat_success()
+        outcome, hist = self._run_validate_cheat()
         out = outcome.to_gate_output()
         self.assertNotEqual(out.get("checks", {}).get("stop_reason_code"), "cheat_detected")
         self.assertNotEqual(out.get("loop_signal"), "STOP")
@@ -248,10 +248,18 @@ class TestAntiCheatDetectOnly(unittest.TestCase):
                             for e in hist["cheating_attempts"]))
         self.assertTrue(out["checks"].get("would_block_cheat_detected"))
 
+    def test_detect_only_failure_plus_cheat_does_not_force_continue(self) -> None:
+        self._set_detect_only("1")
+        outcome, hist = self._run_validate_cheat(correctness_passed=False)
+        out = outcome.to_gate_output()
+        self.assertIsNone(out.get("loop_signal"))
+        self.assertFalse(out["checks"].get("would_block_cheat_detected"))
+        self.assertTrue(hist["cheating_attempts"])
+
     def test_default_still_blocks_when_detect_only_off(self) -> None:
         # 对照: 不设 detect-only → 维持原 STOP cheat_detected。
         self._set_detect_only(None)
-        outcome, _ = self._run_validate_cheat_success()
+        outcome, _ = self._run_validate_cheat()
         out = outcome.to_gate_output()
         self.assertEqual(out["loop_signal"], "STOP")
         self.assertEqual(out["checks"]["stop_reason_code"], "cheat_detected")

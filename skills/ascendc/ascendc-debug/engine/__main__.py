@@ -32,6 +32,8 @@ _OUTCOME_EXIT_CODE = {
     "failed": 1,
     "stopped_by_gate": 2,
     "stopped_by_loop_limit": 3,
+    "stopped_by_attempt_limit": 12,
+    "stopped_by_branch_limit": 13,
     "timeout": 4,
     "skipped_env_issue": 5,
     "skipped_unsupported_type": 6,
@@ -39,6 +41,7 @@ _OUTCOME_EXIT_CODE = {
     "provider_api_error": 8,
     "stopped_by_budget": 9,
     "degenerate_no_progress": 10,
+    "ablation_violation": 11,
 }
 
 # PLACEHOLDER_MAIN

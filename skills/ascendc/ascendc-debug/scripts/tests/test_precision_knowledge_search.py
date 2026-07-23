@@ -11,6 +11,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
@@ -60,6 +61,17 @@ class TestOpNameKeywords(unittest.TestCase):
 
     def test_none_returns_empty(self):
         self.assertEqual(pk._op_name_keywords(None), set())
+
+
+class TestKnowledgeAblation(unittest.TestCase):
+    def test_search_does_not_read_entries_when_kb_is_ablated(self):
+        path = _write_kb([_entry("sentinel", op_types=["matmul"])])
+        self.addCleanup(lambda: os.unlink(path))
+        with mock.patch.dict(os.environ, {"ABLATE_KB": "1"}):
+            result = _silent_search(path, op_type="matmul")
+        self.assertEqual(result["matched_entries"], [])
+        self.assertEqual(result["total_kb_size"], 0)
+        self.assertTrue(result["disabled_by_ablation"])
 
 
 class TestIdfWeighting(unittest.TestCase):

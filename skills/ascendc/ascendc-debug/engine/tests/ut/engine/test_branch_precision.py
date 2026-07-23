@@ -130,6 +130,41 @@ class TestStagnantLoopSignalMapping(unittest.TestCase):
         self.assertEqual(sig, "STOP")
         self.assertEqual(code, "stagnant_same_direction")
 
+    def test_no_loopguard_disables_stagnant_direction_stop(self) -> None:
+        _audit_path(self.task, 2).write_text(
+            "[DIRECTION_ASSESSMENT]\n本轮是否延续上一轮方向: 是\n",
+            encoding="utf-8")
+        previous = os.environ.get("ABLATE_LOOP_GUARD")
+        os.environ["ABLATE_LOOP_GUARD"] = "1"
+        try:
+            sig, _reason, code = self._signal()
+        finally:
+            if previous is None:
+                os.environ.pop("ABLATE_LOOP_GUARD", None)
+            else:
+                os.environ["ABLATE_LOOP_GUARD"] = previous
+        self.assertEqual(sig, "CONTINUE")
+        self.assertIsNone(code)
+
+    def test_no_loopguard_disables_fp16_ceiling_and_harmful_regression(self) -> None:
+        previous = os.environ.get("ABLATE_LOOP_GUARD")
+        os.environ["ABLATE_LOOP_GUARD"] = "1"
+        original_fp16 = self.checker._check_fp16_ceiling
+        original_regression = self.checker._detect_harmful_regression
+        self.checker._check_fp16_ceiling = lambda _data: True
+        self.checker._detect_harmful_regression = lambda _trend: True
+        try:
+            sig, _reason, code = self._signal()
+        finally:
+            self.checker._check_fp16_ceiling = original_fp16
+            self.checker._detect_harmful_regression = original_regression
+            if previous is None:
+                os.environ.pop("ABLATE_LOOP_GUARD", None)
+            else:
+                os.environ["ABLATE_LOOP_GUARD"] = previous
+        self.assertEqual(sig, "CONTINUE")
+        self.assertIsNone(code)
+
 
 # ---------------------------------------------------------------------------
 # L5_PROBE 真探针优先治理 (优先真探针 / 连续失败才回退 / 回退留痕)

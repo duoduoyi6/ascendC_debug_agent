@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -261,6 +262,11 @@ def _anti_cheat_pass(task_dir: Path) -> bool:
 
 
 def _post_anticheat_result(task_dir: Path) -> dict:
+    # no_anticheat is a strict execution ablation. A copied/reset task may
+    # still contain a prior run's wrapper result; never let that stale evidence
+    # alter this arm's exit classification.
+    if os.environ.get("ABLATE_ANTICHEAT") == "1":
+        return {}
     path = Path(task_dir) / "_anticheat.json"
     if not path.exists():
         return {}
@@ -285,6 +291,8 @@ def _ast_degrade_pass_from_post_anticheat(task_dir: Path) -> Optional[bool]:
 
 
 def _ast_degrade_pass(task_dir: Path, events: list[dict]) -> Optional[bool]:
+    if os.environ.get("ABLATE_ANTICHEAT") == "1":
+        return None
     checks = _latest_validate_checks(events)
     if "ast_degrade_pass" not in checks:
         return _ast_degrade_pass_from_post_anticheat(task_dir)
@@ -311,6 +319,10 @@ def _probe_policy_summary(task_dir: Path) -> dict:
                 "policy": record.get("policy"),
                 "observed_status": record.get("observed_status"),
                 "policy_pass": record.get("policy_pass"),
+                "source_audit_pass": record.get("source_audit_pass"),
+                "source_audit_path": record.get("source_audit_path"),
+                "ablation_violation": record.get(
+                    "ablation_violation", False),
                 "record_path": str(path),
             })
     violations = sum(record.get("policy_pass") is False for record in records)
@@ -906,6 +918,8 @@ def _anti_cheat_summary(task_dir: Path) -> dict:
     后置 anticheat.py 写出的 _anticheat.json 若为 CHEAT，也计入 violation。
     文件不存在 = 从未触发任何检查 = 全 0 (clean)。解析失败同样降级全 0。
     """
+    if os.environ.get("ABLATE_ANTICHEAT") == "1":
+        return {"total": 0, "violations": 0, "warnings": 0}
     path = Path(task_dir) / "precision_tuning" / "cheat_history.json"
     total = 0
     violations = 0

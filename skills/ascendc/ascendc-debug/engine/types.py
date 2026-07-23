@@ -65,7 +65,7 @@ AbortSubtype = Literal[
 LoopSignal = Literal["PASS", "CONTINUE", "STOP"]
 
 # ---------------------------------------------------------------------------
-# session 终态闭集 — 统一 schema (11 值)。
+# session 终态闭集 — 统一 schema。
 # 取 constructive (8 值) 为基准；discovery 多出的 progressed_to_new_failure_type
 # 是旧「漂移=session 结束」语义的产物，在新「漂移=续跑」模型下不作为单 session 终态
 # (REWRITE_PLAN §2.2)，故不纳入闭集。Step 8 同步修订 discovery.md + 情景总览.md。
@@ -80,7 +80,9 @@ SessionOutcome = Literal[
     "success",                    # 验证全过 (含 .json.bak 全量门)
     "failed",                     # 修复未收敛 (一般兜底)
     "stopped_by_gate",            # Gate 前置/不变量校验失败而停
-    "stopped_by_loop_limit",     # 撞全局 MAX_ATTEMPTS 或分支硬上限而停
+    "stopped_by_loop_limit",      # 旧产物兼容；新代码使用下列两个精确 outcome
+    "stopped_by_attempt_limit",   # 撞全局 MAX_ATTEMPTS 而停
+    "stopped_by_branch_limit",    # 撞单 failure_type 分支硬上限而停
     "stopped_by_budget",          # 跨 attempt 累计 turns 撞任务级硬上限而停 (4b-B)
     "degenerate_no_progress",    # 连续 N 轮退化空转 (作弊/缺产物兜底无改善) 而停 (N6)
     "timeout",                    # wall-clock 超时主动终止
@@ -88,6 +90,7 @@ SessionOutcome = Literal[
     "skipped_unsupported_type",  # failure_type 不在白名单
     "crashed",                    # 不可恢复错误 / 必填前置缺失
     "provider_api_error",         # diagnose 步 provider API 错误而 Abort (退出码 8)
+    "ablation_violation",         # Agent 使用了当前 arm 明确禁用的能力
 ]
 
 

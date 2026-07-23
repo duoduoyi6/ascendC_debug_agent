@@ -91,7 +91,7 @@ skills/ascendc/ascendc-debug/
 | **防 reward-hack** | backend 只判「claude 进程是否正常完成」；「修没修好」由 runner 随后的 Gate-V 客观判定 |
 | **可重放 / crash-resume** | runner resume 入口检测 dangling（崩在 spawn started 后）→ `_reconcile_dangling` 补 failed completed；terminal session 直接短路返回产物 |
 
-**SessionOutcome 8 值闭集**（`types.py`）：`success / failed / stopped_by_gate / stopped_by_loop_limit / timeout / skipped_env_issue / skipped_unsupported_type / crashed`
+**SessionOutcome 闭集**（`types.py`）：新运行使用 `success / failed / stopped_by_gate / stopped_by_attempt_limit / stopped_by_branch_limit / stopped_by_budget / degenerate_no_progress / timeout / skipped_env_issue / skipped_unsupported_type / crashed / provider_api_error / ablation_violation`；`stopped_by_loop_limit` 仅兼容旧产物。
 
 **运行方式（方案 C，runner 在容器内）**：
 ```bash

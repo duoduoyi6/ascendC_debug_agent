@@ -319,6 +319,7 @@ class _LegacyPrecisionChecker:
     # ================================================================
 
     def _compute_loop_signal(self, passed: bool, match_rate: float = None, forensics_data: dict = None) -> tuple:
+        loop_guard_on = os.environ.get("ABLATE_LOOP_GUARD") != "1"
         # 全量复验闸 (§2.1): 轻量结果须经全量 case 集复核才定终态。
         # full_eval 为 None = 闸关 / only_py 算子无全量集 → graceful 回退轻量口径 (原行为)。
         full_eval = self._load_full_eval()
@@ -346,7 +347,7 @@ class _LegacyPrecisionChecker:
                 return self._full_eval_continue_or_stop(
                     full_eval, reason=f"轻量近通过 (match_rate={match_rate:.2f}%) 但全量未满")
             # 全量闸关 / 无全量集 → 维持原 nearly_success STOP (向后兼容)；LoopGuard 关时放行续跑。
-            if os.environ.get("ABLATE_LOOP_GUARD") != "1":
+            if loop_guard_on:
                 return (
                     "STOP",
                     f"精度接近通过 (match_rate={match_rate:.2f}%)，疑似量化截断噪声或 float16 精度损失，建议人工确认",
@@ -354,7 +355,7 @@ class _LegacyPrecisionChecker:
                 )
 
         # fp16 early exit: 连续两轮仅 fp16 失败且 max_abs_diff ≤ 0.25 且 mismatch_ratio < 2.0%
-        if self.attempt >= 1 and forensics_data is not None:
+        if loop_guard_on and self.attempt >= 1 and forensics_data is not None:
             if self._check_fp16_ceiling(forensics_data):
                 return (
                     "STOP",
@@ -365,7 +366,7 @@ class _LegacyPrecisionChecker:
         if self.attempt + 1 >= MAX_ATTEMPTS:
             return "STOP", f"已达最大轮次 ({MAX_ATTEMPTS})", "max_attempts_reached"
 
-        fr = forensics_data
+        fr = forensics_data if loop_guard_on else None
         if fr is not None:
             try:
                 trend = fr.get("history_trend")

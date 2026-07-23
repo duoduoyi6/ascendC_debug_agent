@@ -208,6 +208,21 @@ class TestFullSession(unittest.TestCase):
                                  "knowledge_search", "audit", "diagnose_and_fix",
                                  "validate", "checkpoint_and_rollback"])
 
+    def test_baseline_profile_has_no_hidden_recovery_or_evidence_steps(self) -> None:
+        env = {
+            "ABLATE_FORENSICS": "1",
+            "ABLATE_KB": "1",
+            "ABLATE_GATE_A": "1",
+            "ABLATE_RECOVERY": "1",
+        }
+        with mock.patch.dict("os.environ", env):
+            status, dispatcher = self._run([_gate("PASS")])
+        self.assertEqual(status["session_outcome"], "success")
+        self.assertEqual(
+            [step for _, step in dispatcher.calls],
+            ["diagnose_and_fix", "validate"],
+        )
+
     def test_session_continue_then_pass(self) -> None:
         # 第一轮 CONTINUE，第二轮 PASS → success，2 轮。
         status, _ = self._run([_gate("CONTINUE"), _gate("PASS")])
@@ -224,7 +239,30 @@ class TestFullSession(unittest.TestCase):
 
     def test_session_stop_max_attempts(self) -> None:
         status, _ = self._run([_gate("STOP", "max_attempts_reached")])
-        self.assertEqual(status["session_outcome"], "stopped_by_loop_limit")
+        self.assertEqual(status["session_outcome"], "stopped_by_attempt_limit")
+
+    def test_probe_policy_violation_terminates_ablation_arm(self) -> None:
+        class _D(_MockDispatcher):
+            def __call__(self, action, task_dir, op_name, agent_callback):
+                self.calls.append((action.kind, action.step))
+                if action.kind == "spawn_agent":
+                    return {
+                        "success": True,
+                        "ablation_violation": True,
+                        "probe_record_path": "/tmp/policy.json",
+                        "probe_source_audit_path": "/tmp/source.json",
+                    }
+                return {"success": True}
+
+        dispatcher = _D([_gate("PASS")])
+        status = run_debug_session(
+            self.task_dir,
+            op_name="add",
+            agent="constructive",
+            entry_failure_type="precision_failed",
+            dispatcher=dispatcher,
+        )
+        self.assertEqual(status["session_outcome"], "ablation_violation")
 
     def test_exit_artifacts_written(self) -> None:
         self._run([_gate("PASS")])

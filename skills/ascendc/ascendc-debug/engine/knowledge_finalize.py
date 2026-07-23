@@ -212,6 +212,14 @@ def finalize_knowledge(
     _run: subprocess.run 注入点 (UT 用 fake 替换，不真跑子进程)。
     """
     task_dir = Path(task_dir)
+    if os.environ.get("ABLATE_KB") == "1":
+        result = _skip("ABLATE_KB=1 (no_kb arm)")
+        _write_result(task_dir, result)
+        return result
+    if os.environ.get("ASCENDC_DEBUG_KB_READ_ONLY") == "1":
+        result = _skip("ASCENDC_DEBUG_KB_READ_ONLY=1 (frozen experiment KB)")
+        _write_result(task_dir, result)
+        return result
     if not kb_path:
         return _skip("kb_path 未配置 (默认不启用)")
     result = _finalize_impl(task_dir, kb_path, session_outcome, op_name, _run)

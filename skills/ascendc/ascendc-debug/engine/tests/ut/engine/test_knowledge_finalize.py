@@ -7,9 +7,11 @@ action 透传 (new/merge/abandon) + 子进程失败/缺脚本降级为 skip + �
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from engine.knowledge_finalize import finalize_knowledge
 
@@ -126,6 +128,21 @@ class TestKnowledgeFinalize(unittest.TestCase):
         self._call()
         out = self.task_dir / "precision_tuning" / "kb_finalize_result.json"
         self.assertTrue(out.exists())
+
+    def test_read_only_kb_never_invokes_dump(self) -> None:
+        with mock.patch.dict(
+                os.environ, {"ASCENDC_DEBUG_KB_READ_ONLY": "1"}):
+            res, run = self._call()
+        self.assertTrue(res["skipped"])
+        self.assertIn("READ_ONLY", res["reason"])
+        self.assertEqual(run.calls, [])
+
+    def test_no_kb_ablation_never_invokes_dump(self) -> None:
+        with mock.patch.dict(os.environ, {"ABLATE_KB": "1"}):
+            res, run = self._call()
+        self.assertTrue(res["skipped"])
+        self.assertIn("ABLATE_KB", res["reason"])
+        self.assertEqual(run.calls, [])
 
 
 class TestFullEvalAdmits(unittest.TestCase):

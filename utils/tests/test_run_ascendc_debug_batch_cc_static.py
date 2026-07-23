@@ -54,6 +54,15 @@ class TestExitClassification(unittest.TestCase):
         self.assertIn("SIGKILL_CNT=", self.text)
         self.assertNotIn("超时(engine)", self.text)
 
+    def test_budget_exit_reasons_are_reported_separately(self):
+        self.assertIn("STOPPED_ATTEMPT=", self.text)
+        self.assertIn("STOPPED_BRANCH=", self.text)
+        self.assertIn("STOPPED_BUDGET=", self.text)
+        self.assertIn("STOPPED_LOOP=", self.text)
+        self.assertIn("stopped_by_loop_limit (legacy)", self.text)
+        self.assertIn("ABLATION_VIOLATION=", self.text)
+        self.assertIn("failed|stopped_*|crashed|timeout|ablation_violation)", self.text)
+
 
 class TestTurnBudgetDefaults(unittest.TestCase):
     @classmethod
@@ -84,6 +93,35 @@ class TestMixedProviderScheduling(unittest.TestCase):
         self.assertIn('if [[ "$MIXED_PROVIDER_MODE" == "1" ]]', self.text)
         self.assertIn("record_provider_failure", self.text)
         self.assertIn("other providers continue", self.text)
+
+    def test_fixed_assignment_is_strict_and_does_not_fall_back(self):
+        self.assertIn("--fixed-provider-assignments", self.text)
+        self.assertIn("--fixed-assignments", self.text)
+        self.assertIn("provider_assignment_error invalid fixed mapping", self.text)
+
+
+class TestAblationProfiles(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.text = SCRIPT.read_text(encoding="utf-8")
+
+    def test_no_kb_sets_hard_guard(self):
+        self.assertIn("no_kb)        export ABLATE_KB=1; KB_PATH=\"\" ;;", self.text)
+
+    def test_baseline_disables_recovery_and_kb(self):
+        self.assertIn("export ABLATE_RECOVERY=1;  export ABLATE_KB=1", self.text)
+
+    def test_no_audit_is_not_a_formal_profile(self):
+        self.assertIn("debug_no_audit)", self.text)
+        self.assertIn("no_audit 不属于正式消融矩阵", self.text)
+
+    def test_no_anticheat_keeps_out_of_band_observer_only(self):
+        self.assertIn("anticheat_observer.json", self.text)
+        self.assertIn("engine ablated; post-run observer only", self.text)
+
+    def test_kb_can_be_frozen_read_only(self):
+        self.assertIn("--kb-read-only", self.text)
+        self.assertIn("ASCENDC_DEBUG_KB_READ_ONLY=1", self.text)
 
 
 if __name__ == "__main__":

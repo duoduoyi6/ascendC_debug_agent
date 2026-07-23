@@ -137,6 +137,136 @@ _NOPROBE_CONSTRAINT = """
 ═══════════════════════════════════════════════════════════════
 """
 
+_NOKB_CONSTRAINT = """
+
+═══════════════════════════════════════════════════════════════
+【消融开关 ABLATE_KB: 本次调用禁用知识库】
+═══════════════════════════════════════════════════════════════
+- 不得读取、检索或引用任何 precision knowledge base 及历史知识条目。
+- 只能依据当前 task 的源码、验证日志和本轮客观产物诊断。
+- kb_used_ids 必须写 none。
+═══════════════════════════════════════════════════════════════
+"""
+
+_NOFORENSICS_CONSTRAINT = """
+
+═══════════════════════════════════════════════════════════════
+【消融开关 ABLATE_FORENSICS: 本次调用禁用前置取证】
+═══════════════════════════════════════════════════════════════
+- 不得读取或复用 precision_tuning/forensics_report_*.json。
+- 不得自行运行 precision_forensics.py 重建被消融的证据。
+- 只能依据当前源码与原始验证/编译/运行日志诊断。
+═══════════════════════════════════════════════════════════════
+"""
+
+_NORECOVERY_CONSTRAINT = """
+
+═══════════════════════════════════════════════════════════════
+【消融开关 ABLATE_RECOVERY: 本次调用禁用恢复脚手架】
+═══════════════════════════════════════════════════════════════
+- 不读取或使用 current_best、rollback、tuning_directions 等跨轮恢复/方向历史。
+- 只依据当前 task 状态与当前 attempt 的客观证据完成一次修复。
+═══════════════════════════════════════════════════════════════
+"""
+
+_PROBE_SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".cuh"}
+_PROBE_SOURCE_PATTERNS = {
+    "printf_call": re.compile(r"(?<![A-Za-z0-9_])printf\s*\("),
+    "ascendc_printf": re.compile(r"\bAscendCPrintf\s*\("),
+    "dump_tensor": re.compile(r"\bDumpTensor\s*\("),
+    "dump_data": re.compile(r"\b(?:DataDump|DumpData)\s*\("),
+}
+
+
+def _snapshot_probe_sources(task_dir: Path) -> dict:
+    """Count durable probe APIs in editable kernel sources."""
+    kernel_dir = task_dir / "kernel"
+    files: dict[str, dict[str, int]] = {}
+    if kernel_dir.is_dir():
+        for path in sorted(kernel_dir.rglob("*")):
+            if not path.is_file() or path.suffix.lower() not in _PROBE_SOURCE_SUFFIXES:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            counts = {
+                name: len(pattern.findall(text))
+                for name, pattern in _PROBE_SOURCE_PATTERNS.items()
+            }
+            if any(counts.values()):
+                files[str(path.relative_to(task_dir))] = counts
+    return {"files": files}
+
+
+def _audit_probe_sources(task_dir: Path, attempt: int, before: dict,
+                         after: dict) -> dict:
+    """Persist an independent before/after audit for newly added probe calls."""
+    additions = []
+    before_files = before.get("files", {})
+    after_files = after.get("files", {})
+    for probe_name in _PROBE_SOURCE_PATTERNS:
+        old_total = sum(
+            int(counts.get(probe_name, 0))
+            for counts in before_files.values()
+        )
+        new_total = sum(
+            int(counts.get(probe_name, 0))
+            for counts in after_files.values()
+        )
+        delta = new_total - old_total
+        if delta > 0:
+            additions.append({
+                "probe": probe_name,
+                "added_occurrences": delta,
+                "files_with_increased_count": [
+                    file_name
+                    for file_name, counts in sorted(after_files.items())
+                    if int(counts.get(probe_name, 0))
+                    > int(before_files.get(file_name, {}).get(probe_name, 0))
+                ],
+            })
+    record = {
+        "schema_version": 1,
+        "attempt": attempt,
+        "before": before,
+        "after": after,
+        "new_probe_occurrences": additions,
+        "passed": not additions,
+        "limitation": (
+            "Detects probe calls left in source after the Agent returns; "
+            "temporary probes removed before return and count-balanced "
+            "replacement of an existing probe are not observable."
+        ),
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    path = task_dir / "precision_tuning" / f"probe_source_audit_attempt{attempt}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
+    record["record_path"] = str(path)
+    return record
+
+
+def _attach_probe_observability(result: dict, task_dir: Path, attempt: int,
+                                policy: dict, policy_path: Path,
+                                source_before: dict) -> dict:
+    """Attach probe contract and independent source evidence on every exit."""
+    source_audit = _audit_probe_sources(
+        task_dir, attempt, source_before, _snapshot_probe_sources(task_dir))
+    probe_record = _finalize_probe_policy(
+        task_dir, policy, result.get("final_response"),
+        result.get("attempt_metadata") or {}, source_audit)
+    result["probe_policy"] = probe_record.get("policy")
+    result["probe_status"] = probe_record.get("observed_status")
+    result["probe_policy_pass"] = probe_record.get("policy_pass")
+    result["probe_record_path"] = str(
+        probe_record.get("record_path") or policy_path)
+    result["probe_source_audit_path"] = source_audit.get("record_path")
+    result["ablation_violation"] = probe_record.get(
+        "ablation_violation", False)
+    return result
+
+
 def _stable_kb_id(title: str) -> str:
     """Return the same deterministic fallback ID used by precision_knowledge.py."""
     normalized = " ".join(str(title).strip().lower().split())
@@ -145,6 +275,8 @@ def _stable_kb_id(title: str) -> str:
 
 
 def _read_forensics_primary_hint(task_dir: Path, attempt: int) -> str:
+    if os.environ.get("ABLATE_FORENSICS") == "1":
+        return "unknown"
     path = task_dir / "precision_tuning" / f"forensics_report_{attempt}.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -264,7 +396,8 @@ def _infer_probe_status(final_response: Optional[str], metadata: dict) -> tuple[
 
 
 def _finalize_probe_policy(task_dir: Path, policy: dict,
-                           final_response: Optional[str], metadata: dict) -> dict:
+                           final_response: Optional[str], metadata: dict,
+                           source_audit: Optional[dict] = None) -> dict:
     status, source = _infer_probe_status(final_response, metadata)
     expected = policy.get("policy")
     if expected == "skip":
@@ -275,12 +408,26 @@ def _finalize_probe_policy(task_dir: Path, policy: dict,
         passed = status in {"not_applicable", "skipped"} if status != "unknown" else None
     else:
         passed = status in {"executed", "skipped"} if status != "unknown" else None
+    source_violation = bool(
+        source_audit
+        and expected == "skip"
+        and source_audit.get("passed") is False
+    )
+    if source_violation:
+        passed = False
     record = dict(policy)
     record.update({
         "observed_status": status,
         "observation_source": source,
         "policy_pass": passed,
         "metadata_complete": _ATTEMPT_METADATA_KEYS.issubset(metadata),
+        "source_audit_pass": (
+            source_audit.get("passed") if source_audit is not None else None
+        ),
+        "source_audit_path": (
+            source_audit.get("record_path") if source_audit is not None else None
+        ),
+        "ablation_violation": source_violation,
         "completed_at": datetime.now(timezone.utc).isoformat(),
     })
     path = _write_probe_policy(task_dir, record)
@@ -293,6 +440,8 @@ def _cheat_warning(task_dir: Path) -> str:
 
     仅取最近一条 violation (非 warning——validator 异常不该警告 agent 它作弊)。无则返回空串。
     """
+    if os.environ.get("ANTICHEAT_DETECT_ONLY") == "1":
+        return ""
     path = task_dir / "precision_tuning" / "cheat_history.json"
     if not path.exists():
         return ""
@@ -400,6 +549,8 @@ def _direction_history_context(task_dir: Path, attempt: int) -> str:
 
 def _knowledge_search_context(task_dir: Path, attempt: int) -> str:
     """Return a compact KB retrieval summary injected by engine, if present."""
+    if os.environ.get("ABLATE_KB") == "1":
+        return ""
     path = task_dir / "precision_tuning" / "knowledge_search_log.json"
     if not path.exists():
         return ""
@@ -468,13 +619,22 @@ def _build_prompt(task_dir: Path, op_name: str, failure_type: str,
     )
     probe_policy = _probe_policy(task_dir, failure_type, attempt)
     probe_constraint = _PROBE_POLICY_CONSTRAINT.format(**probe_policy)
-    return (head + _cheat_warning(task_dir)
-            + _rollback_warning(task_dir, attempt)
+    recovery_context = ""
+    if os.environ.get("ABLATE_RECOVERY") != "1":
+        recovery_context = (
+            _rollback_warning(task_dir, attempt)
             + _direction_history_context(task_dir, attempt)
+        )
+    return (head + _cheat_warning(task_dir)
+            + recovery_context
             + _knowledge_search_context(task_dir, attempt)
             + _SINGLE_ROUND_CONSTRAINT.replace("{task_dir}", str(task_dir))
             + probe_constraint
             + (_NOPROBE_CONSTRAINT if os.environ.get("ABLATE_PROBE") == "1" else "")
+            + (_NOKB_CONSTRAINT if os.environ.get("ABLATE_KB") == "1" else "")
+            + (_NOFORENSICS_CONSTRAINT
+               if os.environ.get("ABLATE_FORENSICS") == "1" else "")
+            + (_NORECOVERY_CONSTRAINT if os.environ.get("ABLATE_RECOVERY") == "1" else "")
             + _ATTEMPT_METADATA_CONSTRAINT)
 
 
@@ -556,8 +716,15 @@ def _write_kb_usage_trace(task_dir: Path, attempt: int,
     """
     log_path = task_dir / "precision_tuning" / "knowledge_search_log.json"
     trace_path = task_dir / "precision_tuning" / "kb_usage_trace.json"
+    kb_disabled = os.environ.get("ABLATE_KB") == "1"
     try:
-        data = json.loads(log_path.read_text(encoding="utf-8")) if log_path.exists() else []
+        data = (
+            []
+            if kb_disabled
+            else json.loads(log_path.read_text(encoding="utf-8"))
+            if log_path.exists()
+            else []
+        )
     except (ValueError, OSError):
         data = []
     injected: list[dict] = []
@@ -604,6 +771,7 @@ def _write_kb_usage_trace(task_dir: Path, attempt: int,
         "used_ids": declared,
         "mentioned_title_ids": mentioned,
         "usage_trace_complete": "kb_used_ids" in metadata,
+        "ablation_disabled": kb_disabled,
         "injected_titles": injected_titles,
         # Compatibility fields: exact-title mention, not a reliable use signal.
         "cited_titles": [item["title"] for item in injected
@@ -740,6 +908,7 @@ def spawn_diagnose_agent(
 
     probe_policy = _probe_policy(Path(task_dir), failure_type, attempt)
     probe_record_path = _write_probe_policy(Path(task_dir), probe_policy)
+    probe_source_before = _snapshot_probe_sources(Path(task_dir))
     prompt = _build_prompt(Path(task_dir), op_name, failure_type, attempt, npu)
     effort = effort if effort is not None else os.environ.get(_EFFORT_ENV)
     if effort == "":
@@ -758,21 +927,27 @@ def spawn_diagnose_agent(
                         check=False, text=True)
     except subprocess.TimeoutExpired:
         _sync_latest_result_file(result_file, latest_result_file)
-        return {"success": False, "claude_state": "timeout", "fatal": False,
-                "error": f"claude 调用超时 (>{timeout_sec}s)",
-                "max_turns_applied": applied_max_turns,
-                "session_id": session_id,
-                "result_path": str(result_file),
-                "stderr_path": str(stderr_file),
-                "latest_result_path": str(latest_result_file)}
+        return _attach_probe_observability(
+            {"success": False, "claude_state": "timeout", "fatal": False,
+             "error": f"claude 调用超时 (>{timeout_sec}s)",
+             "max_turns_applied": applied_max_turns,
+             "session_id": session_id,
+             "result_path": str(result_file),
+             "stderr_path": str(stderr_file),
+             "latest_result_path": str(latest_result_file)},
+            Path(task_dir), attempt, probe_policy, probe_record_path,
+            probe_source_before)
     except Exception as e:  # noqa: BLE001 — 拉起失败转结构化结果，不让 runner 裸死
-        return {"success": False, "claude_state": "spawn_failed", "fatal": True,
-                "error": f"拉起 claude 失败: {e}",
-                "max_turns_applied": applied_max_turns,
-                "session_id": session_id,
-                "result_path": str(result_file),
-                "stderr_path": str(stderr_file),
-                "latest_result_path": str(latest_result_file)}
+        return _attach_probe_observability(
+            {"success": False, "claude_state": "spawn_failed", "fatal": True,
+             "error": f"拉起 claude 失败: {e}",
+             "max_turns_applied": applied_max_turns,
+             "session_id": session_id,
+             "result_path": str(result_file),
+             "stderr_path": str(stderr_file),
+             "latest_result_path": str(latest_result_file)},
+            Path(task_dir), attempt, probe_policy, probe_record_path,
+            probe_source_before)
 
     stderr_text = getattr(proc, "stderr", "") or ""
     if not isinstance(stderr_text, str):
@@ -806,13 +981,9 @@ def spawn_diagnose_agent(
     result["session_id"] = session_id
     result["result_path"] = str(result_file)
     result["latest_result_path"] = str(latest_result_file)
-    probe_record = _finalize_probe_policy(
-        Path(task_dir), probe_policy, result.get("final_response"),
-        result.get("attempt_metadata") or {})
-    result["probe_policy"] = probe_record.get("policy")
-    result["probe_status"] = probe_record.get("observed_status")
-    result["probe_policy_pass"] = probe_record.get("policy_pass")
-    result["probe_record_path"] = str(probe_record.get("record_path") or probe_record_path)
+    _attach_probe_observability(
+        result, Path(task_dir), attempt, probe_policy, probe_record_path,
+        probe_source_before)
     _write_kb_usage_trace(
         Path(task_dir), attempt, result.get("final_response"),
         result.get("attempt_metadata") or {})

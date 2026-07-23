@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from engine.agent_backend import (
     _build_prompt,
@@ -358,6 +359,51 @@ kb_used_ids: none
         self.assertTrue(record["policy_pass"])
         self.assertFalse(record["metadata_complete"])
 
+    def test_probe_source_audit_overrides_false_skipped_self_report(self) -> None:
+        kernel = self.task_dir / "kernel"
+        kernel.mkdir()
+        source = kernel / "op.cpp"
+        source.write_text("void Run() {}\n", encoding="utf-8")
+        response = """done
+[ENGINE_ATTEMPT_METADATA]
+fix_type: probe_cheat
+direction_verdict: initial
+direction_reason: claimed static evidence
+probe_status: skipped
+probe_reason: first round fast path
+kb_used_ids: none
+"""
+
+        def _fake_run(cmd, stdout=None, stderr=None, timeout=None,
+                      check=False, text=True):
+            source.write_text(
+                'void Run() { printf("probe=%f", 1.0f); }\n',
+                encoding="utf-8",
+            )
+            stdout.write(json.dumps({"is_error": False, "result": response}))
+
+            class _R:
+                returncode = 0
+                stderr = ""
+
+            return _R()
+
+        result = spawn_diagnose_agent(
+            _diagnose_action("precision_failed", 0),
+            self.task_dir,
+            "op",
+            0,
+            _run=_fake_run,
+        )
+        self.assertFalse(result["probe_policy_pass"])
+        self.assertTrue(result["ablation_violation"])
+        audit = json.loads(
+            Path(result["probe_source_audit_path"]).read_text(encoding="utf-8")
+        )
+        self.assertFalse(audit["passed"])
+        self.assertEqual(
+            audit["new_probe_occurrences"][0]["probe"], "printf_call")
+
 
 class TestCallbackIntoRunner(unittest.TestCase):
     """make_agent_callback 注入 runner，跑通 precision→CONTINUE→PASS 2 轮。
@@ -498,6 +544,33 @@ kb_used_ids: kb-0123456789ab
         self.assertEqual(trace["declared_used_ids"], ["kb-0123456789ab"])
         self.assertTrue(trace["usage_trace_complete"])
 
+    def test_no_kb_ablation_ignores_stale_search_log(self) -> None:
+        self._write_kb_log([{
+            "attempt": 0,
+            "top_titles": ["StaleEntry"],
+            "top_ids": ["kb-0123456789ab"],
+        }])
+        response = """No KB was injected.
+[ENGINE_ATTEMPT_METADATA]
+fix_type: local_fix
+direction_verdict: initial
+direction_reason: local source evidence
+probe_status: skipped
+probe_reason: first round fast path
+kb_used_ids: kb-0123456789ab
+"""
+        with mock.patch.dict(os.environ, {"ABLATE_KB": "1"}):
+            spawn_diagnose_agent(
+                _diagnose_action("precision_failed", 0),
+                self.task_dir, "op", 0, _run=self._fake_run(response))
+        trace = self._read_trace()[0]
+        self.assertTrue(trace["ablation_disabled"])
+        self.assertEqual(trace["retrieved_ids"], [])
+        self.assertEqual(trace["injected_ids"], [])
+        self.assertEqual(trace["declared_used_ids"], [])
+        self.assertEqual(
+            trace["declared_unknown_ids"], ["kb-0123456789ab"])
+
 
 class TestNoprobeInjection(unittest.TestCase):
     """ABLATE_PROBE=1 时 _build_prompt 末尾追加 noprobe 约束 (no_probe/baseline arm)。
@@ -549,6 +622,21 @@ class TestNoprobeInjection(unittest.TestCase):
         self.assertIn("policy: required", prompt)
         self.assertIn("nan_inf_contamination_exception", prompt)
 
+    def test_no_forensics_ignores_stale_hint_and_adds_constraint(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            task = Path(d)
+            (task / "precision_tuning").mkdir()
+            (task / "precision_tuning" / "forensics_report_0.json").write_text(
+                json.dumps({"primary_hint": "nan_inf_contamination"}),
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"ABLATE_FORENSICS": "1"}):
+                prompt = _build_prompt(
+                    task, "FakeOp", "precision_failed", 0, "0")
+        self.assertIn("ABLATE_FORENSICS", prompt)
+        self.assertIn("first_round_fast_path", prompt)
+        self.assertNotIn("nan_inf_contamination_exception", prompt)
+
     def test_later_attempt_receives_direction_history(self) -> None:
         self._set_probe(None)
         with tempfile.TemporaryDirectory() as d:
@@ -569,6 +657,83 @@ class TestNoprobeInjection(unittest.TestCase):
         self.assertIn("近期修复方向与客观结果", prompt)
         self.assertIn("fix_type=tiling_only", prompt)
         self.assertIn("outcome=regressed", prompt)
+
+    def test_recovery_ablation_suppresses_direction_history(self) -> None:
+        previous = os.environ.get("ABLATE_RECOVERY")
+        os.environ["ABLATE_RECOVERY"] = "1"
+        self.addCleanup(
+            lambda: (
+                os.environ.pop("ABLATE_RECOVERY", None)
+                if previous is None
+                else os.environ.__setitem__("ABLATE_RECOVERY", previous)
+            )
+        )
+        with tempfile.TemporaryDirectory() as d:
+            task = Path(d)
+            (task / "precision_tuning").mkdir()
+            (task / "precision_tuning" / "tuning_directions.json").write_text(
+                json.dumps({"entries": [{
+                    "attempt": 0,
+                    "fix_type": "old_direction",
+                    "outcome": "regressed",
+                }]}),
+                encoding="utf-8",
+            )
+            prompt = _build_prompt(
+                task, "FakeOp", "precision_failed", 1, "0")
+        self.assertIn("ABLATE_RECOVERY", prompt)
+        self.assertNotIn("old_direction", prompt)
+
+    def test_kb_ablation_suppresses_stale_search_log(self) -> None:
+        previous = os.environ.get("ABLATE_KB")
+        os.environ["ABLATE_KB"] = "1"
+        self.addCleanup(
+            lambda: (
+                os.environ.pop("ABLATE_KB", None)
+                if previous is None
+                else os.environ.__setitem__("ABLATE_KB", previous)
+            )
+        )
+        with tempfile.TemporaryDirectory() as d:
+            task = Path(d)
+            (task / "precision_tuning").mkdir()
+            (task / "precision_tuning" / "knowledge_search_log.json").write_text(
+                json.dumps([{
+                    "attempt": 0,
+                    "top_titles": ["must_not_leak"],
+                }]),
+                encoding="utf-8",
+            )
+            prompt = _build_prompt(
+                task, "FakeOp", "precision_failed", 0, "0")
+        self.assertIn("ABLATE_KB", prompt)
+        self.assertNotIn("must_not_leak", prompt)
+
+    def test_detect_only_does_not_inject_prior_cheat_warning(self) -> None:
+        previous = os.environ.get("ANTICHEAT_DETECT_ONLY")
+        os.environ["ANTICHEAT_DETECT_ONLY"] = "1"
+        self.addCleanup(
+            lambda: (
+                os.environ.pop("ANTICHEAT_DETECT_ONLY", None)
+                if previous is None
+                else os.environ.__setitem__("ANTICHEAT_DETECT_ONLY", previous)
+            )
+        )
+        with tempfile.TemporaryDirectory() as d:
+            task = Path(d)
+            (task / "precision_tuning").mkdir()
+            (task / "precision_tuning" / "cheat_history.json").write_text(
+                json.dumps({"cheating_attempts": [{
+                    "attempt": 0,
+                    "severity": "violation",
+                    "cheat_type": "must_not_inject",
+                    "instruction": "must_not_inject",
+                }]}),
+                encoding="utf-8",
+            )
+            prompt = _build_prompt(
+                task, "FakeOp", "precision_failed", 1, "0")
+        self.assertNotIn("must_not_inject", prompt)
 
 
 if __name__ == "__main__":

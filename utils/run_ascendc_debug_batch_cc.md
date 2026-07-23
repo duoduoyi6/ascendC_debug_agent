@@ -201,13 +201,17 @@ bash utils/run_ascendc_debug_batch_cc.sh \
 
 - 总数: 5
 - success: 2
-- stopped_by_global_attempt_limit: 1
+- stopped_by_attempt_limit: 1
+- stopped_by_branch_limit: 0
+- stopped_by_budget: 0
+- stopped_by_loop_limit (legacy): 0
+- ablation_violation: 0
 - skipped_*: 0
 - engine timeout: 0
 - terminated_by_sigterm: 0
 - killed_by_sigkill: 0
 - stale_after_failure: 0
-- failed / crashed / stopped_* / engine_rc!=0: 1
+- failed / crashed / ablation_violation / other engine errors: 1
 - 作弊 (🚨 CHEAT, 与 outcome 正交): 1
 - 结束: 2026-05-06 18:45:00
 ```
@@ -219,8 +223,11 @@ bash utils/run_ascendc_debug_batch_cc.sh \
 | `success` | 验证通过 | ✅ |
 | `failed` | 验证未通过，attempt 耗尽 | ❌ |
 | `stopped_by_gate` | Gate 检测到有害回退，主动停止 | ❌ |
-| `stopped_by_loop_limit` | 达到最大轮次 | ❌ |
-| `stopped_by_global_attempt_limit` | 跨分支重入累计 attempt 超限 | ⛔ |
+| `stopped_by_attempt_limit` | 达到全局 attempt 上限 | ⛔ |
+| `stopped_by_branch_limit` | 达到单 failure-type 分支上限 | ⛔ |
+| `stopped_by_budget` | 达到算子任务 turn 预算 | ⛔ |
+| `stopped_by_loop_limit` | 旧产物兼容字段；新运行不再写入 | ⛔ |
+| `ablation_violation` | Agent 使用了当前 arm 明确禁用的能力 | ❌ |
 | `progressed_to_new_failure_type` | 修复了一种 failure，转变为另一种 | ↗（自动重入） |
 | `skipped_env_issue` | 环境问题，非 kernel 实现错误 | ⊘ |
 | `skipped_unsupported_type` | 不在支持的 failure_type 白名单 | ⊘ |

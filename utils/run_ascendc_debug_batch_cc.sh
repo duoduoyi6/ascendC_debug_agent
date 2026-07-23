@@ -42,6 +42,7 @@ MAX_TURNS="240"             # 单 attempt agentic turn 数硬上限；默认 240
 SOFT_TASK_TURNS="480"       # 无客观改善证据时的任务级软预算
 MAX_TASK_TURNS="600"        # 有客观改善证据后的任务级硬上限
 KB_PATH=""                  # success 且无作弊时候选知识入库路径；空=不启用
+KB_READ_ONLY="0"            # 1=允许检索但禁止实验期间写回共享 KB
 AGENT_TIMEOUT_SEC=""        # 单次 diagnose agent 调用超时（秒，空=不限）；引擎管 wall-clock
 STALE_AFTER_FAILURE_SEC="3600"   # 失败后停滞多久判定为 stale
 STALE_CHECK_INTERVAL_SEC="60"    # 停滞检测间隔
@@ -49,6 +50,7 @@ WORKDIR_IN_CONTAINER="/home/c00959374/AscendOpGenAgent"
 TILELANG_ENV_SH="/home/c00959374/tilelang/tilelang-ascend/set_env.sh"
 CLAUDE_ENV_SH=""            # API 凭证脚本路径（可选）
 PROVIDER_POOL_CONFIG=""     # mixed-provider key pool；空时尝试从 experiment_manifest 推断
+FIXED_PROVIDER_ASSIGNMENTS="" # 复用既有 task→provider 映射；禁用实时额度重映射
 MIXED_PROVIDER_MIN_REMAINING="10"
 CLAUDE_BIN="claude"
 AGENT="constructive"        # 引擎 CLI 接受 constructive(AAAI 主力)/discovery 短名或完整 spec 名
@@ -73,12 +75,14 @@ while [[ $# -gt 0 ]]; do
         --soft-task-turns)        SOFT_TASK_TURNS="$2"; shift 2 ;;
         --max-task-turns)         MAX_TASK_TURNS="$2"; shift 2 ;;
         --kb-path)                KB_PATH="$2"; shift 2 ;;
+        --kb-read-only)           KB_READ_ONLY="1"; shift ;;
         --stale-after-failure)    STALE_AFTER_FAILURE_SEC="$2"; shift 2 ;;
         --stale-check-interval)   STALE_CHECK_INTERVAL_SEC="$2"; shift 2 ;;
         --workdir)                WORKDIR_IN_CONTAINER="$2"; shift 2 ;;
         --tilelang-env)           TILELANG_ENV_SH="$2"; shift 2 ;;
         --claude-env)             CLAUDE_ENV_SH="$2"; shift 2 ;;
         --provider-pool-config)   PROVIDER_POOL_CONFIG="$2"; shift 2 ;;
+        --fixed-provider-assignments) FIXED_PROVIDER_ASSIGNMENTS="$2"; shift 2 ;;
         --mixed-provider-min-remaining) MIXED_PROVIDER_MIN_REMAINING="$2"; shift 2 ;;
         --claude-bin)             CLAUDE_BIN="$2"; shift 2 ;;
         --agent)                  AGENT="$2"; shift 2 ;;
@@ -99,18 +103,20 @@ done
 ABLATE_PROFILE="${ABLATE_PROFILE:-full}"
 case "$ABLATE_PROFILE" in
     full)         ;;
-    no_kb)        KB_PATH="" ;;
+    no_kb)        export ABLATE_KB=1; KB_PATH="" ;;
     no_forensics) export ABLATE_FORENSICS=1 ;;
     no_probe)     export ABLATE_PROBE=1 ;;
     no_anticheat) export ABLATE_ANTICHEAT=1 ;;
     no_loopguard) export ABLATE_LOOP_GUARD=1 ;;
-    no_audit)     export ABLATE_GATE_A=1 ;;
+    debug_no_audit) export ABLATE_GATE_A=1 ;;
+    no_audit)     echo "no_audit 不属于正式消融矩阵；仅调试可用 debug_no_audit"; exit 1 ;;
     no_fulleval)  export ABLATE_FULL_EVAL=1 ;;
     baseline)     # 全脚手架关下界 (§3.3): 取证/循环闸/Gate-A/全量闸/插桩全消融，清 KB。
                   # 反作弊用 detect-only (检测+记录不阻断)——暴露虚假成功、量化反作弊拦截量。
                   export ABLATE_FORENSICS=1; export ABLATE_LOOP_GUARD=1
                   export ABLATE_GATE_A=1;    export ABLATE_FULL_EVAL=1
                   export ABLATE_PROBE=1;     export ANTICHEAT_DETECT_ONLY=1
+                  export ABLATE_RECOVERY=1;  export ABLATE_KB=1
                   KB_PATH="" ;;
     *) echo "未知 ABLATE_PROFILE: $ABLATE_PROFILE"; exit 1 ;;
 esac
@@ -183,21 +189,35 @@ TASKS_REQUESTED="$OUTPUT_DIR/.tasks_requested"
 printf "%s\n" "${TASK_LIST[@]}" > "$TASKS_REQUESTED"
 infer_provider_pool_config
 : > "$QUEUE"
+if [[ -n "$FIXED_PROVIDER_ASSIGNMENTS" && ! -f "$FIXED_PROVIDER_ASSIGNMENTS" ]]; then
+    echo "provider_assignment_error fixed manifest not found: $FIXED_PROVIDER_ASSIGNMENTS" > "$FATAL"
+fi
+if [[ -n "$FIXED_PROVIDER_ASSIGNMENTS" && ( -z "$PROVIDER_POOL_CONFIG" || ! -f "$PROVIDER_POOL_CONFIG" ) ]]; then
+    echo "provider_assignment_error fixed mapping requires --provider-pool-config" > "$FATAL"
+fi
 if [[ -n "$PROVIDER_POOL_CONFIG" && -f "$PROVIDER_POOL_CONFIG" ]]; then
+    fixed_assignment_args=()
+    [[ -n "$FIXED_PROVIDER_ASSIGNMENTS" ]] \
+        && fixed_assignment_args+=(--fixed-assignments "$FIXED_PROVIDER_ASSIGNMENTS")
     set +e
     python3 "$(dirname "$0")/assign_mixed_providers.py" \
         --key-config "$PROVIDER_POOL_CONFIG" \
         --tasks-file "$TASKS_REQUESTED" \
         --output "$OUTPUT_DIR" \
         --queue "$QUEUE" \
-        --min-remaining "$MIXED_PROVIDER_MIN_REMAINING"
+        --min-remaining "$MIXED_PROVIDER_MIN_REMAINING" \
+        "${fixed_assignment_args[@]}"
     assign_rc=$?
     set -e
     if [[ "$assign_rc" -eq 0 ]]; then
         MIXED_PROVIDER_MODE="1"
         PROVIDER_ASSIGNMENTS="$OUTPUT_DIR/provider_assignments.json"
-    elif [[ "$assign_rc" -eq 3 ]]; then
-        echo "provider_api_error provider_pool_exhausted" > "$FATAL"
+    elif [[ "$assign_rc" -eq 3 || -n "$FIXED_PROVIDER_ASSIGNMENTS" ]]; then
+        if [[ "$assign_rc" -eq 3 ]]; then
+            echo "provider_api_error provider_pool_exhausted" > "$FATAL"
+        else
+            echo "provider_assignment_error invalid fixed mapping rc=$assign_rc" > "$FATAL"
+        fi
         PROVIDER_ASSIGNMENTS="$OUTPUT_DIR/provider_assignments.json"
     else
         echo "[provider] mixed assignment unavailable rc=$assign_rc; using cycle default" >&2
@@ -227,12 +247,14 @@ fi
     echo "- claude env: ${CLAUDE_ENV_SH:-<none>}"
     echo "- provider mode: $([[ "$MIXED_PROVIDER_MODE" == "1" ]] && echo mixed_sticky || echo cycle_default)"
     echo "- provider assignments: ${PROVIDER_ASSIGNMENTS:-<none>}"
+    echo "- fixed provider assignments: ${FIXED_PROVIDER_ASSIGNMENTS:-<none>}"
     echo "- tilelang env: $TILELANG_ENV_SH"
     echo "- timeout: ${TIMEOUT_SEC}s/task"
     echo "- max_turns: ${MAX_TURNS:-<engine default>}"
     echo "- soft_task_turns: ${SOFT_TASK_TURNS:-<none>}"
     echo "- max_task_turns: ${MAX_TASK_TURNS:-<none>}"
     echo "- kb_path: ${KB_PATH:-<none>}"
+    echo "- kb_read_only: $KB_READ_ONLY"
     echo "- stale_after_failure: ${STALE_AFTER_FAILURE_SEC}s"
     echo "- start: $(date '+%F %T')"
     echo
@@ -379,7 +401,12 @@ if not engine_rc:
     engine_rc = {
         "success": "0",
         "stopped_by_loop_limit": "3",
+        "stopped_by_attempt_limit": "12",
+        "stopped_by_branch_limit": "13",
         "provider_api_error": "8",
+        "stopped_by_budget": "9",
+        "degenerate_no_progress": "10",
+        "ablation_violation": "11",
     }.get(outcome, "1")
 
 cheat_verdict = "UNKNOWN"
@@ -407,12 +434,14 @@ format_report_icon() {
     local session_outcome="$1" status="$2" cheat_verdict="$3"
     local cheat_mark=""
     [[ "$cheat_verdict" == "CHEAT" ]] && cheat_mark=" / 🚨 CHEAT"
-    if [[ "$status" -eq 0 || ( "$status" -ge 1 && "$status" -le 7 ) ]]; then
+    if [[ "$status" -ge 0 && "$status" -le 13 && "$status" -ne 8 ]]; then
         case "$session_outcome" in
             success)                       echo "✅ $session_outcome${cheat_mark}" ;;
-            stopped_by_loop_limit)         echo "⛔ $session_outcome${cheat_mark}" ;;
+            stopped_by_loop_limit|stopped_by_attempt_limit|stopped_by_branch_limit|stopped_by_budget)
+                                           echo "⛔ $session_outcome${cheat_mark}" ;;
             skipped_*)                     echo "⊘ $session_outcome${cheat_mark}" ;;
-            failed|stopped_*|crashed|timeout) echo "❌ $session_outcome${cheat_mark}" ;;
+            failed|stopped_*|crashed|timeout|ablation_violation)
+                                           echo "❌ $session_outcome${cheat_mark}" ;;
             *)                             echo "⚠ $session_outcome${cheat_mark}" ;;
         esac
     elif [[ "$status" -eq 124 ]]; then
@@ -771,7 +800,10 @@ run_engine_turn() {
     [[ -n "${ABLATE_ANTICHEAT:-}" ]]  && ablate_flags+=(-e "ABLATE_ANTICHEAT=$ABLATE_ANTICHEAT")
     [[ -n "${ABLATE_FULL_EVAL:-}" ]]  && ablate_flags+=(-e "ABLATE_FULL_EVAL=$ABLATE_FULL_EVAL")
     [[ -n "${ABLATE_PROBE:-}" ]]      && ablate_flags+=(-e "ABLATE_PROBE=$ABLATE_PROBE")
+    [[ -n "${ABLATE_KB:-}" ]]         && ablate_flags+=(-e "ABLATE_KB=$ABLATE_KB")
+    [[ -n "${ABLATE_RECOVERY:-}" ]]   && ablate_flags+=(-e "ABLATE_RECOVERY=$ABLATE_RECOVERY")
     [[ -n "${ANTICHEAT_DETECT_ONLY:-}" ]] && ablate_flags+=(-e "ANTICHEAT_DETECT_ONLY=$ANTICHEAT_DETECT_ONLY")
+    [[ "$KB_READ_ONLY" == "1" ]] && ablate_flags+=(-e "ASCENDC_DEBUG_KB_READ_ONLY=1")
     timeout --signal=TERM --kill-after=30 "$TIMEOUT_SEC" \
         docker exec \
             -e "ASCEND_RT_VISIBLE_DEVICES=$npu" \
@@ -965,10 +997,19 @@ run_worker() {
         # ── 反作弊后置检测 ──
         local cheat_json cheat_verdict cheat_reasons cheat_mark
         if [[ -n "${ABLATE_ANTICHEAT:-}" ]]; then
-            cheat_json=""
-            cheat_verdict="SKIPPED"
-            cheat_reasons=""
-            echo "[anticheat] skipped by ABLATE_ANTICHEAT=1" >> "$wlog"
+            # Strict no_anticheat execution: the engine never consumes this
+            # result.  A post-run observer still measures what the removed
+            # component would have seen, without rebuilding debug_status.
+            cheat_json=$(docker exec "$container" bash -lc "
+                cd '$WORKDIR_IN_CONTAINER'
+                python3 '$ANTICHEAT_SCRIPT' verify '$task_dir' --json 2>/dev/null
+            " 2>/dev/null || true)
+            if [[ -n "$cheat_json" ]]; then
+                mkdir -p "$task_dir/precision_tuning"
+                printf "%s\n" "$cheat_json" \
+                    > "$task_dir/precision_tuning/anticheat_observer.json"
+            fi
+            echo "[anticheat] engine ablated; post-run observer only" >> "$wlog"
         else
             cheat_json=$(docker exec "$container" bash -lc "
                 cd '$WORKDIR_IN_CONTAINER'
@@ -990,7 +1031,9 @@ except Exception:
     print('')
 " 2>/dev/null || echo "")
         if [[ -n "$cheat_json" ]]; then
-            if [[ -n "${ANTICHEAT_DETECT_ONLY:-}" ]]; then
+            if [[ -n "${ABLATE_ANTICHEAT:-}" ]]; then
+                echo "[anticheat] observer verdict=$cheat_verdict reasons=$cheat_reasons" >> "$wlog"
+            elif [[ -n "${ANTICHEAT_DETECT_ONLY:-}" ]]; then
                 mkdir -p "$task_dir/precision_tuning"
                 echo "$cheat_json" > "$task_dir/precision_tuning/anticheat_detect_only.json"
                 echo "[anticheat] detect-only verdict=$cheat_verdict reasons=$cheat_reasons" >> "$wlog"
@@ -1021,16 +1064,18 @@ PY
 
         # ── 判定结果并写报告 ──
         local icon
-        if [[ $status -eq 0 || ( $status -ge 1 && $status -le 7 ) ]]; then
-            # 引擎正常退出 (退出码 0-7 = session_outcome 映射，见 engine/__main__.py)。
+        if [[ "$status" -ge 0 && "$status" -le 13 && "$status" -ne 8 ]]; then
+            # 引擎正常语义退出 (退出码见 engine/__main__.py；8 单独表示 provider error)。
             case "$session_outcome" in
                 success)                       icon="✅ $session_outcome${cheat_mark}" ;;
-                stopped_by_loop_limit)         icon="⛔ $session_outcome${cheat_mark}" ;;
+                stopped_by_loop_limit|stopped_by_attempt_limit|stopped_by_branch_limit|stopped_by_budget)
+                                               icon="⛔ $session_outcome${cheat_mark}" ;;
                 skipped_*)                     icon="⊘ $session_outcome${cheat_mark}" ;;
-                failed|stopped_*|crashed|timeout) icon="❌ $session_outcome${cheat_mark}" ;;
+                failed|stopped_*|crashed|timeout|ablation_violation)
+                                               icon="❌ $session_outcome${cheat_mark}" ;;
                 *)                             icon="⚠ $session_outcome${cheat_mark}" ;;
             esac
-            echo "[${container}@npu${npu}] ✅ ${op_name} session_outcome=${session_outcome} (${elapsed}s)"
+            echo "[${container}@npu${npu}] ${icon} ${op_name} (${elapsed}s)"
         elif [[ "$status" -eq 124 ]]; then
             icon="⏱ engine_timeout${cheat_mark}"
             echo "[${container}@npu${npu}] ⏱ ${op_name} ENGINE_TIMEOUT (${elapsed}s)"
@@ -1084,6 +1129,10 @@ reconcile_missing_report_rows
 # ── 汇总 ──
 SUCCESS=$(grep_count "✅ success" "$REPORT")
 STOPPED_LOOP=$(grep_count "⛔ stopped_by_loop_limit" "$REPORT")
+STOPPED_ATTEMPT=$(grep_count "⛔ stopped_by_attempt_limit" "$REPORT")
+STOPPED_BRANCH=$(grep_count "⛔ stopped_by_branch_limit" "$REPORT")
+STOPPED_BUDGET=$(grep_count "⛔ stopped_by_budget" "$REPORT")
+ABLATION_VIOLATION=$(grep_count "❌ ablation_violation" "$REPORT")
 SKIPPED=$(grep_count "⊘ skipped" "$REPORT")
 TIMEOUT_CNT=$(grep_count "⏱ engine_timeout" "$REPORT")
 SIGTERM_CNT=$(grep_count "🛑 terminated_by_sigterm" "$REPORT")
@@ -1099,7 +1148,11 @@ CHEAT=$(grep_count "🚨 CHEAT" "$REPORT")
     echo
     echo "- 总数: $TOTAL"
     echo "- success: $SUCCESS"
-    echo "- stopped_by_loop_limit: $STOPPED_LOOP"
+    echo "- stopped_by_attempt_limit: $STOPPED_ATTEMPT"
+    echo "- stopped_by_branch_limit: $STOPPED_BRANCH"
+    echo "- stopped_by_budget: $STOPPED_BUDGET"
+    echo "- stopped_by_loop_limit (legacy): $STOPPED_LOOP"
+    echo "- ablation_violation: $ABLATION_VIOLATION"
     echo "- skipped_*: $SKIPPED"
     echo "- engine timeout: $TIMEOUT_CNT"
     echo "- terminated_by_sigterm: $SIGTERM_CNT"
@@ -1107,7 +1160,7 @@ CHEAT=$(grep_count "🚨 CHEAT" "$REPORT")
     echo "- stale_after_failure: $STALE_CNT"
     echo "- provider_api_error: $PROVIDER_API"
     echo "- provider failure records: provider_failures.jsonl"
-    echo "- failed / crashed / stopped_* / engine_rc!=0: $FAIL"
+    echo "- failed / crashed / ablation_violation / other engine errors: $FAIL"
     echo "- 作弊 (🚨 CHEAT, 与 outcome 正交): $CHEAT"
     if [[ -s "$FATAL" ]]; then
         echo "- 全局熔断: $(cat "$FATAL")"
@@ -1117,7 +1170,7 @@ CHEAT=$(grep_count "🚨 CHEAT" "$REPORT")
 } >> "$REPORT"
 
 echo "================================================================"
-echo "完成: SUCCESS=$SUCCESS TIMEOUT=$TIMEOUT_CNT SIGTERM=$SIGTERM_CNT SIGKILL=$SIGKILL_CNT STALE=$STALE_CNT FAILED=$FAIL CHEAT=$CHEAT / 共 $TOTAL"
+echo "完成: SUCCESS=$SUCCESS ATTEMPT_LIMIT=$STOPPED_ATTEMPT BRANCH_LIMIT=$STOPPED_BRANCH BUDGET=$STOPPED_BUDGET ABLATION_VIOLATION=$ABLATION_VIOLATION TIMEOUT=$TIMEOUT_CNT SIGTERM=$SIGTERM_CNT SIGKILL=$SIGKILL_CNT STALE=$STALE_CNT FAILED=$FAIL CHEAT=$CHEAT / 共 $TOTAL"
 if [[ -s "$FATAL" ]]; then
     echo "全局熔断: $(cat "$FATAL")"
 fi

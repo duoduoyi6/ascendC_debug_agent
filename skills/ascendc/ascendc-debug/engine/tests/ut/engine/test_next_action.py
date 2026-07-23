@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from unittest import mock
 
 from engine.gate_adapter import GateResult
 from engine.next_action import debug_next_action
@@ -107,7 +108,7 @@ class TestBudgetGates(unittest.TestCase):
                     per_branch={"precision_failed": 5})
         d = debug_next_action(st)
         self.assertIsInstance(d, Done)
-        self.assertEqual(d.session_outcome, "stopped_by_loop_limit")
+        self.assertEqual(d.session_outcome, "stopped_by_attempt_limit")
 
     def test_fifth_started_attempt_executes_before_budget_stop(self) -> None:
         # MAX_ATTEMPTS=5 means five real Agent rounds (attempt 0-4), not four
@@ -130,7 +131,7 @@ class TestBudgetGates(unittest.TestCase):
                     per_branch={"build_failed": 3})
         d = debug_next_action(st)
         self.assertIsInstance(d, Done)
-        self.assertEqual(d.session_outcome, "stopped_by_loop_limit")
+        self.assertEqual(d.session_outcome, "stopped_by_branch_limit")
 
     def test_precision_cap_higher_than_build(self) -> None:
         # precision 在 build cap(3) 处不停 (precision cap=5)，应继续推进。
@@ -171,10 +172,10 @@ class TestLoopSignalDispatch(unittest.TestCase):
         self.assertIsInstance(d, Done)
         self.assertEqual(d.session_outcome, "stopped_by_gate")
 
-    def test_stop_max_attempts_to_loop_limit(self) -> None:
+    def test_stop_max_attempts_to_attempt_limit(self) -> None:
         d = debug_next_action(self._state_after_validate("precision_failed"),
                               _gate("STOP", "max_attempts_reached"))
-        self.assertEqual(d.session_outcome, "stopped_by_loop_limit")
+        self.assertEqual(d.session_outcome, "stopped_by_attempt_limit")
 
     def test_stop_nearly_success_to_failed(self) -> None:
         # 用户确认: nearly_success / fp16_ceiling 归 failed (stop_code 区分)。
@@ -209,6 +210,14 @@ class TestRoundSequence(unittest.TestCase):
         self.assertEqual(d.step, "baseline_checkpoint")
         st.events.append(_completed_ev("baseline_checkpoint", {"success": True}))
         d = debug_next_action(st)
+        self.assertIsInstance(d, Continue)
+        self.assertEqual(d.next_attempt, 0)
+
+    def test_recovery_ablation_skips_baseline_checkpoint(self) -> None:
+        st = _state(current_ft="precision_failed", total_attempts=0,
+                    events=[_session_ev()])
+        with mock.patch.dict(os.environ, {"ABLATE_RECOVERY": "1"}):
+            d = debug_next_action(st)
         self.assertIsInstance(d, Continue)
         self.assertEqual(d.next_attempt, 0)
 
@@ -283,6 +292,22 @@ class TestRoundSequence(unittest.TestCase):
         d = debug_next_action(st)
         self.assertIsInstance(d, Action)
         self.assertEqual(d.step, "knowledge_search")
+
+    def test_no_forensics_also_removes_dependent_knowledge_search(self) -> None:
+        ft = "precision_failed"
+        st = _state(current_ft=ft, total_attempts=1, per_branch={ft: 1},
+                    events=[_attempt_ev(ft)])
+        with mock.patch.dict(os.environ, {"ABLATE_FORENSICS": "1"}):
+            d = debug_next_action(st)
+        self.assertEqual(d.step, "audit")
+
+    def test_no_kb_removes_knowledge_search_only(self) -> None:
+        ft = "precision_failed"
+        st = _state(current_ft=ft, total_attempts=1, per_branch={ft: 1},
+                    events=[_attempt_ev(ft), _completed_ev("forensics")])
+        with mock.patch.dict(os.environ, {"ABLATE_KB": "1"}):
+            d = debug_next_action(st)
+        self.assertEqual(d.step, "audit")
         self.assertEqual(d.kind, "py_action")
 
     def test_step_after_knowledge_search_is_audit(self) -> None:
@@ -380,7 +405,7 @@ class TestGatePrecedenceOverBudget(unittest.TestCase):
     """H1: 本轮 gate 终判 (PASS/STOP) 优先于预算闸。
 
     第 5 轮 validate 已 PASS/STOP 时，不能被全局闸 (total>=5) 覆盖成
-    stopped_by_loop_limit——那一轮本就是终态轮，gate 的终判才是真实结局。
+    stopped_by_attempt_limit——那一轮本就是终态轮，gate 的终判才是真实结局。
     """
 
     def _state_fifth_validate(self, ft="precision_failed"):
@@ -401,10 +426,10 @@ class TestGatePrecedenceOverBudget(unittest.TestCase):
         self.assertEqual(d.session_outcome, "failed")
 
     def test_continue_at_budget_limit_is_loop_limit(self) -> None:
-        # 反向: 第 5 轮 CONTINUE 想续跑但已达预算 → stopped_by_loop_limit (预算守住)。
+        # 反向: 第 5 轮 CONTINUE 想续跑但已达 attempt 上限 → stopped_by_attempt_limit。
         d = debug_next_action(self._state_fifth_validate(), _gate("CONTINUE"))
         self.assertIsInstance(d, Done)
-        self.assertEqual(d.session_outcome, "stopped_by_loop_limit")
+        self.assertEqual(d.session_outcome, "stopped_by_attempt_limit")
 
 
 class TestForensicsRetry(unittest.TestCase):
@@ -657,12 +682,20 @@ class TestTaskTurnsBudget(unittest.TestCase):
         self.assertEqual(d.session_outcome, "success")
 
     def test_loop_limit_precedence_over_budget(self) -> None:
-        # 同时撞全局轮次上限 (5) 与 turns 超阈 → 归 loop_limit (更精确)，非 budget。
+        # 同时撞全局轮次上限 (5) 与 turns 超阈 → 归 attempt_limit，非 budget。
         os.environ[self._ENV] = "10"
         st = self._state_continue_with_turns([40, 40, 40, 40, 40])  # total=5 撞闸
         d = debug_next_action(st, _gate("CONTINUE"))
         self.assertIsInstance(d, Done)
-        self.assertEqual(d.session_outcome, "stopped_by_loop_limit")
+        self.assertEqual(d.session_outcome, "stopped_by_attempt_limit")
+
+    def test_no_loopguard_uses_hard_budget_not_soft_budget(self) -> None:
+        os.environ[self._ENV] = "600"
+        os.environ[self._SOFT_ENV] = "480"
+        st = self._state_continue_with_turns([240, 240])
+        with mock.patch.dict(os.environ, {"ABLATE_LOOP_GUARD": "1"}):
+            d = debug_next_action(st, _gate("CONTINUE"))
+        self.assertIsInstance(d, Continue)
 
     def test_missing_turns_counted_as_zero(self) -> None:
         # diagnose result 缺 agent_turns (timeout/spawn_failed 早返回) → 按 0 计，不误杀。
@@ -1009,11 +1042,11 @@ class TestDegenerateEarlyStop(unittest.TestCase):
         self.assertEqual(d.session_outcome, "success")
 
     def test_loop_limit_precedence(self) -> None:
-        # 撞满 5 轮全局闸 + 连续退化 → 归 loop_limit (更精确，在 N6 之前判)。
+        # 撞满 5 轮全局闸 + 连续退化 → 归 attempt_limit (在 N6 之前判)。
         blocks = [_cheat_attempt() for _ in range(5)]
         st = self._state_of(blocks)
         d = debug_next_action(st, _gate("CONTINUE"))
-        self.assertEqual(d.session_outcome, "stopped_by_loop_limit")
+        self.assertEqual(d.session_outcome, "stopped_by_attempt_limit")
 
 
 if __name__ == "__main__":
