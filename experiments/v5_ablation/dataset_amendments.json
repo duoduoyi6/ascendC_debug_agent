@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "operator": "level5/005_inplace_index_add_with_sorted",
+  "reason": "materialize model.py:INPUT_CASES for lightweight/full-eval switching",
+  "source": "model.py:INPUT_CASES",
+  "case_count": 5,
+  "files": [
+    "/root/cannbot_debug_inputs_n27_20260723/tasks/level5/005_inplace_index_add_with_sorted/5_inplace_index_add_with_sorted.json",
+    "/root/cannbot_debug_inputs_n27_20260723/tasks/level5/005_inplace_index_add_with_sorted/5_inplace_index_add_with_sorted.json.bak"
+  ],
+  "sha256": "be1a86f965ae1d0191b577cec1a42a0f37511c97a276964c02f6c7a43b3e9c29",
+  "empty_placeholder_used": false
+}

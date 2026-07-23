@@ -44,6 +44,33 @@ def _count_nonempty_lines(path: Path) -> int:
     return sum(1 for line in path.read_text(errors="replace").splitlines() if line.strip())
 
 
+def _normalized_case_set_digest(path: Path) -> str:
+    """Hash a JSONL case multiset independent of formatting and line order."""
+    normalized: list[str] = []
+    for raw in path.read_text(errors="replace").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            value = json.loads(line)
+        except (TypeError, ValueError):
+            normalized.append(line)
+        else:
+            normalized.append(
+                json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+    digest = hashlib.sha256()
+    for line in sorted(normalized):
+        digest.update(line.encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
 def _looks_like_case_jsonl(path: Path) -> bool:
     """首行为含 'inputs' 键的 JSON dict 才算 case JSONL (排除 model.json/状态文件)。"""
     if path.name.startswith(("_", ".")):
@@ -394,7 +421,9 @@ def _run_full_eval(
 
     物理机制 (对齐 utils/run_unified_final_verify_full_eval.py): 备份当前生效 <op>.json →
     用 .json.bak/.json.full 覆盖 → 跑同一 verification (不重 build) → finally 恢复。
-    返回 None = 无更全集合 (only_py 算子 / 无 .bak)，下游 graceful 回退轻量口径。
+    返回 None = 无独立备份集合 (only_py 算子 / 无 .bak)，下游 graceful 回退轻量口径。
+    case 数相同时比较规范化 case-set 摘要：内容不同仍复验；完全等价则返回显式
+    coverage_equivalent 记录，不重复执行相同用例。
     """
     task_dir = Path(task_dir)
     full_json, full_lines = _choose_full_json(task_dir)
@@ -402,10 +431,38 @@ def _run_full_eval(
         return None
     active_name = _active_json_name(full_json)
     active_path = task_dir / active_name
-    # 全量文件必须比当前生效集更全才有复验意义 (full_json 即生效文件本身 = 无备份)。
+    # full_json 即生效文件本身 = 无独立备份，无法形成额外覆盖证据。
     cur_lines = _count_nonempty_lines(active_path) if active_path.exists() else 0
-    if active_path == full_json or full_lines <= cur_lines:
+    if active_path == full_json or full_lines < cur_lines:
         return None
+    active_digest = (
+        _normalized_case_set_digest(active_path) if active_path.exists() else None
+    )
+    full_digest = _normalized_case_set_digest(full_json)
+    if full_lines == cur_lines and active_digest == full_digest:
+        result = {
+            "ran": False,
+            "coverage_equivalent": True,
+            "equivalence_basis": "normalized_case_set_sha256",
+            "active_json": active_path.name,
+            "active_json_cases": cur_lines,
+            "active_case_set_sha256": active_digest,
+            "full_json_source": full_json.name,
+            "full_json_cases": full_lines,
+            "full_case_set_sha256": full_digest,
+        }
+        try:
+            (
+                task_dir
+                / "precision_tuning"
+                / f"validation_result_attempt_{attempt}_full.json"
+            ).write_text(
+                json.dumps(result, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+        return result
 
     # 备份用独立后缀，避开 _choose_full_json 只认的 .json/.json.bak/.json.full。
     backup_path = task_dir / f"{active_name}.lightweight_bak_attempt{attempt}"
@@ -452,8 +509,14 @@ def _run_full_eval(
     match_rate = float(metrics["match_rate"])
     result = {
         "ran": True,
+        "coverage_equivalent": False,
+        "equivalence_basis": "normalized_case_set_sha256",
+        "active_json": active_path.name,
+        "active_json_cases": cur_lines,
+        "active_case_set_sha256": active_digest,
         "full_json_source": full_json.name,
         "full_json_cases": full_lines,
+        "full_case_set_sha256": full_digest,
         "match_rate": match_rate,
         "passed_cases": metrics["passed_cases"],
         "total_cases": total_cases,

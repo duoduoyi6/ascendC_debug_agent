@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import tempfile
 import unittest
@@ -61,8 +62,20 @@ class ResetTargetTests(unittest.TestCase):
                 "host_cmd_pid=123\n",
                 encoding="utf-8",
             )
+            (task / "precision_tuning" / "forensics_report_0.json").write_text(
+                '{"status":"completed"}\n',
+                encoding="utf-8",
+            )
             (task / ".debug_events" / "events.jsonl").write_text("{}\n", encoding="utf-8")
+            (task / ".verify_logs").mkdir()
+            (task / ".verify_logs" / "phase8_attempt0.stdout").write_text(
+                "Status: FAIL\n", encoding="utf-8")
+            (task / ".verify_status").mkdir()
+            (task / ".verify_status" / "latest.json").write_text(
+                '{"failure_type":"provider_api_error"}\n', encoding="utf-8")
             (task / "debug_status.json").write_text('{"session_outcome":"crashed"}', encoding="utf-8")
+            (task / "_claude_result_attempt0.json").write_text(
+                '{"num_turns":12,"total_cost_usd":1.5}\n', encoding="utf-8")
 
             target = supervisor.Target(source=source, task=task)
             archive = supervisor.archive_retry_evidence(target, "unit_test")
@@ -70,9 +83,19 @@ class ResetTargetTests(unittest.TestCase):
             self.assertIsNotNone(archive)
             assert archive is not None
             self.assertTrue((archive / "precision_tuning" / "signal_audit" / "rc143.txt").exists())
+            self.assertTrue(
+                (archive / "precision_tuning" / "forensics_report_0.json").exists())
             self.assertTrue((archive / ".debug_events" / "events.jsonl").exists())
+            self.assertTrue(
+                (archive / ".verify_logs" / "phase8_attempt0.stdout").exists())
+            self.assertTrue((archive / ".verify_status" / "latest.json").exists())
+            self.assertTrue((archive / "_claude_result_attempt0.json").exists())
             self.assertTrue((archive / "debug_status.json").exists())
             self.assertTrue((archive / "archive_manifest.json").exists())
+            manifest = json.loads(
+                (archive / "archive_manifest.json").read_text(encoding="utf-8"))
+            self.assertTrue(
+                manifest["cost_accounting"]["excluded_from_primary_cost"])
 
 
 class SupervisorConfigurationTests(unittest.TestCase):

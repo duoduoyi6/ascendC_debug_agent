@@ -345,6 +345,49 @@ class TestRunFullEval(unittest.TestCase):
             fe = self._call()
         self.assertIsNone(fe)
 
+    def test_equal_count_different_case_set_still_runs(self) -> None:
+        self.light.write_text(
+            '{"inputs": [1]}\n{"inputs": [2]}\n', encoding="utf-8")
+        self.full.write_text(
+            '{"inputs": [1]}\n{"inputs": [99]}\n', encoding="utf-8")
+        cases = "case[0]: output: matched\ncase[1]: output: matched\n"
+        fake = mock.Mock(
+            side_effect=self._fake_run_logged(case_lines=cases, rc=0))
+        with mock.patch.object(
+            validate_runner,
+            "_run_logged",
+            fake,
+        ):
+            fe = self._call()
+        self.assertTrue(fe["ran"])
+        self.assertFalse(fe["coverage_equivalent"])
+        fake.assert_called_once()
+
+    def test_equal_semantic_case_set_records_equivalence_without_rerun(self) -> None:
+        self.light.write_text(
+            '{"inputs":[1],"meta":{"b":2,"a":1}}\n{"inputs":[2]}\n',
+            encoding="utf-8",
+        )
+        self.full.write_text(
+            '{"inputs": [2]}\n{"meta":{"a":1,"b":2},"inputs":[1]}\n',
+            encoding="utf-8",
+        )
+        with mock.patch.object(validate_runner, "_run_logged") as run:
+            fe = self._call()
+        self.assertFalse(fe["ran"])
+        self.assertTrue(fe["coverage_equivalent"])
+        self.assertEqual(
+            fe["active_case_set_sha256"], fe["full_case_set_sha256"])
+        run.assert_not_called()
+        persisted = json.loads(
+            (
+                self.task_dir
+                / "precision_tuning"
+                / "validation_result_attempt_0_full.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertTrue(persisted["coverage_equivalent"])
+
 
 class TestForensicsReuseAfterRollback(unittest.TestCase):
     """问题 7: 回滚后复用 best 轮 forensics_report，不跑取证子进程 (省编译+取证)。"""

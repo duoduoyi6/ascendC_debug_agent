@@ -305,6 +305,9 @@ cat "{task_dir}/precision_tuning/round_summary_{N}.json"
 
 **知识库检索 (第一次 — 基于取证 hint + 算子类型):**
 
+> 若 engine prompt 注入 `ABLATE_KB=1` 或
+> `ABLATE_DIAGNOSTIC_EVIDENCE=1`，跳过本节及后续第二次检索，且不得手工读取 KB。
+
 从 `[FORENSICS_SUMMARY]` 中提取 `primary_hint` 和 `op_type`, 检索相关知识条目:
 ```bash
 python3 skills/ascendc/ascendc-debug/scripts/precision_knowledge.py search \

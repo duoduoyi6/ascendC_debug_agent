@@ -57,6 +57,7 @@ AGENT="constructive"        # 引擎 CLI 接受 constructive(AAAI 主力)/discov
 ALLOWED_TOOLS="Bash,Read,Write,Edit,Glob,Grep,Skill"
 ENTRY_FAILURE_TYPE=""       # 首次 session 入口 failure_type；precision_failed 等
 ANTICHEAT_SCRIPT="skills/ascendc/ascendc-debug/scripts/anticheat.py"
+DESCRIBE_ABLATE_PROFILE="0"
 
 # ── 参数解析 ──
 while [[ $# -gt 0 ]]; do
@@ -89,6 +90,8 @@ while [[ $# -gt 0 ]]; do
         --allowed-tools)          ALLOWED_TOOLS="$2"; shift 2 ;;
         --entry-failure-type)     ENTRY_FAILURE_TYPE="$2"; shift 2 ;;
         --ablate-profile)         ABLATE_PROFILE="$2"; shift 2 ;;
+        --describe-ablate-profile)
+                                  ABLATE_PROFILE="$2"; DESCRIBE_ABLATE_PROFILE="1"; shift 2 ;;
         -h|--help)
             sed -n '1,30p' "$0"
             exit 0
@@ -108,8 +111,13 @@ case "$ABLATE_PROFILE" in
                   # V5 联合消融：关闭 engine-owned forensics（连带依赖它的
                   # knowledge_search）和 L5 probe，但保留 diagnose_and_fix、
                   # Gate-A、full-eval、loopguard、recovery 与 anti-cheat。
+                  export ABLATE_DIAGNOSTIC_EVIDENCE=1
                   export ABLATE_FORENSICS=1
-                  export ABLATE_PROBE=1 ;;
+                  export ABLATE_PROBE=1
+                  # 同时关闭 Agent 手工检索路径，避免 system prompt 绕过
+                  # engine-owned knowledge_search 的联合消融边界。
+                  export ABLATE_KB=1
+                  KB_PATH="" ;;
     no_forensics|no_probe)
                   echo "$ABLATE_PROFILE 已从 V5 正式矩阵移除；请使用 no_diagnostic_evidence"
                   exit 1 ;;
@@ -127,6 +135,39 @@ case "$ABLATE_PROFILE" in
                   KB_PATH="" ;;
     *) echo "未知 ABLATE_PROFILE: $ABLATE_PROFILE"; exit 1 ;;
 esac
+
+if [[ "$DESCRIBE_ABLATE_PROFILE" == "1" ]]; then
+    python3 - \
+        "$ABLATE_PROFILE" \
+        "${ABLATE_DIAGNOSTIC_EVIDENCE:-0}" \
+        "${ABLATE_FORENSICS:-0}" \
+        "${ABLATE_PROBE:-0}" \
+        "${ABLATE_KB:-0}" \
+        "${ABLATE_LOOP_GUARD:-0}" \
+        "${ABLATE_GATE_A:-0}" \
+        "${ABLATE_FULL_EVAL:-0}" \
+        "${ABLATE_ANTICHEAT:-0}" \
+        "${ABLATE_RECOVERY:-0}" \
+        "${ANTICHEAT_DETECT_ONLY:-0}" \
+        "$KB_PATH" <<'PY'
+import json
+import sys
+
+keys = (
+    "diagnostic_evidence", "forensics", "probe", "kb", "loop_guard",
+    "gate_a", "full_eval", "anticheat", "recovery", "anticheat_detect_only",
+)
+print(json.dumps({
+    "profile": sys.argv[1],
+    "ablated": {
+        key: value == "1"
+        for key, value in zip(keys, sys.argv[2:12])
+    },
+    "kb_path": sys.argv[12] or None,
+}, sort_keys=True))
+PY
+    exit 0
+fi
 
 # ── 校验 ──
 [[ -z "$TASK_DIRS" && -z "$TASK_DIRS_FILE" ]] && {
@@ -809,6 +850,8 @@ run_engine_turn() {
     [[ -n "${ABLATE_PROBE:-}" ]]      && ablate_flags+=(-e "ABLATE_PROBE=$ABLATE_PROBE")
     [[ -n "${ABLATE_KB:-}" ]]         && ablate_flags+=(-e "ABLATE_KB=$ABLATE_KB")
     [[ -n "${ABLATE_RECOVERY:-}" ]]   && ablate_flags+=(-e "ABLATE_RECOVERY=$ABLATE_RECOVERY")
+    [[ -n "${ABLATE_DIAGNOSTIC_EVIDENCE:-}" ]] \
+                                             && ablate_flags+=(-e "ABLATE_DIAGNOSTIC_EVIDENCE=$ABLATE_DIAGNOSTIC_EVIDENCE")
     [[ -n "${ANTICHEAT_DETECT_ONLY:-}" ]] && ablate_flags+=(-e "ANTICHEAT_DETECT_ONLY=$ANTICHEAT_DETECT_ONLY")
     [[ "$KB_READ_ONLY" == "1" ]] && ablate_flags+=(-e "ASCENDC_DEBUG_KB_READ_ONLY=1")
     timeout --signal=TERM --kill-after=30 "$TIMEOUT_SEC" \
@@ -1004,19 +1047,11 @@ run_worker() {
         # ── 反作弊后置检测 ──
         local cheat_json cheat_verdict cheat_reasons cheat_mark
         if [[ -n "${ABLATE_ANTICHEAT:-}" ]]; then
-            # Strict no_anticheat execution: the engine never consumes this
-            # result.  A post-run observer still measures what the removed
-            # component would have seen, without rebuilding debug_status.
-            cheat_json=$(docker exec "$container" bash -lc "
-                cd '$WORKDIR_IN_CONTAINER'
-                python3 '$ANTICHEAT_SCRIPT' verify '$task_dir' --json 2>/dev/null
-            " 2>/dev/null || true)
-            if [[ -n "$cheat_json" ]]; then
-                mkdir -p "$task_dir/precision_tuning"
-                printf "%s\n" "$cheat_json" \
-                    > "$task_dir/precision_tuning/anticheat_observer.json"
-            fi
-            echo "[anticheat] engine ablated; post-run observer only" >> "$wlog"
+            # Strict treatment isolation: neither engine nor batch wrapper runs
+            # anti-cheat in the task directory.  The V5 controller evaluates an
+            # isolated deep copy after the arm finishes.
+            cheat_json=""
+            echo "[anticheat] engine ablated; isolated post-hoc observer required" >> "$wlog"
         else
             cheat_json=$(docker exec "$container" bash -lc "
                 cd '$WORKDIR_IN_CONTAINER'

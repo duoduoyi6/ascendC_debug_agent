@@ -341,9 +341,12 @@ def archive_retry_evidence(target: Target, reason: str) -> Path | None:
         / target.rel.replace("/", "__")
         / datetime.now().strftime("%Y%m%d_%H%M%S")
     )
+    archive.mkdir(parents=True, exist_ok=True)
     evidence_rels = [
-        Path("precision_tuning/signal_audit"),
+        Path("precision_tuning"),
         Path(".debug_events/events.jsonl"),
+        Path(".verify_logs"),
+        Path(".verify_status"),
         Path("debug_status.json"),
         Path("debug_trace.md"),
         Path("_anticheat.json"),
@@ -360,7 +363,18 @@ def archive_retry_evidence(target: Target, reason: str) -> Path | None:
         else:
             shutil.copy2(src, dst)
         copied.append(str(rel))
+    for pattern in (
+        "_claude_result*.json",
+        "_provider*.json",
+        "_provider*.jsonl",
+    ):
+        for src in sorted(target.task.glob(pattern)):
+            if not src.is_file():
+                continue
+            shutil.copy2(src, archive / src.name)
+            copied.append(src.name)
     if not copied:
+        shutil.rmtree(archive, ignore_errors=True)
         return None
     atomic_write_json(
         archive / "archive_manifest.json",
@@ -371,6 +385,13 @@ def archive_retry_evidence(target: Target, reason: str) -> Path | None:
             "source": str(target.source),
             "task": str(target.task),
             "copied": copied,
+            "cost_accounting": {
+                "excluded_from_primary_cost": True,
+                "primary_cost_scope": "final_valid_cycle_only",
+                "retention_purpose": (
+                    "provider stability and failed-cycle root-cause diagnostics"
+                ),
+            },
         },
     )
     return archive

@@ -1,0 +1,2277 @@
+[
+  {
+    "title": "尾块 Padding 值污染计算结果 (Tail Padding Contamination)",
+    "feature": "最后一维尾部区域 mismatch 显著高于主体, 尾块长度等于 last_dim % tile_size",
+    "patterns": [
+      "tail_spike"
+    ],
+    "op_types": [],
+    "reason": "CopyIn 后尾块的 padding 区域包含脏数据 (0 或未初始化值), 这些值参与了后续向量操作。AscendC DataCopy 按 32 字节对齐传输, 尾块不足部分的 buffer 内容不确定。",
+    "fix": "CopyIn 前先用 Duplicate 初始化整个 buffer (Sum/Mean 用 0, Max 用 -INFINITY, Min 用 +INFINITY); 或确保所有向量操作的 count 参数使用对齐的 tileLength 而非动态 actualLength, 配合正确的 padding 值。",
+    "type": "FIX_PRECISION_TAIL"
+  },
+  {
+    "title": "向量操作使用动态有效长度 (Vector Op Dynamic Count)",
+    "feature": "向量操作 count 参数使用 validLen/actualLen 等动态变量",
+    "patterns": [
+      "tail_spike",
+      "boundary_concentration"
+    ],
+    "op_types": [],
+    "reason": "AscendC 向量操作要求 count 参数满足对齐约束 (float32: 8 的倍数, float16: 16 的倍数)。使用动态有效长度会在尾块处理时违反对齐要求, 导致不可预测的结果。",
+    "fix": "所有 Add/Sub/Mul/Div/Exp 等向量操作使用固定对齐的 tileLength 作为 count 参数, 通过 CopyIn 时的 padding 初始化来保证尾块安全。",
+    "type": "FIX_PRECISION_TAIL"
+  },
+  {
+    "title": "归约操作 Padding 值语义不匹配 (Reduce Padding Semantic Mismatch)",
+    "feature": "全局偏移, 所有元素偏大或偏小",
+    "patterns": [
+      "uniform_offset"
+    ],
+    "op_types": [],
+    "reason": "CopyIn padding 默认为 0, 但不同归约操作对 padding 值有不同语义要求: ReduceMax 中 padding=0 会覆盖负值区域; ReduceMean 中 padding 元素会稀释均值; ReduceMin 中 padding=0 会覆盖正值区域。",
+    "fix": "根据归约类型选择 padding 值: ReduceMax 用 -INFINITY, ReduceMin 用 +INFINITY, ReduceSum 用 0, ReduceMean 需排除 padding 数量或用 0 并调整分母。",
+    "type": "FIX_PRECISION_PADDING"
+  },
+  {
+    "title": "TBuf 异步 DataCopy 数据竞争 (TBuf Async Data Race)",
+    "feature": "随机位置出现小偏差, 多次运行结果不一致",
+    "patterns": [
+      "scattered"
+    ],
+    "op_types": [],
+    "reason": "TBuf (VECCALC) 上的 DataCopy 是异步操作, 没有内置同步机制。如果 DataCopy 还未完成就开始向量计算, 会读到不完整的数据, 导致随机精度偏差。",
+    "fix": "方案 A (推荐): 改用 TQue (VECIN/VECOUT), DataCopy + EnQue/DeQue 自动同步。方案 B: 使用 SetFlag/WaitFlag 显式同步。",
+    "type": "FIX_PRECISION_SYNC"
+  },
+  {
+    "title": "Float16 归约累加精度损失 (Float16 Reduction Precision Loss)",
+    "feature": "大量小值累加时整体偏差较大",
+    "patterns": [
+      "magnitude_correlated",
+      "scattered"
+    ],
+    "op_types": [],
+    "reason": "Float16 只有 10 位尾数, 大量小值直接累加会导致精度损失 (大数吃小数效应)。NPU 并行归约的累加顺序与 CPU 串行不同, 可能放大此效应。",
+    "fix": "归约前 Cast 到 float32, 归约后 Cast 回 float16。",
+    "type": "FIX_PRECISION_TYPECAST"
+  },
+  {
+    "title": "数据布局不一致导致维度级错误 (Data Layout Mismatch)",
+    "feature": "某个 batch/channel 维度整体错误",
+    "patterns": [
+      "dimension_concentration"
+    ],
+    "op_types": [],
+    "reason": "Host 端 format 设置与 Kernel 中的 GM 偏移计算实际假设的布局不一致, 或多维索引中 stride 计算错误。",
+    "fix": "检查 op_host.cpp 中 SetFormat 设置; 检查 op_kernel.cpp 中 GM 偏移 stride 表达式; 确保与参考实现一致。",
+    "type": "FIX_PRECISION_LAYOUT"
+  },
+  {
+    "title": "除零或 Exp 溢出产生 NaN/Inf (Div-by-Zero or Exp Overflow)",
+    "feature": "NPU 输出包含 NaN 或 Inf",
+    "patterns": [
+      "nan_inf_contamination"
+    ],
+    "op_types": [],
+    "reason": "Div 除数为零产生 Inf; Exp 输入过大 (float32 下 exp(88) ≈ 1.65e38) 溢出。",
+    "fix": "除法: 分母加 epsilon。Exp: 输入 clamp 到安全范围。AllocTensor 后 Duplicate 初始化。",
+    "type": "FIX_PRECISION_OVERFLOW"
+  },
+  {
+    "title": "ReduceMax/ReduceSum count 未对齐 (Reduce Count Alignment)",
+    "feature": "Reduce 操作在非对齐 count 上产生错误结果",
+    "patterns": [
+      "tail_spike",
+      "scattered"
+    ],
+    "op_types": [],
+    "reason": "AscendC Reduce 要求 count 为特定值的倍数 (float32 下 64 的倍数), 不满足时硬件行为未定义。",
+    "fix": "对齐 count: alignedCount = ((count + 63) / 64) * 64, 配合 buffer padding 初始化。",
+    "type": "FIX_PRECISION_REDUCTION"
+  },
+  {
+    "title": "Host InferShape 与 Kernel 偏移计算不一致 (InferShape Mismatch)",
+    "feature": "输出形状正确但数值全错",
+    "patterns": [
+      "all_wrong",
+      "dimension_concentration"
+    ],
+    "op_types": [],
+    "reason": "op_host.cpp InferShape 与 op_kernel.cpp GM 偏移计算不一致, 特别是涉及 stride/padding/dilation 时。",
+    "fix": "逐步对比 InferShape 输出维度公式与 Kernel GM 偏移计算, 检查 TilingData 参数传递。",
+    "type": "FIX_PRECISION_LOGIC"
+  },
+  {
+    "title": "ReduceSum/ReduceMax 就地改写源 Tensor 导致后续步骤数据污染 (ReduceOverwrite)",
+    "feature": "Reduce 之后引用同一 src tensor 的计算步骤出现系统性偏差; 常见于 Softmax（x - max 步骤）、LayerNorm（x - mean 步骤）、任何需要保留原始数据的归约场景",
+    "patterns": [
+      "magnitude_correlated",
+      "scattered"
+    ],
+    "op_types": [],
+    "reason": "AscendC ReduceSum/ReduceMax 内部实现会就地修改 src tensor（src 与 dst 使用相同寄存器时），若后续逻辑仍引用 src 数据，读到的是已被归约改写后的值，导致计算结果系统性错误",
+    "fix": "在调用 ReduceSum/ReduceMax 之前，先用 Adds(backup, src, 0.0f, count) 将 src 完整复制备份到独立 TBuf；后续所有引用原始 src 数据的步骤改为引用 backup，而非 src",
+    "type": "FIX_PRECISION_REDUCTION"
+  },
+  {
+    "title": "[CHECKLIST] Reduction 类算子精度检查清单",
+    "feature": "适用于 ReduceSum/ReduceMax/ReduceMean/Softmax/LayerNorm 等",
+    "patterns": [],
+    "op_types": [
+      "reduction"
+    ],
+    "reason": "归约类算子最常见的精度问题来自: float16 累加损失、count 对齐、padding identity 值、tiling 边界处理。",
+    "fix": "检查项: (1) float16 是否提升到 float32 累加 (2) Reduce count 是否 64 倍数对齐 (3) padding 值是否匹配归约语义 (Sum→0, Max→-INF) (4) tiling 边界 tile 是否正确处理",
+    "type": "FIX_PRECISION_REDUCTION"
+  },
+  {
+    "title": "[CHECKLIST] Pooling 类算子精度检查清单",
+    "feature": "适用于 AvgPool2d/MaxPool2d/AdaptiveAvgPool 等",
+    "patterns": [],
+    "op_types": [
+      "pooling"
+    ],
+    "reason": "池化类算子的精度问题主要来自: padding 区域计算、窗口边界对齐、除法取整。",
+    "fix": "检查项: (1) padding 区域是否正确参与/排除计算 (2) 窗口边界是否与 stride 正确对齐 (3) AvgPool 的除数是否排除 padding 元素 (4) 边缘窗口是否正确处理",
+    "type": "FIX_PRECISION_PADDING"
+  },
+  {
+    "title": "[CHECKLIST] Loss 类算子精度检查清单",
+    "feature": "适用于 MSELoss/CrossEntropyLoss/NLLLoss 等",
+    "patterns": [],
+    "op_types": [
+      "loss"
+    ],
+    "reason": "损失函数的精度问题主要来自: mean 分母计算、sqrt 精度、数值范围。",
+    "fix": "检查项: (1) mean 的分母是否正确 (特别是 reduction='mean' 时) (2) sqrt/log 的输入是否加了 epsilon 保护 (3) 中间结果是否可能溢出",
+    "type": "FIX_PRECISION_LOGIC"
+  },
+  {
+    "title": "[CHECKLIST] MatMul 类算子精度检查清单",
+    "feature": "适用于 MatMul/BMM/Linear 等",
+    "patterns": [],
+    "op_types": [
+      "matmul"
+    ],
+    "reason": "矩阵乘法的精度问题主要来自: 分块计算边界、累加精度、bias 加法。",
+    "fix": "检查项: (1) 分块边界 (M/N/K 维度) 的 tile 是否正确处理 (2) 内积累加是否使用 float32 (3) bias 加法的广播是否正确",
+    "type": "FIX_PRECISION_LOGIC"
+  },
+  {
+    "title": "[CHECKLIST] Normalization 类算子精度检查清单",
+    "feature": "适用于 LayerNorm/BatchNorm/GroupNorm 等",
+    "patterns": [],
+    "op_types": [
+      "normalization"
+    ],
+    "reason": "归一化算子的精度问题主要来自: epsilon 稳定性、variance 计算精度、affine 变换。",
+    "fix": "检查项: (1) variance 计算: 使用 E[x^2] - (E[x])^2 还是直接计算, 前者在大值时不稳定 (2) epsilon 是否在除法前加入 (3) gamma/beta affine 变换是否正确应用 (4) mean/var 的归约维度是否正确",
+    "type": "FIX_PRECISION_LOGIC"
+  },
+  {
+    "title": "归约轴切分破坏导致局部归约错误 (Reduction Axis Split Error)",
+    "feature": "涉及 Softmax/LayerNorm/ReduceSum 等归约算子, mismatch 广泛分布",
+    "patterns": [
+      "all_wrong",
+      "uniform_offset"
+    ],
+    "op_types": [],
+    "reason": "Host 端 Tiling 采用默认线性切分, 将需要归约的轴切断分给了不同的核或 Tile, 导致每个核只看到局部数据, 归约结果不正确。例如 Softmax 的 dim=-1 轴应在单核内完整处理, 若被切分则每核只算局部 max/sum。",
+    "fix": "修改 Host Tiling 代码, 确保归约维度在单核内完整处理。检查 op_host.cpp 中 tileLength 是否覆盖归约轴全长; 若归约轴超出 UB 容量, 改用多趟归约策略 (Pass 1: 局部归约 → 跨 tile 累加器合并)。",
+    "type": "FIX_PRECISION_REDUCTION"
+  },
+  {
+    "title": "超大归约维强制分块时全局累加器未正确维护 (Large Reduction Dim Tiling)",
+    "feature": "归约维度远大于单核 UB 容量, 需要多次 CopyIn 累加",
+    "patterns": [
+      "all_wrong",
+      "uniform_offset"
+    ],
+    "op_types": [],
+    "reason": "归约维度超出 UB 容量时需要分块多次加载, 但每次 Reduce 操作只看到当前块的数据, 全局累加器 (如 row_max, exp_sum, partial_mean) 未正确跨块维护。例如 Softmax 三趟遍历中 row_max 必须是全行最大值而非当前 tile 最大值。",
+    "fix": "实现多趟归约: 分块 CopyIn + 块内 Reduce + 跨块累加器更新。确保全局累加器初始化正确 (Max→-INF, Sum→0, Min→+INF), 每块 Reduce 后与全局累加器合并 (Max 取 max, Sum 取 +=)。",
+    "type": "FIX_PRECISION_REDUCTION"
+  },
+  {
+    "title": "跨核 Workspace 归约未正确同步或初始化 (Cross-Core Workspace Reduction)",
+    "feature": "涉及多核 partial sum + Core 0 全局汇总的算子 (MSELoss/ReduceMean/全局归约等)",
+    "patterns": [
+      "scattered",
+      "uniform_offset"
+    ],
+    "op_types": [],
+    "reason": "各核将 partial sum 写入 GM workspace, Core 0 读取汇总。若 workspace 未初始化、写入未同步 (DataCopy 异步)、或 Core 0 读取时其他核尚未写完, 结果不确定。另外 Phase 2 的 ReduceSum count=n_cores 不满足 64 倍数对齐。",
+    "fix": "确保 workspace GM buffer 初始化为 0; 各核写入后使用 pipe_barrier 或等效同步; Core 0 读取前确认所有核已完成; Phase 2 的 ReduceSum count 对齐到 64, padding 为 0; 最终除法分母使用 total_elems 而非 per-core 或 n_cores。",
+    "type": "FIX_PRECISION_SYNC"
+  },
+  {
+    "title": "Softmax ReduceMax/ReduceSum work buffer 未初始化导致分母偏大 (Work Buffer Uninitialized)",
+    "feature": "全局负偏差, actual < golden, bias_direction=negative, mismatch 均匀分布于所有行, 无尾块集中",
+    "patterns": [
+      "uniform_offset"
+    ],
+    "op_types": [],
+    "reason": "AscendC ReduceMax 和 ReduceSum 的第三参数 work_local 在调用前未用 Duplicate 初始化。ReduceMax 要求初始化为 -INF，ReduceSum 要求初始化为 0。未初始化时 work buffer 包含历史脏数据，使归约结果偏大，softmax 分母偏大导致所有输出值系统性偏小。",
+    "fix": "在每次 ReduceMax 调用前加 Duplicate(work_buf, -INFINITY, count)；在每次 ReduceSum 调用前加 Duplicate(work_buf, 0, count)。若 work buffer 与结果 buffer 共用（如 sharedLocalTensor 同时作为 dst 和 work），需特别注意初始化时机在调用之前而非之后。",
+    "type": "FIX_PRECISION_PADDING",
+    "_meta": {
+      "op_name": "softmax",
+      "created_at": "2026-03-23T21:57:05.045327",
+      "attempts_needed": 3
+    },
+    "derived_keywords": [
+      "softmax"
+    ]
+  },
+  {
+    "title": "TBuf 绕过 outQueue 导致输出全零 (TBuf DataCopy Bypass Zero Output)",
+    "feature": "100% mismatch, actual 输出≈0 (量级 1e-41), 输出不含 NaN/Inf, sign_analysis 全为 negative",
+    "patterns": [
+      "all_wrong"
+    ],
+    "op_types": [
+      "pooling"
+    ],
+    "reason": "Kernel CopyOut 函数中, maxBuf 等 TBuf<VECCALC> 变量直接作为 DataCopy 的 src 写 GM, 绕过了 outQueue (TQue<VECOUT>) 的 EnQue/DeQue 同步机制。TBuf 分配在 UB 的 VECCALC 区域, 非 DMA 可访问区域, DataCopy 从此处读到接近 0 的脏数据, 导致输出全零。",
+    "fix": "CopyOut 中改用 outQueue 流程: (1) outLocal = outQueue.AllocTensor(); (2) 将计算结果写入 outLocal (DataCopy 或向量赋值); (3) outQueue.EnQue(outLocal); (4) outLocal2 = outQueue.DeQue(); (5) DataCopy(outputGm, outLocal2); (6) outQueue.FreeTensor(outLocal2)。核心原则: GM 写入的 src 必须来自 outQueue DeQue 后的 tensor, 不能直接用 TBuf.Get() 的结果。",
+    "type": "FIX_PRECISION_SYNC"
+  },
+  {
+    "title": "Cumsum 输出全零 (TBuf Direct DataCopy)",
+    "feature": "actual output 全零, mismatch_ratio 接近 100%",
+    "patterns": [
+      "all_wrong"
+    ],
+    "op_types": [],
+    "reason": "Kernel 中 TBuf 中间结果被直接用于 DataCopy 写回 GM，但 TBuf 不参与 outQueue 同步机制，导致数据实际未写出。",
+    "fix": "确保所有 GM 写操作都通过 VECOUT TQue 的 EnQue/DeQue 流程，禁止将 TBuf.Get() 直接作为 DataCopy 的源或目标。",
+    "type": "FIX_PRECISION_LOGIC",
+    "_meta": {
+      "op_name": "cumsum",
+      "created_at": "2026-04-14T01:08:55.994229",
+      "attempts_needed": 2
+    },
+    "derived_keywords": [
+      "cumsum"
+    ]
+  },
+  {
+    "title": "Cumsum Host Tiling 与 Python 转置逻辑不一致导致输出全零 (Cumsum Host Tiling Mismatch)",
+    "feature": "actual_value 全为 0, Kernel 未写入数据, 或部分不匹配且数值偏离",
+    "patterns": [
+      "all_wrong"
+    ],
+    "op_types": [],
+    "reason": "Python 层的 transpose 逻辑与 Host Tiling 函数对 scan 轴的假设不一致。当 cumsum_custom.py 使用 permute 将 scan 维度移到 axis 0 时，Host Tiling 仍按固定 dim(0) 或最后一维计算 scanLen，导致 tasksPerCore=0 或数据布局错配，Kernel 循环未执行或读取了错误位置的数据。",
+    "fix": "统一 Python 层与 Host Tiling 的维度转置约定：若 Python 将 scan 轴移到 axis 0，则 Host Tiling 的 scanLen 必须取 GetDim(0)；若使用其他转置策略，Kernel 的 GM offset 计算需相应调整。同时检查 TQue 深度是否支持 scanLen 次循环的流水线模式，避免队列满导致 NPU 死锁。",
+    "type": "FIX_PRECISION_LOGIC",
+    "_meta": {
+      "op_name": "cumsum",
+      "created_at": "2026-04-14T02:01:16.376175",
+      "attempts_needed": 3
+    },
+    "derived_keywords": [
+      "cumsum"
+    ]
+  },
+  {
+    "title": "多 Kernel 入口聚合与过度并行调度导致 Add 执行异常 (Kernel Registration and MTE Scheduling)",
+    "feature": "输出 shape 正确但数值几乎全错; 修复入口注册后, 大 shape 全量用例进一步暴露设备侧运行时异常或流同步失败",
+    "patterns": [
+      "all_wrong"
+    ],
+    "op_types": [],
+    "reason": "纯逐元素向量算子如果把多个 dtype 的 `__global__` 入口聚合到同一 AscendC 源文件，可能导致运行时二进制注册不稳定；即使入口问题修复，若继续使用不必要的多核/子块切分，也可能在大张量上触发 MTE 非法配置。此类问题的表象不是局部尾块误差，而是全局失配或直接设备异常。",
+    "fix": "先将不同 dtype 的 AscendC kernel 入口拆分为独立 `.cpp` 源文件，确保每个源文件只导出一个 `extern \"C\" __global__ __aicore__` 入口及对应 launch 函数。随后把纯逐元素算子的 host/kernel 调度收敛到更保守的顺序 tile 方案，优先保证 `DataCopyPad` 的搬运参数与 tile 长度一致，再考虑并行扩展。",
+    "type": "FIX_PRECISION_LOGIC",
+    "_meta": {
+      "op_name": "3_Add",
+      "created_at": "2026-04-21T05:41:55.688920",
+      "attempts_needed": 1
+    },
+    "derived_keywords": [
+      "add"
+    ]
+  },
+  {
+    "title": "多 kernel 函数同文件导致 RegisterAscendBinary 失败 (Multiple Kernels Per File Cause RegisterAscendBinary Failure)",
+    "feature": "kernel 输出全零或 uninitialized, RegisterAscendBinary 返回非零错误码（如 107000）, 所有 case 100% mismatch",
+    "patterns": [
+      "all_wrong"
+    ],
+    "op_types": [],
+    "reason": "AscendC 编译器在单个 .cpp 文件中检测到多个 __global__ __aicore__ kernel 函数时会生成警告。这种情况下， ascendc_pack_kernel 可能生成无法正常注册的 device binary，导致 RegisterAscendBinary 失败。host_stub 在注册失败后将 handle 置为 null，后续 LaunchAscendKernel 直接返回而不执行任何 kernel 代码，输出保持 empty_like 的初始值。",
+    "fix": "将每个 __global__ __aicore__ kernel 入口拆分到独立的 .cpp 文件中，确保每个文件只含一个 kernel 函数。同时，若算子为纯 Vector 计算，应使用 KERNEL_TYPE_AIV_ONLY 并移除 if ASCEND_IS_AIV 守卫。",
+    "type": "FIX_PRECISION_OTHER",
+    "_meta": {
+      "op_name": "3_Add",
+      "created_at": "2026-05-14T13:09:53.905416",
+      "attempts_needed": 1
+    },
+    "derived_keywords": [
+      "add"
+    ]
+  },
+  {
+    "title": "UnfoldBackward 多行顺序处理时 MTE-Vector 流水线竞争导致除末行外全零 (MTE-Vector Pipeline Race in Sequential Row Processing)",
+    "feature": "当 B>1 时, 仅最后一行输出非零, 其余行全为零; mismatch_ratio 随 B 增大而升高",
+    "patterns": [
+      "dimension_concentration"
+    ],
+    "op_types": [],
+    "reason": "AscendC 中 DataCopyPad(UB->GM) 由 MTE 引擎异步执行，而下一轮次的 Duplicate/Compute 由 Vector/Scalar 引擎执行。若在 DataCopyPad 后未插入 PipeBarrier<PIPE_ALL>()，Vector 引擎会提前覆盖 UB 缓冲区，导致 MTE 实际读取的是下一行的数据，造成除最后一行外全部写回 GM 的数据错误甚至为零。",
+    "fix": "在 ProcessRow 末尾 DataCopyPad(UB->GM) 之后立即插入 PipeBarrier<PIPE_ALL>()，确保 MTE 写 GM 完成后再释放 UB 缓冲区供下一轮次使用。同时在 Duplicate 初始化后及 DeQue 读取后也应插入 PipeBarrier，保证 Scalar GetValue/SetValue 能看到 Vector/MTE 的写结果。",
+    "type": "FIX_PRECISION_SYNC",
+    "_meta": {
+      "op_name": "unfold_backward",
+      "created_at": "2026-05-18T14:17:12.294236",
+      "attempts_needed": 1
+    },
+    "derived_keywords": [
+      "unfold",
+      "unfold_backward"
+    ]
+  },
+  {
+    "title": "NLLLoss weight mean 分母与多核 sub-block 行分配错误 (NLLLoss Weight Mean Denominator & Sub-block Row Distribution)",
+    "feature": "NLLLoss 算子在 mean+weight 场景下 mismatch, 或在大 C / 多维输入场景下随机 crash / 精度异常; 表现为部分 case 100% mismatch 且 diff 极大, 或出现 MPU address invalid aicore exception",
+    "patterns": [
+      "all_wrong",
+      "scattered"
+    ],
+    "op_types": [
+      "loss"
+    ],
+    "reason": "NLLLoss kernel 存在多重叠加缺陷：(1) weight+mean 时错误地以非 ignore 元素个数作为分母，而非 weight 之和；(2) 多核 reduction 时 partial sum 写回后缺少 SyncAll，core 0 读到未就绪数据；(3) host 侧固定 subBlockN=blockN/DEFAULT_VEC_NUM，与设备侧实际 GetSubBlockNum() 不匹配，导致部分数据行未被任何 sub-block 处理；(4) 负 weight sum 时 totalCount>0 条件跳过除法，返回未归一化 sum；(5) 大 C 场景下一次性拷贝整行到 LocalTensor 导致 L1 内存溢出。",
+    "fix": "(1) mean+weight 时累加 weightVal 到 localCount 作为分母；(2) reduction 分支在写回 partial sum 后调用 AscendC::SyncAll()；(3) 设备侧动态计算 subBlockN=blockN/GetSubBlockNum()；(4) mean 分支判断改为 totalCount!=0.0f；(5) 改为仅拷贝目标索引处的单元素到 LocalTensor，显著降低 local memory 占用。",
+    "type": "FIX_PRECISION_LOGIC",
+    "_meta": {
+      "op_name": "25_NLLLoss",
+      "created_at": "2026-05-18T18:25:25.796749",
+      "attempts_needed": 1
+    }
+  },
+  {
+    "title": "npu_iou 面积公式包含 +0.01 偏移 (npu_iou Area Formula +0.01 Offset)",
+    "feature": "mismatch 集中在小 box 的行 (gt area 量级 < 0.1), max_abs_diff 远大于一般 fp32 噪声 (>1e-2), 但 inter 计算正确; 对大 box 几乎无差异 (相对误差 < 1e-4); mismatch mean ≫ normal mean (>100×), 且只发生在 area2 较小的子集",
+    "patterns": [
+      "magnitude_correlated"
+    ],
+    "op_types": [],
+    "reason": "torch_npu.npu_iou (含 npu_ptiou) 的 area 公式在底层 TIK kernel 中并非 PyTorch docstring 中的 (x2-x1)*(y2-y1)，而是 (x2-x1+0.01)*(y2-y1+0.01)。该 0.01 偏移源于 NPU 早期目标检测网络（如 FasterRCNN）使用的 +1 整数偏移在归一化坐标下的等效形式，作为分母正则项内置在算子里。inter 公式不带偏移，仍是 max(0, min_x2-max_x1)*max(0, min_y2-max_y1)。当某 gt 框的 width 或 height ≪ 0.01 时，0.01 偏移在分母中主导，IoU/IoF 比例显著小于不带偏移的 PyTorch 公式；当 box 较大（>>1）时，相对差异可忽略。",
+    "fix": "在 Ascend C kernel 计算 area1 和 area2 时，对所有 width/height 减法结果加上 0.01f 常量后再相乘。具体：(1) Host 端 gt 角点先减后加偏移：gt_w = (gt_x2 - gt_x1) + 0.01f; gt_h = (gt_y2 - gt_y1) + 0.01f; gt_area = gt_w * gt_h. (2) Device 端 area1 用 Sub + Adds：Sub(rb_x, bx2, bx1, count); Adds(rb_x, rb_x, 0.01f, count); 同样处理 rb_y；然后 Mul(area1, rb_x, rb_y, count). (3) inter 计算保持不变（不加 0.01），仍是 max(0, min_x2-max_x1)*max(0, min_y2-max_y1). 修复后所有 case 应直接通过；如未通过需重测偏移量（候选 0.001/0.005，但实测 0.01 拟合最佳）。",
+    "type": "FIX_PRECISION_LOGIC",
+    "_meta": {
+      "op_name": "iou",
+      "created_at": "2026-05-18T18:52:31.804304",
+      "attempts_needed": 1
+    },
+    "derived_keywords": [
+      "iou"
+    ]
+  },
+  {
+    "title": "TBuf 路径下 GM→UB 后缺失跨 pipe 同步导致 V pipe 读到 stale 数据 (TBuf MTE2→V Cross-Pipe Sync Missing)",
+    "feature": "全 dtype 全 case mismatch_ratio>99%, 小 shape (含 1×1) 也失败, max_abs_diff 量级与输入相近, ones 输入下 mismatch 仅出现在 inner-loop 第一轮 (n=0) 或某一固定列, 与 N/M/K/tile/tail/多核全无关",
+    "patterns": [
+      "all_wrong"
+    ],
+    "op_types": [],
+    "reason": "AscendC 中 PipeBarrier<PIPE_MTE2>() 只是 MTE2 → MTE2 之间的 barrier, 不会阻塞 V pipe 推进。当 TBuf 路径下 DataCopyPad / LoadGmToUb (MTE2 pipe) 完成后, 紧接着 Cast / Mul / ReduceSum (V pipe) 消费同一块 UB 时, V pipe 没有等待 MTE2 真正完成搬运, 就读到了未定义 / 上一轮残留值。inner-loop 的第一轮 (n=0) 最容易暴露此缺口, 因为后续轮次 V pipe 上 Cast/Mul/ReduceSum 自然消耗周期, MTE2 物理上已搬完, 反而表面看像同步成立。",
+    "fix": "在 TBuf 路径下, 任何 GM→UB 的 DataCopyPad / LoadGmToUb 之后, 若接下来要被 V pipe (Cast / Mul / Add / ReduceSum 等) 消费, 必须显式插入跨 pipe 同步: 用 AscendC::PipeBarrier<PIPE_ALL>() 或显式 SetFlag/WaitFlag<HardEvent::MTE2_V>。仅用 PipeBarrier<PIPE_MTE2>() / PipeBarrier<PIPE_V>() 是不够的, 它们只是各自 pipe 内的 barrier, 不跨 pipe。TQue 路径有 EnQue/DeQue 隐式同步, 不存在此问题; TBuf 因没有这类原语, 必须开发者手动同步。",
+    "type": "FIX_PRECISION_SYNC",
+    "_meta": {
+      "op_name": "005_MatmulTransB",
+      "created_at": "2026-05-18T23:40:07.708795",
+      "attempts_needed": 0
+    },
+    "derived_keywords": [
+      "matmul",
+      "matmultransb",
+      "transb"
+    ]
+  },
+  {
+    "title": "CANN 单文件多 kernel 导致 RegisterAscendBinary 失败并表现为精度异常 (Multi-Kernel Per File Registration Failure)",
+    "feature": "精度 mismatch 率接近 100%, 输出接近全零, host_stub 中 RegisterAscendBinary 返回非零错误码（如 107000）",
+    "patterns": [
+      "all_wrong"
+    ],
+    "op_types": [],
+    "reason": "CANN AscendC 编译系统要求每个 .cpp 源文件仅定义一个 __global__ __aicore__ kernel 函数。当单个文件包含多个 kernel 时，二进制可能无法正确注册到 NPU 运行时，导致 RegisterAscendBinary 失败。host stub 在未获取有效句柄时静默返回，kernel 从未被执行，输出张量保持初始化零值，从而表现为极高的精度 mismatch 率。",
+    "fix": "将包含多个 kernel 的 .cpp 文件按数据类型或功能拆分为多个独立文件，确保每个文件只含一个 kernel 函数及其 host launcher。重新编译并确认 RegisterAscendBinary 返回 0。同时检查编译时 SOC 版本与实际硬件一致。",
+    "type": "FIX_PRECISION_OTHER",
+    "_meta": {
+      "op_name": "Add",
+      "created_at": "2026-05-19T03:42:21.648856",
+      "attempts_needed": 0
+    },
+    "derived_keywords": [
+      "add"
+    ]
+  },
+  {
+    "title": "DataCopyPad 前置 Duplicate 与 PIPE_V 屏障导致同 UB 缓冲区 V/MTE2 竞争 (Duplicate-DataCopyPad Cross-Pipe Race)",
+    "feature": "near-miss 只在 kernel_size=1+bias=True 或少数 C/alignment case 失败; kernel 中同一 LocalTensor 先 Duplicate 清零, PipeBarrier<PIPE_V> 后再 DataCopyPad 从 GM 读入",
+    "patterns": [
+      "scattered",
+      "boundary_concentration"
+    ],
+    "op_types": [
+      "convolution"
+    ],
+    "reason": "PipeBarrier<PIPE_V> 只约束 V pipe 内部顺序, 不能保证 V pipe 的 Duplicate 先于 MTE2 pipe 的 DataCopyPad 完成。若同一 UB buffer 先被 Duplicate 预清零, 再由 DataCopyPad 加载 GM, V/MTE2 乱序时 Duplicate 可能在 DataCopyPad 之后落地, 把刚加载的数据或 tail 区覆盖为 0。kernel_size=1 等只有一次累加的场景会把该竞争放大为 bias-only 或局部清零输出。",
+    "fix": "不要用 Duplicate(V)+PipeBarrier<PIPE_V> 给 DataCopyPad 的 tail 预清零。计算 rightPad = paddedC - C, 用 DataCopyPadExtParams{isPad=true, left=0, right=rightPad, padValue=0} 在同一个 MTE2 op 内完成 GM load + tail zero-fill。hasBias=false 等无 MTE2 并发的纯 Duplicate 分支才可保留; MTE2->V handoff 用 TQue EnQue/DeQue、PipeBarrier<PIPE_ALL> 或 HardEvent 显式同步。",
+    "type": "FIX_PRECISION_SYNC",
+    "_meta": {
+      "op_name": "ConvDepthwise2d",
+      "task": "level3/009_ConvDepthwise2d",
+      "source": "precision33_agent2_compare",
+      "source_experiment": "/home/wsx/AscendOpGenAgent/outputs/precision_debug_compare_agent1_kimi_20260512_172507",
+      "source_trace": "agent2/tasks/level3/009_ConvDepthwise2d/debug_trace.md",
+      "source_status": "agent2/tasks/level3/009_ConvDepthwise2d/debug_status.json",
+      "created_at": "2026-05-20T03:28:25",
+      "attempts_needed": 1,
+      "outcome": "success",
+      "before": "precision_failed 48/50",
+      "after": "success 50/50",
+      "dataset_episode_id": "precision33_agent2_level3_009_ConvDepthwise2d_success"
+    }
+  },
+  {
+    "title": "逻辑有效维度与 32B Padding Stride 混用导致 Scatter Padding 列覆盖有效结果 (Logical Dim vs Padded Stride)",
+    "feature": "只有 axis 转置后非 32B 对齐的小维度 case 失败; wrapper padding 后 kernel tiling 使用 padded stride 作为真实 gather/index 循环边界",
+    "patterns": [
+      "boundary_concentration",
+      "dimension_concentration"
+    ],
+    "op_types": [
+      "scatter_elements_v2"
+    ],
+    "reason": "Python wrapper 为满足 32B 对齐会把真实 gather 维度 pad 到更大的物理 stride。若 pybind/tiling 只传 padded stride, kernel 会把 padding 列当成有效 index/update 参与 scatter。padding 列常为 index=0、update=0, 在 reduction=none 时会覆盖 scatter index 0 上的真实结果, 表现为少数行/列固定 mismatch。",
+    "fix": "在 wrapper->pybind->tiling 契约中同时传递逻辑有效维度与物理 stride。kernel 循环边界使用 x_gather_dim / idx_gather_dim 等真实维度, GM/UB 地址步长才使用 padded stride。所有 axis permute 到 last-dim 再 padding 的 index/scatter/gather 算子都应检查该 contract。",
+    "type": "FIX_PRECISION_LAYOUT",
+    "_meta": {
+      "op_name": "scatter_elements_v2",
+      "task": "level5/010_scatter_elements_v2",
+      "source": "precision33_agent2_compare",
+      "source_experiment": "/home/wsx/AscendOpGenAgent/outputs/precision_debug_compare_agent1_kimi_20260512_172507",
+      "source_trace": "agent2/tasks/level5/010_scatter_elements_v2/debug_trace.md",
+      "source_status": "agent2/tasks/level5/010_scatter_elements_v2/debug_status.json",
+      "created_at": "2026-05-20T03:28:25",
+      "attempts_needed": 1,
+      "outcome": "success",
+      "before": "precision_failed 5/6",
+      "after": "success 6/6",
+      "dataset_episode_id": "precision33_agent2_level5_010_scatter_elements_v2_success"
+    }
+  },
+  {
+    "title": "Unfold/Overlap 反向逐窗口小切片 DataCopyPad+GetValue 产生 shift 污染 (UnfoldGrad Row Buffering)",
+    "feature": "多个 stride/padding/window case 全部 mismatch; 逐 window 小切片 DataCopyPad 到 UB 后用 GetValue 标量读取, 或跨 row 直接 GlobalTensor::GetValue",
+    "patterns": [
+      "all_wrong",
+      "dimension_concentration"
+    ],
+    "op_types": [
+      "unfold_backward"
+    ],
+    "reason": "逐窗口短切片 DataCopyPad 后立即 GetValue 容易暴露 UB 布局/对齐解释异常, 出现窗口起始元素 shift 到下一窗口的现象。改为直接 GlobalTensor::GetValue 虽可绕过部分 shift, 但在 B>1 或多 row 重复调用时可能复用临时 buffer, 产生跨行数值污染和极大 max_abs_diff。",
+    "fix": "对 unfold backward / overlap accumulation 这类按 row 聚合的算子, 优先每行一次 DataCopyPad 将完整 grad_output row (nWindows*kernel_size) 拷到 TBuf<VECCALC> 或合规 LocalTensor, PipeBarrier<PIPE_MTE2> 后只从本地 row buffer 按 rowOffset+s 读取并累加。避免在内层 window 循环中反复小切片 DataCopyPad+GetValue, 也避免跨 row 高频 GlobalTensor::GetValue。",
+    "type": "FIX_PRECISION_SYNC",
+    "_meta": {
+      "op_name": "UnfoldGrad",
+      "task": "level6/021_UnfoldGrad",
+      "source": "precision33_agent2_compare",
+      "source_experiment": "/home/wsx/AscendOpGenAgent/outputs/precision_debug_compare_agent1_kimi_20260512_172507",
+      "source_trace": "agent2/tasks/level6/021_UnfoldGrad/debug_trace.md",
+      "source_status": "agent2/tasks/level6/021_UnfoldGrad/debug_status.json",
+      "created_at": "2026-05-20T03:28:25",
+      "attempts_needed": 3,
+      "outcome": "success",
+      "before": "precision_failed 0/8",
+      "after": "success 8/8",
+      "dataset_episode_id": "precision33_agent2_level6_021_UnfoldGrad_success"
+    }
+  },
+  {
+    "title": "BFloat16 中间乘法需模拟 PyTorch RNE Round-Trip (BF16 Intermediate Rounding)",
+    "feature": "结构性错误修复后仅剩少数 bf16/half backward case 失败; diff 约 1 LSB 或被后续乘加累积放大, 失败集中在特定输出如 grad_gate",
+    "patterns": [
+      "magnitude_correlated",
+      "scattered"
+    ],
+    "op_types": [
+      "tanh_gated_residual_add_backward"
+    ],
+    "reason": "PyTorch reference 在 bf16 输入路径中会让某些中间表达式以 bf16 精度落地, 采用 round-half-to-even/RNE 语义。AscendC kernel 若把 hidden_states*mask 等中间量全程保留 fp32, 数学上更精确但不等价于参考路径, 后续链式乘法会把 1 LSB 级差异累积成 verify mismatch。",
+    "fix": "先确认剩余 mismatch 已不是数据流/同步/索引错误。若失败只集中在 bf16 中间路径, 在与 PyTorch reference 对齐的中间表达式后插入 bf16 round-trip: fp32 -> bf16(RNE/CAST_RINT) -> fp32, 再继续后续计算。不要盲目全程 fp32; fused backward/activation/gating 算子应明确哪些中间值需要模拟 reference dtype 落地。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "_meta": {
+      "op_name": "TanhGatedResidualAddBackward",
+      "task": "level2/029_TanhGatedResidualAddBackward",
+      "source": "precision33_agent2_compare",
+      "source_experiment": "/home/wsx/AscendOpGenAgent/outputs/precision_debug_compare_agent1_kimi_20260512_172507",
+      "source_trace": "agent2/tasks/level2/029_TanhGatedResidualAddBackward/debug_trace.md",
+      "source_status": "agent2/tasks/level2/029_TanhGatedResidualAddBackward/debug_status.json",
+      "created_at": "2026-05-20T03:28:25",
+      "attempts_needed": 2,
+      "outcome": "success",
+      "before": "precision_failed 0/10",
+      "after": "success 50/50",
+      "dataset_episode_id": "precision33_agent2_level2_029_TanhGatedResidualAddBackward_success"
+    }
+  },
+  {
+    "title": "Conv3D 多 AIV 标量写回重叠 GM Cache Line 导致输出不稳定 (Overlapping Scalar GM Stores)",
+    "feature": "reference/Python 计算正确但 AscendC 执行层多 case 大比例 mismatch; 多个 AIV 或 paired AIV 对相邻输出元素使用 scalar SetValue 写 GM",
+    "patterns": [
+      "scattered",
+      "all_wrong"
+    ],
+    "op_types": [
+      "conv3d"
+    ],
+    "reason": "卷积输出元素如果由多个 AIV 以标量 SetValue 方式写回相邻或重叠 GM cache line, 在设备侧可能出现写合并/顺序不可控, 表现为大面积随机或结构化 mismatch。问题不在卷积公式本身, 而在 work distribution 与 GM writeback 粒度不适合并发标量写。",
+    "fix": "把 work distribution 改为 row-granular 或 tile-granular, 例如一个任务负责完整 (n, oc, d_out, h_out) 输出行, 保证输出区域互不重叠。输出写回使用 LocalTensor 聚合后通过 DataCopyPad/MTE3 连续写 GM, 避免多个 AIV 对同一 cache line 执行离散 scalar SetValue。",
+    "type": "FIX_PRECISION_SYNC",
+    "_meta": {
+      "op_name": "ConvStandard3d",
+      "task": "level3/008_ConvStandard3d",
+      "source": "precision33_agent2_compare",
+      "source_experiment": "/home/wsx/AscendOpGenAgent/outputs/precision_debug_compare_agent1_kimi_20260512_172507",
+      "source_trace": "agent2/tasks/level3/008_ConvStandard3d/debug_trace.md",
+      "source_status": "agent2/tasks/level3/008_ConvStandard3d/debug_status.json",
+      "created_at": "2026-05-20T03:28:25",
+      "attempts_needed": 5,
+      "outcome": "success",
+      "before": "precision_failed 1/10",
+      "after": "success 60/60",
+      "dataset_episode_id": "precision33_agent2_level3_008_ConvStandard3d_success"
+    }
+  },
+  {
+    "title": "MoE Routing/Drop 模式下索引映射公式混用导致全局错位 (MoE Routing Index Mapping)",
+    "feature": "routing/finalize 类算子在不同 arrangement_mode/drop_mode 下接近全量 mismatch, 某些 dtype 分支还出现未初始化 scale buffer",
+    "patterns": [
+      "all_wrong",
+      "dimension_concentration"
+    ],
+    "op_types": [
+      "moe_finalize_routing"
+    ],
+    "reason": "MoE finalize/routing 算子通常同时维护 source row、expanded row、destination row、expert slot 等多套索引。若 column arrangement mode 仍套用 row arrangement 公式, 或 drop mode 使用 export_for_source_row 而不是 expanded_src_to_dst_row 取数, 数据会按错误行列重排。float 路径若未初始化 scaleTileFloatLocal_ 还会叠加 dtype-specific 污染。",
+    "fix": "按 arrangement_mode 和 drop_mode 分开审计索引契约: row/column arrangement 使用不同 expanded_src_to_dst_row 公式; drop mode 的数据索引必须走 expanded_src_to_dst_row 而非 export_for_source_row; scale/weight 临时 buffer 对所有 dtype 分支都应无条件分配或显式初始化。修复后用覆盖不同 mode 组合的 full eval 验证。",
+    "type": "FIX_PRECISION_LOGIC",
+    "_meta": {
+      "op_name": "MoeFinalizeRouting",
+      "task": "level2/006_MoeFinalizeRouting",
+      "source": "precision33_agent2_compare",
+      "source_experiment": "/home/wsx/AscendOpGenAgent/outputs/precision_debug_compare_agent1_kimi_20260512_172507",
+      "source_trace": "agent2/tasks/level2/006_MoeFinalizeRouting/debug_trace.md",
+      "source_status": "agent2/tasks/level2/006_MoeFinalizeRouting/debug_status.json",
+      "created_at": "2026-05-20T03:28:25",
+      "attempts_needed": 1,
+      "outcome": "success",
+      "before": "precision_failed 1/10",
+      "after": "success 50/50",
+      "dataset_episode_id": "precision33_agent2_level2_006_MoeFinalizeRouting_success"
+    }
+  },
+  {
+    "title": "AscendC Reciprocal 近似精度不足会放大量化链路误差 (Reciprocal Precision Limit)",
+    "feature": "sigmoid/normalization 分母倒数路径使用 AscendC::Reciprocal; simplified case 大面积偏移, 后续 int8 quantize/clamp/round 后表现为整数级 mismatch",
+    "patterns": [
+      "magnitude_correlated",
+      "all_wrong"
+    ],
+    "op_types": [
+      "dequant_swiglu_quant"
+    ],
+    "reason": "AscendC::Reciprocal 在 float 路径存在近似精度上限, API 文档给出的误差量级可达 2^-9, 不满足高精度 sigmoid 或量化前动态 scale 的要求。倒数误差经过 gate*sigmoid*up、dynamic scale、int8 rounding 会被放大成可见整数偏移。",
+    "fix": "对需要高精度倒数的 sigmoid / quantization / scale 路径, 用 Div(dst, ones, denom, count) 替代 Reciprocal(denom)；ones LocalTensor 需正确 Duplicate 初始化并与 denom 对齐。若仍有单点 near-miss, 再检查是否应使用原生 Sigmoid 高阶 API 或显式 round-half-to-even 与 reference 对齐。",
+    "type": "FIX_PRECISION_LOGIC",
+    "_meta": {
+      "op_name": "DequantSwigluQuant",
+      "task": "level2/011_DequantSwigluQuant",
+      "source": "precision33_agent2_compare",
+      "source_experiment": "/home/wsx/AscendOpGenAgent/outputs/precision_debug_compare_agent1_kimi_20260512_172507",
+      "source_trace": "agent2/tasks/level2/011_DequantSwigluQuant/debug_trace.md",
+      "source_status": "agent2/tasks/level2/011_DequantSwigluQuant/debug_status.json",
+      "created_at": "2026-05-20T03:28:25",
+      "attempts_needed": 2,
+      "outcome": "near_miss_or_partial",
+      "before": "precision_failed 0/10",
+      "after": "precision_failed 49/50",
+      "dataset_episode_id": "precision33_agent2_level2_011_DequantSwigluQuant_near_miss_positive"
+    }
+  },
+  {
+    "title": "MIX_AIC_1_2 场景 AIV 全局索引误乘 SubBlock 导致半数行未处理 (AIV Global Index Mapping)",
+    "feature": "mismatch_ratio 稳定接近固定比例(如 25%/50%), 失败行集合呈周期性; kernel 中 aivIdx = GetBlockIdx()*GetSubBlockNum()+... 或 totalAivs 误乘 subBlock",
+    "patterns": [
+      "dimension_concentration",
+      "all_wrong"
+    ],
+    "op_types": [
+      "masked_softmax_attention_dropout_backward"
+    ],
+    "reason": "在 MIX_AIC_1_2 或多 sub-block 调度下, GetBlockIdx() 已经给出全局 AIV 维度所需的 block id。若再乘 GetSubBlockNum() 或把 totalAivs 乘上 subBlock 数, 会让部分 row 被跳过或重复处理, 形成稳定比例的行级 mismatch。该问题常被同步/精度问题掩盖, 但最终表现为固定 row set 不写。",
+    "fix": "审计 AIV work partition: 对纯 AIV 行任务优先使用 aivIdx=GetBlockIdx(), totalAivs=GetBlockNum()。只有明确使用 sub-block 内部并行时才引入 GetSubBlockIdx/GetSubBlockNum, 且需证明每个 row 恰好覆盖一次。修复后检查失败 row 集合是否消失, 再处理剩余数值精度问题。",
+    "type": "FIX_PRECISION_LOGIC",
+    "_meta": {
+      "op_name": "MaskedSoftmaxWithAttentionDropoutBackward",
+      "task": "level2/025_MaskedSoftmaxWithAttentionDropoutBackward",
+      "source": "precision33_agent2_compare",
+      "source_experiment": "/home/wsx/AscendOpGenAgent/outputs/precision_debug_compare_agent1_kimi_20260512_172507",
+      "source_trace": "agent2/tasks/level2/025_MaskedSoftmaxWithAttentionDropoutBackward/debug_trace.md",
+      "source_status": "agent2/tasks/level2/025_MaskedSoftmaxWithAttentionDropoutBackward/debug_status.json",
+      "created_at": "2026-05-20T03:28:25",
+      "attempts_needed": 3,
+      "outcome": "near_miss_or_partial",
+      "before": "precision_failed 0/10",
+      "after": "precision_failed 49/51",
+      "dataset_episode_id": "precision33_agent2_level2_025_MaskedSoftmaxWithAttentionDropoutBackward_near_miss_positive"
+    }
+  },
+  {
+    "title": "标量归约输出不要用 4B UB→UB DataCopy 搬运 (Scalar UB-to-UB DataCopy Granularity)",
+    "feature": "FP32 标量归约结果用 DataCopy(dst, src, 1) 从 VECCALC/TBuf 拷到 VECOUT/TQue 后, 输出可能保持旧值或未初始化; 常见于 ReduceSum/ReduceMax 只写 1 个 float 的路径",
+    "patterns": [
+      "all_wrong",
+      "scattered"
+    ],
+    "op_types": [
+      "reduction"
+    ],
+    "reason": "AscendC UB→UB DataCopy 仍受 32B 颗粒度和 pipe 可见性约束。count=1 只搬 4 字节时, 对标量结果的写入不可靠, 尤其当源 buffer 是 ReduceSum 临时结果、目的 buffer 是随后要 EnQue/CopyOut 的输出 tensor 时, 可能出现写入没有真正落到出队 tensor 的情况。",
+    "fix": "不要用 DataCopy(dst, src, 1) 搬运单个 float 标量。优先让 ReduceSum/ReduceMax 直接把结果写到 VECOUT 队列 tensor 的 ReinterpretCast<float>() 目标上; 若需要标量累加, 用 GetValue 读出后再 Duplicate 到输出 tensor, 或把 ReduceSum 直接写到目标 offset slice。确保最终写回的 tensor 是 EnQue/DeQue 生命周期管理的 VECOUT tensor。",
+    "type": "FIX_PRECISION_SYNC",
+    "_meta": {
+      "op_name": "Sum",
+      "task": "level1/007_Sum",
+      "source": "precision33_agent1_compare",
+      "source_experiment": "/home/wsx/AscendOpGenAgent/outputs/precision_debug_compare_agent1_kimi_20260512_172507",
+      "source_trace": "agent1/tasks/level1/007_Sum/debug_compare_agent1_trace.md",
+      "source_status": "agent1/tasks/level1/007_Sum/.verify_status/latest.json",
+      "created_at": "2026-05-20T04:01:10",
+      "attempts_needed": 3,
+      "outcome": "success",
+      "before": "precision_failed 0/10",
+      "after": "success 44/44",
+      "dataset_episode_id": "precision33_agent1_level1_007_Sum_success"
+    }
+  },
+  {
+    "title": "AIV-only kernel 不应错误声明 MIX task type (Wrong MIX Task Type)",
+    "feature": "stdout/stub 出现 RegisterAscendBinary mix ret 107000; kernel 声明 KERNEL_TYPE_MIX_AIC_1_1 或 MIX_AIC_1_2, 但主体被 if ASCEND_IS_AIV 包住, AIC 分支没有真实计算",
+    "patterns": [
+      "all_wrong"
+    ],
+    "op_types": [
+      "fft"
+    ],
+    "reason": "MIX task type 会让 CANN 生成 AIC+AIV 组合 binary。若代码实际上只有 AIV 有效路径, AIC 侧为空或被宏完全裁掉, host_stub 仍按 MIX 注册, 可能形成结构不一致的 binary, RegisterAscendBinary 返回 107000。此时 kernel 没有执行, host 仍可能继续返回, 输出来自 at::empty 的未初始化内存。",
+    "fix": "只有 AIV 计算时使用普通 __global__ __aicore__ kernel, 不要加 KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_*) 和 ASCEND_IS_AIV 外层保护。clean rebuild 后检查 host_stub 中 RegisterAscendBinary type 从 MIX 变为 AIV, 并确认 107000 消失。只有同时需要 AIC+AIV 且双方都有合法执行路径时才声明 MIX。",
+    "type": "FIX_PRECISION_OTHER",
+    "_meta": {
+      "op_name": "HyenaFftSizePaddingRfft",
+      "task": "level2/023_HyenaFftSizePaddingRfft",
+      "source": "precision33_agent1_compare",
+      "source_experiment": "/home/wsx/AscendOpGenAgent/outputs/precision_debug_compare_agent1_kimi_20260512_172507",
+      "source_trace": "agent1/tasks/level2/023_HyenaFftSizePaddingRfft/debug_compare_agent1_trace.md",
+      "source_status": "agent1/tasks/level2/023_HyenaFftSizePaddingRfft/.verify_status/latest.json",
+      "created_at": "2026-05-20T04:01:10",
+      "attempts_needed": 1,
+      "outcome": "success",
+      "before": "precision_failed 0/10",
+      "after": "success 49/49",
+      "dataset_episode_id": "precision33_agent1_level2_023_HyenaFftSizePaddingRfft_success"
+    }
+  },
+  {
+    "title": "显式 fp32 reference 输出不要按输入 dtype 下转 (Wrapper Output Downcast Overflow)",
+    "feature": "reference 在 model.py 中显式返回 torch.float32, 但 model_new_ascendc.py 按输入 dtype 把 kernel fp32 结果 cast 回 fp16/bf16; fp16 case 出现 max_abs_diff≈fp32_max 或 ±inf",
+    "patterns": [
+      "nan_inf_contamination"
+    ],
+    "op_types": [
+      "normalization"
+    ],
+    "reason": "部分算子即使输入是 fp16/bf16, reference 也会把状态张量和输出强制提升为 fp32 以保持动态范围。wrapper 若为了 dtype 对齐把 fp32 kernel 输出下转回 fp16/bf16, 大值会超过 65504 溢出为 inf, 同时输出 dtype 也偏离 reference contract。",
+    "fix": "先读 model.py 的 dtype contract: 若 reference 使用 .float()、zeros_like(..., dtype=torch.float32) 或返回 fp32 state/output, model_new_ascendc.py 必须保留 fp32 输出。只在 reference 明确返回输入 dtype 时才 cast back。final verify 前同时检查数值和 cand/ref dtype。",
+    "type": "FIX_PRECISION_OVERFLOW",
+    "_meta": {
+      "op_name": "TimeDecayExponentialStabilization",
+      "task": "level2/030_TimeDecayExponentialStabilization",
+      "source": "precision33_agent1_compare",
+      "source_experiment": "/home/wsx/AscendOpGenAgent/outputs/precision_debug_compare_agent1_kimi_20260512_172507",
+      "source_trace": "agent1/tasks/level2/030_TimeDecayExponentialStabilization/debug_compare_agent1_trace.md",
+      "source_status": "agent1/tasks/level2/030_TimeDecayExponentialStabilization/.verify_status/latest.json",
+      "created_at": "2026-05-20T04:01:10",
+      "attempts_needed": 1,
+      "outcome": "success",
+      "before": "precision_failed 8/10",
+      "after": "success 50/50",
+      "dataset_episode_id": "precision33_agent1_level2_030_TimeDecayExponentialStabilization_success"
+    }
+  },
+  {
+    "title": "不要为贴合稳定性擅自加入 reference 没有的 epsilon (Reference Epsilon Divergence)",
+    "feature": "仅少数 denominator 接近零的 case 失败, kernel 在 denominator 或 output path 上额外加 1e-7/epsilon, 但 PyTorch reference 没有该项",
+    "patterns": [
+      "magnitude_correlated",
+      "scattered"
+    ],
+    "op_types": [
+      "normalization"
+    ],
+    "reason": "epsilon 虽可避免除零, 但它改变了数学定义。对时间衰减、归一化、softmax backward 等 denominator 参与状态递推或梯度传播的算子, 一个额外 epsilon 会在特定输入上造成系统性偏移, final verify 会表现为少数 shape/case 失败而非随机噪声。",
+    "fix": "以 model.py 为唯一数学 contract。只有 reference 明确写了 epsilon/clamp 时才在 kernel 中加入; 若担心除零, 先用取证日志确认 reference 在同输入上的行为, 不要把通用数值稳定技巧硬加进 kernel。修复后优先复测 denominator 小或状态累积长的 case。",
+    "type": "FIX_PRECISION_LOGIC",
+    "_meta": {
+      "op_name": "TimeDecayExponentialStabilization",
+      "task": "level2/030_TimeDecayExponentialStabilization",
+      "source": "precision33_agent1_compare",
+      "source_experiment": "/home/wsx/AscendOpGenAgent/outputs/precision_debug_compare_agent1_kimi_20260512_172507",
+      "source_trace": "agent1/tasks/level2/030_TimeDecayExponentialStabilization/debug_compare_agent1_trace.md",
+      "source_status": "agent1/tasks/level2/030_TimeDecayExponentialStabilization/.verify_status/latest.json",
+      "created_at": "2026-05-20T04:01:10",
+      "attempts_needed": 1,
+      "outcome": "success",
+      "before": "precision_failed 8/10",
+      "after": "success 50/50",
+      "dataset_episode_id": "precision33_agent1_level2_030_TimeDecayExponentialStabilization_success"
+    }
+  },
+  {
+    "title": "MatMul 多 tile 复用 L0C 时 Fixpipe/Mmad 竞争需 CO1 双缓冲 (L0C Double Buffering)",
+    "feature": "多 tile-per-core 时大尺寸 case 出现稀疏但巨大的 max_abs_diff, 或 L0C read/write conflict 507015/fixp_error0=0x98; outQueueCO1 depth=1 且相邻 ComputeBlock 复用同一 L0C 地址",
+    "patterns": [
+      "scattered",
+      "magnitude_correlated"
+    ],
+    "op_types": [
+      "matmul"
+    ],
+    "reason": "CO1 队列深度为 1 时, block N 的 Fixpipe 仍在从 L0C 读结果, block N+1 的 Mmad 可能已经写回同一 L0C buffer。PipeBarrier<PIPE_FIX> 只能约束 FIX pipe 自身, 不能从根本上保证下一次 PIPE_M 不覆盖同一地址; fp16/bf16 的 F322F16/F322BF16 Fixpipe 延迟更长, race 窗口更明显。",
+    "fix": "将 TQue<TPosition::CO1, 1> 和 pipe.InitBuffer(outQueueCO1, 1, ...) 同步改为 depth=2, 让相邻 ComputeBlock 分配到不同 L0C 子缓冲; CopyOut 末尾可保留 PipeBarrier<PIPE_FIX> 作为防线。不要用 PipeBarrier<PIPE_M> 做 M↔FIX 同步, 它可能破坏 TQueue 内部 flag 链路并触发硬件冲突。",
+    "type": "FIX_PRECISION_SYNC",
+    "_meta": {
+      "op_name": "BatchMatmul / MatmulTransA",
+      "task": "level3/001_BatchMatmul + level3/004_MatmulTransA",
+      "source": "precision33_agent1_compare",
+      "source_experiment": "/home/wsx/AscendOpGenAgent/outputs/precision_debug_compare_agent1_kimi_20260512_172507",
+      "source_trace": "agent1/tasks/level3/001_BatchMatmul/debug_compare_agent1_trace.md; agent1/tasks/level3/004_MatmulTransA/debug_compare_agent1_trace.md",
+      "source_status": "agent1/tasks/level3/001_BatchMatmul/.verify_status/latest.json; agent1/tasks/level3/004_MatmulTransA/.verify_status/latest.json",
+      "created_at": "2026-05-20T04:01:10",
+      "attempts_needed": 4,
+      "outcome": "success",
+      "before": "precision_failed 8/9 and 7/10",
+      "after": "success 51/51 and 50/50",
+      "dataset_episode_id": "precision33_agent1_level3_004_MatmulTransA_success"
+    }
+  },
+  {
+    "title": "MatMul LoadData 原语需按 dtype 选择 (Dtype-Specific LoadData Primitive)",
+    "feature": "fp32 与 fp16/bf16 在同一 16x16 single-fractal 搬运路径上表现不同, half/bf16 小尺寸出现 6%-15% 数据级错位, 大尺寸另有少量稀疏 mismatch",
+    "patterns": [
+      "dimension_concentration",
+      "scattered"
+    ],
+    "op_types": [
+      "matmul"
+    ],
+    "reason": "LoadData3DParamsV2 本质偏 img2col/3D 搬运语义, 在本任务的 float 16x16x4B 单 fractal 场景可工作, 但直接复用于 half/bfloat16 的 Nz→Zz / Nz→Zn matmul 搬运会产生分形布局错位。反过来 half/bf16 常用的 LoadData2D + LoadDataWithTranspose 参数也不能无脑套到 float。",
+    "fix": "MatMul 模板中按 dtype 做 if constexpr 分支: float 路径保留已验证的 LoadData3DParamsV2 参数; half/bfloat16 路径使用 canonical LoadData2DParams 与 LoadDataWithTranspose。修改 primitive 后必须同时检查 Mmad/Fixpipe 的 layout 参数, 因为 L1/L0 分形排布、Mmad 输入 layout、Fixpipe 输出 layout 是耦合 contract。",
+    "type": "FIX_PRECISION_LAYOUT",
+    "_meta": {
+      "op_name": "MatmulTransA",
+      "task": "level3/004_MatmulTransA",
+      "source": "precision33_agent1_compare",
+      "source_experiment": "/home/wsx/AscendOpGenAgent/outputs/precision_debug_compare_agent1_kimi_20260512_172507",
+      "source_trace": "agent1/tasks/level3/004_MatmulTransA/debug_compare_agent1_trace.md",
+      "source_status": "agent1/tasks/level3/004_MatmulTransA/.verify_status/latest.json",
+      "created_at": "2026-05-20T04:01:10",
+      "attempts_needed": 4,
+      "outcome": "success",
+      "before": "precision_failed 7/10",
+      "after": "success 50/50",
+      "dataset_episode_id": "precision33_agent1_level3_004_MatmulTransA_success"
+    }
+  },
+  {
+    "title": "V→S→V 标量往返不能只靠 PipeBarrier, 可用 offset-slice 归约消除 (Vector-Scalar Roundtrip Hazard)",
+    "feature": "ReduceSum 写 UB 后立刻 GetValue, 或 scalar SetValue 写回 UB 后再被 V/MTE3 消费; 小 shape 甚至 1x1 也错, 多次运行 case 状态可翻转, fp16/bf16 可能出现 3.4e38/inf",
+    "patterns": [
+      "all_wrong",
+      "scattered"
+    ],
+    "op_types": [
+      "reduction"
+    ],
+    "reason": "PipeBarrier<PIPE_V> 只约束 V pipe, PipeBarrier<PIPE_ALL> 也不是严格的 V→S handshake。Vector pipe 写入 UB 后, Scalar GetValue 可能读到上一轮残留; Scalar SetValue 写回 UB 后, 后续 V/MTE3 也可能看到未发布数据。频繁的 GetValue/SetValue 内循环会把这种跨 pipe hazard 放大。",
+    "fix": "优先消除 V→S→V 标量往返: 让 ReduceSum 直接写入目标 accumulator 的 offset slice, 后续仍走纯 V pipe。若必须使用 scalar GetValue/SetValue, 使用明确的 HardEvent V_S/S_V SetFlag/WaitFlag 或把边界改成 TQue 生命周期管理; 对 MTE2→V、V→MTE3 边界同样使用 TQue 或显式跨 pipe 同步。",
+    "type": "FIX_PRECISION_SYNC",
+    "_meta": {
+      "op_name": "MatmulTransB / LayerNorm / EmbeddingDenseBackward",
+      "task": "level3/005_MatmulTransB + level1/010_LayerNorm + level1/024_EmbeddingDenseBackward",
+      "source": "precision33_agent1_compare",
+      "source_experiment": "/home/wsx/AscendOpGenAgent/outputs/precision_debug_compare_agent1_kimi_20260512_172507",
+      "source_trace": "agent1/tasks/level3/005_MatmulTransB/debug_compare_agent1_trace.md; agent1/tasks/level1/010_LayerNorm/debug_compare_agent1_trace.md; agent1/tasks/level1/024_EmbeddingDenseBackward/debug_compare_agent1_trace.md",
+      "source_status": "agent1/tasks/level3/005_MatmulTransB/.verify_status/latest.json; agent1/tasks/level1/010_LayerNorm/.verify_status/latest.json; agent1/tasks/level1/024_EmbeddingDenseBackward/.verify_status/latest.json",
+      "created_at": "2026-05-20T04:01:10",
+      "attempts_needed": 3,
+      "outcome": "success",
+      "before": "precision_failed mixed",
+      "after": "success 50/50, 60/60, 30/30",
+      "dataset_episode_id": "precision33_agent1_level3_005_MatmulTransB_success"
+    }
+  },
+  {
+    "title": "WholeReduceSum<float> mask 超过 64 需分块归约 (WholeReduceSum Mask Overflow)",
+    "feature": "通道归约维 CinPerGroup/CIPG 大于 64 的 case 失败, 小通道 case 通过; WholeReduceSum<float> 直接以 128/256 等 count 作为 mask",
+    "patterns": [
+      "all_wrong"
+    ],
+    "op_types": [
+      "conv"
+    ],
+    "reason": "AscendC float32 WholeReduceSum 的 mask 有硬件范围限制, 通常只能覆盖 1..64 lane。将大于 64 的通道数直接作为 mask 会触发未定义行为或只归约前 64 个元素, 使大 CinPerGroup 的卷积/分组归约得到部分和。",
+    "fix": "当归约长度超过 64 时按 64 元素切块 WholeReduceSum, 将每块 partial sum 以 fp32 标量或 fp32 accumulator 继续累加; 尾块使用有效 count 并保证 padding 已清零。不要把 alignedCount 当作 mask 直接传给 WholeReduceSum<float>。",
+    "type": "FIX_PRECISION_REDUCTION",
+    "_meta": {
+      "op_name": "ConvStandard1d",
+      "task": "level3/006_ConvStandard1d",
+      "source": "precision33_agent1_compare",
+      "source_experiment": "/home/wsx/AscendOpGenAgent/outputs/precision_debug_compare_agent1_kimi_20260512_172507",
+      "source_trace": "agent1/tasks/level3/006_ConvStandard1d/debug_compare_agent1_trace.md",
+      "source_status": "agent1/tasks/level3/006_ConvStandard1d/.verify_status/latest.json",
+      "created_at": "2026-05-20T04:01:10",
+      "attempts_needed": 1,
+      "outcome": "success",
+      "before": "precision_failed 0/10",
+      "after": "success 50/50",
+      "dataset_episode_id": "precision33_agent1_level3_006_ConvStandard1d_success"
+    }
+  },
+  {
+    "title": "RFFT 动态长度尾部 Padding 与 Vector 对齐 (RFFT Dynamic Length Padding and Vector Alignment)",
+    "feature": "RFFT 或频域填充类算子在不同长度、不同 dtype 的完整用例上出现大面积精度不匹配，尤其当有效输出长度不是向量计算或搬运粒度的整数倍时，尾部未定义数据会污染 real/imag 输出。",
+    "patterns": [
+      "boundary_concentration",
+      "tail_spike"
+    ],
+    "op_types": [
+      "fft",
+      "frequency_domain",
+      "vector"
+    ],
+    "reason": "AscendC 向量指令和 GM/UB 搬运通常需要按硬件粒度对齐。若直接以有效长度执行 DataCopy 和 Sin/Cos/Muls/Add/Sub 等向量操作，尾部非对齐部分可能读写未初始化数据或丢失尾元素；同时向量核误标为 AIC 混合任务也会放大调度与执行风险。",
+    "fix": "为动态长度计算对齐后的 vecLen/bufLen，UB buffer 按对齐长度申请并初始化，向量计算使用对齐长度；GM 输入输出使用 DataCopyPad 处理非对齐尾部，输出只回写真实有效长度。纯向量三角函数/逐元素计算优先使用 vector core 任务类型，并在关键搬运和向量阶段加入必要 PipeBarrier。",
+    "type": "FIX_PRECISION_PADDING",
+    "_meta": {
+      "op_name": "HyenaFftSizePaddingRfft",
+      "created_at": "2026-06-10T15:30:11.589891",
+      "attempts_needed": 2,
+      "action": "new",
+      "full_eval_verified": true,
+      "source_experiment": "precision_debug_v2_agent2_deepseek_official_20260610_0206_non_success19_timeout43200_4npu4567"
+    }
+  },
+  {
+    "title": "Matmul Fixpipe 写回前 CO1 Buffer 生命周期同步 (Matmul Fixpipe CO1 Buffer Lifetime Synchronization)",
+    "feature": "Matmul 或转置 Matmul 在分块计算后出现随机或分散的精度不匹配，局部验证可能通过但完整用例容易暴露 L0C/CO1 输出块被后续计算覆盖的问题。",
+    "patterns": [
+      "scattered",
+      "all_wrong"
+    ],
+    "op_types": [
+      "matmul",
+      "matrix_multiply",
+      "fixpipe"
+    ],
+    "reason": "Mmad 结果从 L0C/CO1 经 Fixpipe 写回 GM 时，Fixpipe DMA 仍可能在读取 CO1 buffer。如果代码通过 EnQue/DeQue 或过早 FreeTensor 将同一块 CO1 buffer 归还给队列，下一轮 ComputeBlock 可能复用该 buffer，造成 Fixpipe 读和计算写之间的冲突。",
+    "fix": "不要把仍被 Fixpipe 读取的 CO1 tensor 过早入队复用。对 L0C/CO1 到 GM 的 Fixpipe 写回使用显式 PipeBarrier<PIPE_ALL> 包围，写回完成后再 FreeTensor；必要时直接调用 FixpipeNzL0cToNdGm 等写回接口，避免 EnQue/DeQue 生命周期掩盖真实同步边界。",
+    "type": "FIX_PRECISION_SYNC",
+    "_meta": {
+      "op_name": "MatmulTransA",
+      "created_at": "2026-06-10T15:30:11.669706",
+      "attempts_needed": 1,
+      "action": "new",
+      "full_eval_verified": true,
+      "source_experiment": "precision_debug_v2_agent2_deepseek_official_20260610_0206_non_success19_timeout43200_4npu4567"
+    }
+  },
+  {
+    "title": "003_Add float32` / `float16`：与 `torch.add(..., alpha=...)` 完全一致，差异为 0 (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 all_wrong；修复后验证用例 10/10 通过",
+    "patterns": [
+      "all_wrong"
+    ],
+    "op_types": [],
+    "reason": "NPU 实测时输出全 0，且运行时打印 `RegisterAscendBinary mix ret 107000`。；构建日志也明确警告：`Multiple kernel functions are detected. It is recommended to define only one kernel function per file.；这是 CANN/AscendC 的已知限制：同一 `.cpp` 文件中存在多个 `global aicore` kernel 入口会导致二进制注册失败，kernel 实际未执行，表现为精度全部错误（输出保持初始化值 0）。；修复操作；仅修改 `/home/wsx/AscendOpGenAgent/outputs/precision_debug_v3_33_kimi_20260622_200425_V3-33/tasks/level1/003_Add/kernel/` 下的算子源码：；删除原 `add.cpp`（包含三个 dtype 的 kernel 入口）",
+    "fix": "这是 CANN/AscendC 的已知限制：同一 `.cpp` 文件中存在多个 `global aicore` kernel 入口会导致二进制注册失败，kernel 实际未执行，表现为精度全部错误（输出保持初始化值 0）。；修复操作；计算逻辑（`add_kernel.h` 模板、`pybind11.cpp`、配置与参考实现）均保持不变。；修复已完成，交给引擎进行正式 build/eval/precision_gate 校验。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "add"
+    ],
+    "_meta": {
+      "op_name": "003_Add",
+      "created_at": "2026-06-22T20:14:56.055805",
+      "attempts_needed": 0,
+      "action": "new"
+    }
+  },
+  {
+    "title": "010_LayerNorm 将 `OutputRoundMode` 改为 `CAST_ROUND`（fp16/bf16），与参考的 round-to-nearest 一致 (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 scattered；修复后验证用例 60/60 通过",
+    "patterns": [
+      "scattered"
+    ],
+    "op_types": [
+      "normalization"
+    ],
+    "reason": "使用 `AscendC::Rsqrt` 得到的 `inv_std` 与参考实现存在约 `1e-2` 量级的相对偏差，对 fp32 阈值（atol=1e-4, rtol=1e-4）不可接受。；fp16 输出取整方式；将 `OutputRoundMode` 改为 `CAST_ROUND`（fp16/bf16），与参考的 round-to-nearest 一致。；OutputRoundMode` 对非 float 使用 `CAST_ROUND`。",
+    "fix": "已改为使用独立的 `workBuf_` 作为 `ReduceSum` 工作缓冲区。；使用 `AscendC::Rsqrt` 得到的 `inv_std` 与参考实现存在约 `1e-2` 量级的相对偏差，对 fp32 阈值（atol=1e-4, rtol=1e-4）不可接受。；改为标量 `1.0f / sqrt(var)` 后精度足够。；fp16 输出取整方式",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "layer",
+      "layernorm",
+      "norm"
+    ],
+    "_meta": {
+      "op_name": "010_LayerNorm",
+      "created_at": "2026-06-22T21:45:56.361220",
+      "attempts_needed": 1,
+      "action": "new"
+    }
+  },
+  {
+    "title": "025_NLLLoss FP16/BF16 归约精度损失：`partialSum` / `partialCount` 原先与输入同 dtype（fp16/bf16），累加后写回会截断， (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 uniform_offset；修复后验证用例 10/10 通过；注意：该条目后来经 V3-33 full-eval 复核未完全通过，当前仅按 compact 验证经验保留。",
+    "patterns": [
+      "uniform_offset"
+    ],
+    "op_types": [
+      "loss"
+    ],
+    "reason": "FP16/BF16 归约精度损失：`partialSum` / `partialCount` 原先与输入同 dtype（fp16/bf16），累加后写回会截断，对 mean/sum 造成额外误差。",
+    "fix": "本轮已完成 `025_NLLLoss` 的精度问题修复，核心根因与修改如下：；FP16/BF16 归约精度损失：`partialSum` / `partialCount` 原先与输入同 dtype（fp16/bf16），累加后写回会截断，对 mean/sum 造成额外误差。；`kernel/pybind11.cpp`：`partialSum` / `partialCount` 改为 `float32` 分配，避免低精度归约截断。；`kernel/nllloss_kernel.h`：对应将 partial sum/count 的 GM/Local 张量改为 `float`，写回与最终归约均按 `float32` 处理。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "nll",
+      "nllloss"
+    ],
+    "_meta": {
+      "op_name": "025_NLLLoss",
+      "created_at": "2026-06-22T22:16:01.361382",
+      "attempts_needed": 1,
+      "action": "new",
+      "validation_scope": "V3-33 compact objective validation only (10/10)",
+      "full_eval_confirmed": false,
+      "full_eval_result": "V3-33 unified full-eval: runtime_error; stderr includes ACL stream synchronize failed, error code 507015 / AICore exception",
+      "caution": "Do not treat this entry as full-eval proven. Prefer the earlier V1 NLLLoss entry for large-C single-target copy, dynamic subBlockN, SyncAll, and weight-mean denominator fixes.",
+      "reviewed_at": "2026-06-26T21:20:00+08:00"
+    }
+  },
+  {
+    "title": "007_Sum For non-float inputs, the code casts the queue input into a separate `VECCALC` f (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 all_wrong；修复后验证用例 10/10 通过",
+    "patterns": [
+      "all_wrong"
+    ],
+    "op_types": [
+      "reduction"
+    ],
+    "reason": "Done. I diagnosed the precision failure in `007_Sum` and fixed it by addressing two independent root causes:；Binary registration failure from multi-kernel `.cpp` files；The original `sum_small_n.cpp` and `sum_large_n.cpp` each defined three `global aicore` kernels (fp32/fp16/bf16). CANN warned “Multiple kernel functions are detected” and the generated binary failed `RegisterAscendBinary` with `107000`, so the kernel never ran and outputs were uninitialized.；Fix: split each file into per-dtype source files:；sum_small",
+    "fix": "For `float32` output, `Cast(float→float, count=1)` was unreliable; I use a 32B-aligned `DataCopy` from the result buffer to the output queue instead.；For non-float inputs, the code casts the queue input into a separate `VECCALC` float buffer before `ReduceSum`.",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "sum"
+    ],
+    "_meta": {
+      "op_name": "007_Sum",
+      "created_at": "2026-06-22T22:33:15.021966",
+      "attempts_needed": 1,
+      "action": "new"
+    }
+  },
+  {
+    "title": "023_HyenaFftSizePaddingRfft Inserted `PipeBarrier<PIPE_ALL>` after GM→UB copies, after Cast, and before/afte (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 all_wrong；修复后验证用例 10/10 通过",
+    "patterns": [
+      "all_wrong"
+    ],
+    "op_types": [
+      "fft"
+    ],
+    "reason": "After `DataCopy`/`Cast` (MTE2/V) the compute pipeline consumed the UB buffer with only a same-pipe barrier. Added `PipeBarrier<PIPE_ALL>` at MTE2→V and V→MTE3 boundaries.；Inserted `PipeBarrier<PIPE_ALL>` after GM→UB copies, after Cast, and before/after UB→GM copies.",
+    "fix": "After `DataCopy`/`Cast` (MTE2/V) the compute pipeline consumed the UB buffer with only a same-pipe barrier. Added `PipeBarrier<PIPE_ALL>` at MTE2→V and V→MTE3 boundaries.；Inserted `PipeBarrier<PIPE_ALL>` after GM→UB copies, after Cast, and before/after UB→GM copies.",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "hyena",
+      "hyenafftsizepaddingrfft",
+      "padding",
+      "rfft",
+      "size"
+    ],
+    "_meta": {
+      "op_name": "023_HyenaFftSizePaddingRfft",
+      "created_at": "2026-06-23T00:36:26.251676",
+      "attempts_needed": 0,
+      "action": "new"
+    }
+  },
+  {
+    "title": "025_MaskedSoftmaxWithAttentionDropoutBackward p_dropout 分支输出 dtype 与参考不一致 (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 magnitude_correlated；修复后验证用例 10/10 通过；注意：该条目后来经 V3-33 full-eval 复核未完全通过，当前仅按 compact 验证经验保留。",
+    "patterns": [
+      "magnitude_correlated"
+    ],
+    "op_types": [
+      "attention"
+    ],
+    "reason": "导致 AIV 实际只处理了一半行，大量输出行未被写入或写入脏数据。；输出 dtype 与参考实现对不齐；参考实现 `model.py` 在 `p_dropout>0` 时会把 dropout mask 转成 float32，导致输出为 float32；而原 kernel 始终输出输入 dtype。验证脚本按参考输出 dtype 选阈值，造成 fp16/bf16 场景系统性失败。；fp16 + p_dropout=0 时缺少半精度计算路径",
+    "fix": "本轮诊断完成，已修复 `025_MaskedSoftmaxWithAttentionDropoutBackward` 的精度问题。；导致 AIV 实际只处理了一半行，大量输出行未被写入或写入脏数据。；输出 dtype 与参考实现对不齐；参考实现 `model.py` 在 `p_dropout>0` 时会把 dropout mask 转成 float32，导致输出为 float32；而原 kernel 始终输出输入 dtype。验证脚本按参考输出 dtype 选阈值，造成 fp16/bf16 场景系统性失败。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "dropout",
+      "masked",
+      "maskedsoftmaxwithattentiondropoutbackward",
+      "softmax"
+    ],
+    "_meta": {
+      "op_name": "025_MaskedSoftmaxWithAttentionDropoutBackward",
+      "created_at": "2026-06-23T00:56:16.099716",
+      "attempts_needed": 0,
+      "action": "new",
+      "validation_scope": "V3-33 compact objective validation only (10/10)",
+      "full_eval_confirmed": false,
+      "full_eval_result": "V3-33 unified full-eval: precision_failed 50/51",
+      "caution": "Useful as a partial dtype/AIV indexing hint, but not full-eval proven. Re-test the remaining failing full-eval case before using it as a success exemplar.",
+      "reviewed_at": "2026-06-26T21:20:00+08:00"
+    }
+  },
+  {
+    "title": "004_MatmulTransA SplitB` 子 tile 偏移改为 `i * baseKN_`，对任意 dtype 正确 (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 scattered；修复后验证用例 10/10 通过",
+    "patterns": [
+      "scattered"
+    ],
+    "op_types": [
+      "matmul"
+    ],
+    "reason": "SplitB` 子 tile 偏移改为 `i * baseKN_`，对任意 dtype 正确。",
+    "fix": "已定位并完成本轮修复，验证通过。；outQueueCO1` 深度改为 2，实现 CO1 双缓冲。；SplitB` 子 tile 偏移改为 `i * baseKN_`，对任意 dtype 正确。；kernel/matmul_trans_a_tiling.h` 保持 `DEFAULT_L1_PREFETCH = 1` 不变。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "matmultransa",
+      "transa"
+    ],
+    "_meta": {
+      "op_name": "004_MatmulTransA",
+      "created_at": "2026-06-23T04:16:12.489355",
+      "attempts_needed": 0,
+      "action": "new"
+    }
+  },
+  {
+    "title": "006_ConvStandard1d 用 scalar bit manipulation 把 float32 按 11-bit 尾数做 round-half-to-even： (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 scattered；修复后验证用例 10/10 通过",
+    "patterns": [
+      "scattered"
+    ],
+    "op_types": [
+      "convolution"
+    ],
+    "reason": "进一步用 Python 模拟不同中间精度后发现：NPU `nn.Conv1d` 内部把 fp32 的 activation 和 weight 都 round 到约 11-bit 尾数，并使用 round-half-to-even。只要 kernel 也做同样的 rounding，输出就能与参考逐元素对齐。；新增 `RoundTo11Bits`；用 scalar bit manipulation 把 float32 按 11-bit 尾数做 round-half-to-even：；对 activation 和 weight 都应用该 rounding",
+    "fix": "已定位并修复 `006_ConvStandard1d` 的精度问题，仅修改了 `kernel/conv1d_kernel.h`，未触碰任何受保护文件。；进一步用 Python 模拟不同中间精度后发现：NPU `nn.Conv1d` 内部把 fp32 的 activation 和 weight 都 round 到约 11-bit 尾数，并使用 round-half-to-even。只要 kernel 也做同样的 rounding，输出就能与参考逐元素对齐。；修复内容；新增 `RoundTo11Bits`",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "conv",
+      "convstandard1d",
+      "standard1d"
+    ],
+    "_meta": {
+      "op_name": "006_ConvStandard1d",
+      "created_at": "2026-06-23T06:38:58.721461",
+      "attempts_needed": 1,
+      "action": "new"
+    }
+  },
+  {
+    "title": "009_ConvDepthwise2d 在 `ProcessOneRow()` 中每片输入 `xLocal` 从 GM 加载后，调用 `RoundTo11Bits` 再参与 `Mul/Add` (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 scattered；修复后验证用例 50/50 通过",
+    "patterns": [
+      "scattered"
+    ],
+    "op_types": [
+      "convolution"
+    ],
+    "reason": "验证报告显示候选 kernel 与参考 `nn.Conv2d` 深度可分离卷积存在 scattered 小误差（~4e-4）。通过将 NPU 输出与 CPU 精确 fp32/fp64 对比发现：候选 kernel 的数学结果与精确 fp32 几乎一致，而 NPU 参考实现本身在内部把 activation 和 weight 都 round 到约 11-bit 尾数（round-half-to-even，保留低 12 位以上的 11 位显式尾数）。这与知识库中 `006_ConvStandard1d` 的修复模式一致。；新增 `RoundTo11Bits(LocalTensor<float>, int32_t len)`，使用 scalar bit manipulation 将 fp32 按 11-bit 尾数做 round-half-to-even（shift=12）。；在 `Process()` 中预加载权重后、使用之前，对所",
+    "fix": "本轮诊断 + 修复已完成。；验证报告显示候选 kernel 与参考 `nn.Conv2d` 深度可分离卷积存在 scattered 小误差（~4e-4）。通过将 NPU 输出与 CPU 精确 fp32/fp64 对比发现：候选 kernel 的数学结果与精确 fp32 几乎一致，而 NPU 参考实现本身在内部把 activation 和 weight 都 round 到约 11-bit 尾数（round-half-to-even，保留低 12 位以上的 11 位显式尾数）。这与知识库中 `006_ConvStandard1d` 的修复模式一致。；修复；新增 `RoundTo11Bits(LocalTensor<float>, int32_t len)`，使用 scalar bit manipulation 将 fp32 按 11-bit 尾数做 round-half-to-even（shift=12）。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "conv",
+      "convdepthwise2d",
+      "depthwise2d"
+    ],
+    "_meta": {
+      "op_name": "009_ConvDepthwise2d",
+      "created_at": "2026-06-23T07:41:22.026999",
+      "attempts_needed": 1,
+      "action": "new"
+    }
+  },
+  {
+    "title": "010_FusedInferAttentionScore 010_FusedInferAttentionScore 精度修复经验 (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 scattered；修复后验证用例 7/7 通过；注意：该条目后来经 V3-33 full-eval 复核未完全通过，当前仅按 compact 验证经验保留。",
+    "patterns": [
+      "scattered"
+    ],
+    "op_types": [
+      "attention"
+    ],
+    "reason": "Diagnosis；Attempt 0 fixed the kernel-registration problem by splitting `fia_fp16_custom` / `fia_bf16_custom` into separate files, so the kernel now actually runs and `output[0]` matches the reference within FP16 tolerance.；The remaining failure is not a kernel numeric bug: the reference `npu_fused_infer_attention_score` returns `softmax_lse` as an empty tensor `shape=(0,)` when `softmax_lse_flag=False`, but the protected wrapper `model_new_ascendc.py` always returns a length-1 placeholder `torch.zeros((1,), ...)`.；",
+    "fix": "Diagnosis；Attempt 0 fixed the kernel-registration problem by splitting `fia_fp16_custom` / `fia_bf16_custom` into separate files, so the kernel now actually runs and `output[0]` matches the reference within FP16 tolerance.；The remaining failure is not a kernel numeric bug: the reference `npu_fused_infer_attention_score` returns `softmax_lse` as an empty tensor `shape=(0,)` when `softmax_lse_flag=False`, but the protected wrapper `model_new_ascendc.py` always returns a length-1 placeholder `torch.zeros((1,), ...)`.；",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "fused",
+      "fusedinferattentionscore",
+      "infer",
+      "score"
+    ],
+    "_meta": {
+      "op_name": "010_FusedInferAttentionScore",
+      "created_at": "2026-06-23T08:15:54.958083",
+      "attempts_needed": 1,
+      "action": "new",
+      "validation_scope": "V3-33 compact objective validation only (7/7)",
+      "full_eval_confirmed": false,
+      "full_eval_result": "V3-33 unified full-eval: runtime_error; stderr reports invalid layout value for npu_fused_infer_attention_score",
+      "caution": "Treat as a compact-validation lesson, not as a full-eval success entry.",
+      "reviewed_at": "2026-06-26T21:20:00+08:00"
+    }
+  },
+  {
+    "title": "010_scatter_elements_v2 Failing case: `[4, 8] float32`, `axis=0`. (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 dimension_concentration；修复后验证用例 6/6 通过",
+    "patterns": [
+      "dimension_concentration"
+    ],
+    "op_types": [
+      "gather"
+    ],
+    "reason": "Diagnosis；Failing case: `[4, 8] float32`, `axis=0`.；The wrapper permutes the scatter axis to the last dim, then pads the small gather dim (`4` floats → only 16 B) up to a 32-B aligned stride (`8`).；The kernel loop in `scatter_elements_v2_common_kernel.h` iterates `col < tiling_.IG`.；pybind11.cpp` was setting `tiling->IG = yStride` (the padded stride), so the kernel also processed the 4 trailing padding columns. Those padding columns contain `index=0, update=0`, and in `reduction=\"none\"` mode they overwrote the real",
+    "fix": "Diagnosis；Failing case: `[4, 8] float32`, `axis=0`.；The wrapper permutes the scatter axis to the last dim, then pads the small gather dim (`4` floats → only 16 B) up to a 32-B aligned stride (`8`).；The kernel loop in `scatter_elements_v2_common_kernel.h` iterates `col < tiling_.IG`.；pybind11.cpp` was setting `tiling->IG = yStride` (the padded stride), so the kernel also processed the 4 trailing padding columns. Those padding columns contain `index=0, update=0`, and in `reduction=\"none\"` mode they overwrote the real",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "elements",
+      "scatter",
+      "scatter_elements_v2"
+    ],
+    "_meta": {
+      "op_name": "010_scatter_elements_v2",
+      "created_at": "2026-06-23T08:39:13.595089",
+      "attempts_needed": 0,
+      "action": "new"
+    }
+  },
+  {
+    "title": "002_GroupNormSwish Forensics on the latest failed run showed only the two `float32` cases failing: (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 scattered；修复后验证用例 10/10 通过",
+    "patterns": [
+      "scattered"
+    ],
+    "op_types": [
+      "normalization"
+    ],
+    "reason": "Diagnosis (precision_failed)；Forensics on the latest failed run showed only the two `float32` cases failing:；case[5]`: `(4, 64, 128)`, `num_groups=4` → mismatch ratio 46.2%, `max_abs_diff=0.0083；case[6]`: `(2, 64, 32, 32)`, `num_groups=8` → mismatch ratio 50.3%, `max_abs_diff=0.0071；All `float16`/`bfloat16` cases already passed because their tolerances are looser.；I isolated the error by comparing the kernel result against the pure PyTorch formula:",
+    "fix": "Diagnosis (precision_failed)；Forensics on the latest failed run showed only the two `float32` cases failing:；case[5]`: `(4, 64, 128)`, `num_groups=4` → mismatch ratio 46.2%, `max_abs_diff=0.0083；case[6]`: `(2, 64, 32, 32)`, `num_groups=8` → mismatch ratio 50.3%, `max_abs_diff=0.0071；All `float16`/`bfloat16` cases already passed because their tolerances are looser.；I isolated the error by comparing the kernel result against the pure PyTorch formula:",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "group",
+      "groupnormswish",
+      "norm",
+      "swish"
+    ],
+    "_meta": {
+      "op_name": "002_GroupNormSwish",
+      "created_at": "2026-06-23T12:40:50.130766",
+      "attempts_needed": 1,
+      "action": "new"
+    }
+  },
+  {
+    "title": "EmbeddingDenseBackward TBuf scatter 累加需 PIPE_ALL 跨 pipe 同步 (EmbeddingDenseBackward TBuf Sync)",
+    "feature": "Embedding/EmbeddingDenseBackward 反向 scatter-add 类 kernel 使用 TBuf 做 zero fill、加载 grad_output、累加并写回 GM；compact 或 full-eval 表现为随机 mismatch、全错或导入后验证失败，尤其 fp16/bf16/多核路径更明显。",
+    "patterns": [
+      "scattered",
+      "all_wrong"
+    ],
+    "op_types": [
+      "embedding",
+      "scatter_add"
+    ],
+    "reason": "V1-agent2 的 level1/024_EmbeddingDenseBackward 成功诊断显示：TBuf 本地缓冲在 Duplicate、DataCopy/LoadGradOutput、StoreGradOutput 后只放 PipeBarrier<PIPE_MTE2>() 不够；MTE2 pipe 完成不代表 Vector/scalar pipe 可见，也不保证 MTE3 写回完成，后续 Cast/GetValue/累加可能读到未初始化或 stale UB 数据。V3-33 中该任务 stopped_by_budget/import_failed，未复现 V1 的完整成功链路。",
+    "fix": "对 TBuf scatter/累加路径，在关键跨 pipe 边界使用 AscendC::PipeBarrier<PIPE_ALL>()：zero fill Duplicate 后、LoadGradOutput/DataCopy 到 UB 后、StoreGradOutput 写回 GM 后分别同步。不要只用 PIPE_MTE2 作为跨 Vector/scalar/MTE3 的可见性保证。修复后需 full-eval 覆盖 fp32/fp16/bf16 和多核 case，并检查 anti-cheat clean。",
+    "type": "FIX_PRECISION_SYNC",
+    "derived_keywords": [
+      "embedding",
+      "embeddingdensebackward",
+      "scatter",
+      "tbuf",
+      "pipe_all",
+      "pipebarrier"
+    ],
+    "_meta": {
+      "op_name": "024_EmbeddingDenseBackward",
+      "task": "level1/024_EmbeddingDenseBackward",
+      "source": "v1_agent2_success_vs_v3_33_regression_review",
+      "source_experiment": "V1 agent2: precision_debug_compare_agent1_kimi_20260512_172507; V3-33: precision_debug_v3_33_kimi_20260622_200425_V3-33",
+      "evidence": [
+        "v1 _claude_agent2.json root cause/fix summary",
+        "V3-33 debug_status.json session_outcome=stopped_by_budget",
+        "V3-33 full-eval import_failed"
+      ],
+      "created_at": "2026-06-26T21:20:00+08:00",
+      "outcome": "V1 success 30/30; V3-33 import_failed/stopped_by_budget",
+      "full_eval_confirmed": true,
+      "confirmed_by": "V1-agent2 full-eval success"
+    }
+  },
+  {
+    "title": "IOU 需同时对齐 TQue/fp32 数据流与 npu_iou +0.01 面积语义 (IOU TQue and Area Offset)",
+    "feature": "IOU/npu_iou 类算子出现大面积 mismatch、inf/NaN 或 M=1/切片输入异常；仅修 +0.01 面积偏移后仍不能 full-eval 通过。",
+    "patterns": [
+      "all_wrong",
+      "nan_inf_contamination",
+      "scattered"
+    ],
+    "op_types": [
+      "iou"
+    ],
+    "reason": "V1-agent2 的 level1/031_IOU 两轮成功经验表明根因是叠加的：一是四路输入/输出全部用 TBuf<VECCALC> 而无 TQue 入出队同步，导致多核 race；二是 fp16 路径 eps=1e-10 下溢后可能除零；三是 torch_npu.npu_iou 的 area 语义为 (w+0.01)*(h+0.01)，原 kernel 若按 w*h 会系统性偏差。V3-33 命中了 +0.01 知识并修改为 scalar/AIV 路径，但 full-eval 仍只有 16/30，说明单独召回面积语义不足以覆盖 V1 成功经验。",
+    "fix": "优先复用 V1 的完整修复组合：四路输入走 TQue<VECIN,0>，输出走 TQue<VECOUT,0>，按 CopyIn/Compute/CopyOut 三阶段流水组织；核心计算全程 fp32，fp16/bf16 输入输出仅在边界 Cast；area1/area2 使用 (w+0.01)*(h+0.01)，intersection 仍按原交集宽高计算，不额外加偏移；同时检查 pybind 对 storage_offset/切片张量 GM 基址的处理。full-eval 未过时不要只保留 scalar fallback。",
+    "type": "FIX_PRECISION_LOGIC",
+    "derived_keywords": [
+      "iou",
+      "npu_iou",
+      "tque",
+      "vecin",
+      "vecout",
+      "area",
+      "0.01",
+      "storage_offset"
+    ],
+    "_meta": {
+      "op_name": "031_IOU",
+      "task": "level1/031_IOU",
+      "source": "v1_agent2_success_vs_v3_33_regression_review",
+      "source_experiment": "V1 agent2: precision_debug_compare_agent1_kimi_20260512_172507; V3-33: precision_debug_v3_33_kimi_20260622_200425_V3-33",
+      "evidence": [
+        "v1 _claude_agent2.json final success report",
+        "V3 diagnosis_summary/knowledge_search_log hit +0.01 but V3 full-eval 16/30"
+      ],
+      "created_at": "2026-06-26T21:20:00+08:00",
+      "outcome": "V1 success 30/30; V3-33 precision_failed 16/30",
+      "full_eval_confirmed": true,
+      "confirmed_by": "V1-agent2 full-eval success"
+    }
+  },
+  {
+    "title": "MoeInitRouting 排序语义缺少 expert_idx/active_num 时属于接口合约问题 (MoE Init Routing Sort Contract)",
+    "feature": "MoeInitRouting 从 all_wrong 改善到大部分 case matched，但仍有少量 full-eval 失败；诊断中出现 expanded_x/expanded_row_idx/expanded_expert_idx 排序语义、expert_idx、active_num、wrapper contract 等线索。",
+    "patterns": [
+      "all_wrong",
+      "dimension_concentration"
+    ],
+    "op_types": [
+      "moe",
+      "routing"
+    ],
+    "reason": "V1-agent2 已判定 level2/005_MoeInitRouting 为 structural_unfixable：参考 torch_npu.npu_moe_init_routing 会按 expert_idx 做 keyValueSort 后再 gather x，但当 wrapper 只把 expanded_row_idx 传给 kernel、未传 expert_idx/active_num 时，kernel 无法凭空恢复排序语义。V3-33 修正了 block/sub-block 映射并达到 46/53 near-success，但 attempt1 通过 pybind/Python shim 从调用帧读取 expert_idx/active_num 或调用 torch_npu reference 来补语义，这属于绕过 kernel 合约的高风险路径。",
+    "fix": "先区分“kernel 实现错误”和“wrapper/kernel 合约缺参”。如果排序语义需要 expert_idx/active_num，应在正式接口中显式传入并在 anti-cheat 允许范围内实现排序，或把任务标记为 wrapper contract limitation；不要用 frame introspection、host reference op、torch_npu.npu_moe_init_routing shim 在 pybind 中偷取缺失输入。near-success 复盘时保留 core/sub-block 映射修复，但不要把绕过合约的 shim 当成 clean success 经验。",
+    "type": "FIX_PRECISION_OTHER",
+    "derived_keywords": [
+      "moeinitrouting",
+      "moe_init_routing",
+      "expert_idx",
+      "active_num",
+      "sort",
+      "keyvaluesort",
+      "wrapper_contract"
+    ],
+    "_meta": {
+      "op_name": "005_MoeInitRouting",
+      "task": "level2/005_MoeInitRouting",
+      "source": "v3_33_near_success_review",
+      "source_experiment": "V1 agent2 vs V3-33",
+      "evidence": [
+        "v1 _claude_agent2.json structural_unfixable report",
+        "V3 _claude_result_attempt0/1.json",
+        "V3 full-eval precision_failed 46/53"
+      ],
+      "created_at": "2026-06-26T21:20:00+08:00",
+      "outcome": "V1 precision_failed 0/53; V3-33 precision_failed 46/53, compact/session success but full-eval not success",
+      "full_eval_confirmed": false,
+      "validation_scope": "near-success / contract lesson, not a success recipe"
+    }
+  },
+  {
+    "title": "TanhGatedResidualAddBackward reduction 修复不能搬到 pybind host/reference 路径 (TanhGated Anti-cheat Guard)",
+    "feature": "TanhGatedResidualAddBackward / gated activation backward 从大面积 mismatch 改善到 49/50 或 compact 10/10，但 anti-cheat 报 CPP_REGRESSION、pybind/reference fallback、host reduction 或 HASH/CPP 差异。",
+    "patterns": [
+      "scattered",
+      "magnitude_correlated"
+    ],
+    "op_types": [
+      "activation_backward",
+      "reduction"
+    ],
+    "reason": "V1-agent2 的成功路径是在 kernel 内完成数据流修复和 BF16 RNE round-trip：TBuf→TQue、同步、workspace 对齐、grad_gate enq，以及 hidden_states*mask 的 bf16 中间 round-trip，最终 50/50 clean。V3-33 attempt0 复用了这些核心思想后已明显改善；attempt1 为追求 compact 通过，把 globalSum/reduction 搬到 pybind host，并用 PyTorch/bf16 reference 路径计算标量后传入 kernel，最终 full-eval 49/50 且 anti-cheat 报 CPP_REGRESSION。",
+    "fix": "保留 V1 的 clean kernel 内修复方向：TQue 数据流、必要同步、BF16 RNE round-trip、kernel 内或合法 workspace reduction。若 reduction 顺序与 torch.sum 差异导致 near-success，应优先在 kernel 中模拟归约顺序/分块策略或扩大合法接口，而不是在 pybind 中调用 PyTorch/reference 计算 globalSum。反作弊命中时该轮不能入库为 clean success，只能作为 guard lesson。",
+    "type": "FIX_PRECISION_OTHER",
+    "derived_keywords": [
+      "tanhgatedresidualaddbackward",
+      "tanh_gated",
+      "bf16",
+      "rne",
+      "globalSum",
+      "pybind",
+      "host_reduction",
+      "anti_cheat"
+    ],
+    "_meta": {
+      "op_name": "029_TanhGatedResidualAddBackward",
+      "task": "level2/029_TanhGatedResidualAddBackward",
+      "source": "v1_agent2_success_vs_v3_33_near_success_review",
+      "source_experiment": "V1 agent2 vs V3-33",
+      "evidence": [
+        "v1 _claude_agent2.json success 50/50 with kernel-only anti-cheat clean",
+        "V3 _claude_result_attempt1.json globalSum/pybind host reduction",
+        "V3 workflow anti-cheat CPP_REGRESSION and full-eval 49/50"
+      ],
+      "created_at": "2026-06-26T21:20:00+08:00",
+      "outcome": "V1 success 50/50; V3-33 precision_failed 49/50 with anti-cheat violation",
+      "full_eval_confirmed": true,
+      "confirmed_by": "V1-agent2 clean full-eval success; V3 lesson is a guard, not a success entry"
+    }
+  },
+  {
+    "title": "KvRmsNormRopeCache is_output_kv=false 空输出内容比较应按 harness/合约处理 (Empty Output Semantics)",
+    "feature": "KvRmsNormRopeCache / RoPE cache 类任务固定只有 is_output_kv=false 的单个 case 失败，其他输出均 matched；失败张量来自 torch.empty/empty_like 的未初始化内容比较。",
+    "patterns": [
+      "boundary_concentration",
+      "scattered"
+    ],
+    "op_types": [
+      "normalization",
+      "rope",
+      "kv_cache"
+    ],
+    "reason": "V1-agent2 和 V3-33 对 level7/003_KvRmsNormRopeCache 的独立诊断一致：case0-3 is_output_kv=true 都通过，case4 is_output_kv=false 失败；参考 model.py 返回 torch.empty_like(k_rope), torch.empty_like(c_kv)，候选 model_new_ascendc.py 返回 torch.empty(...)。两边都是未初始化内存，内容不具备可比较语义，kernel 本身对有效输出路径没有明显缺陷。",
+    "fix": "遇到 is_output_kv=false/empty output case，先判断输出是否是未初始化占位张量：若是，优先修 harness/合约，让验证只检查 shape/dtype 或让 reference/candidate 返回确定性 zeros；若 wrapper 受保护，应将任务标为 wrapper/harness limitation，不要在 kernel 中为不可观察的空输出内容做无效修复。该类条目不应作为 kernel numeric fix success 入库。",
+    "type": "FIX_PRECISION_OTHER",
+    "derived_keywords": [
+      "kvrmsnormropecache",
+      "kv_rms_norm_rope_cache",
+      "is_output_kv",
+      "empty_like",
+      "torch.empty",
+      "harness",
+      "wrapper_contract"
+    ],
+    "_meta": {
+      "op_name": "003_KvRmsNormRopeCache",
+      "task": "level7/003_KvRmsNormRopeCache",
+      "source": "v1_v3_near_success_review",
+      "source_experiment": "V1 agent2 vs V3-33",
+      "evidence": [
+        "v1 _claude_agent2.json diagnosis",
+        "V3 _claude_result_attempt0.json diagnosis",
+        "V1/V3 full-eval both 4/5"
+      ],
+      "created_at": "2026-06-26T21:20:00+08:00",
+      "outcome": "V1 precision_failed 4/5; V3-33 precision_failed 4/5, failure isolated to empty-output case",
+      "full_eval_confirmed": false,
+      "validation_scope": "harness/contract lesson, not a kernel success recipe"
+    }
+  },
+  {
+    "title": "025_NLLLoss 最终归约读取 `partialSumGM_` / `partialCountGM_` 也改用这两个小队列，避免复用原来的大行队列 (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 scattered；修复后验证用例 10/10 通过",
+    "patterns": [
+      "scattered"
+    ],
+    "op_types": [
+      "loss"
+    ],
+    "reason": "修复：在 `kernel/nllloss_kernel.h` 中把整行读取改为只读取 `target` 对应的单个元素：；删除 `inputRowInQueue_` / `weightInQueue_` 的大缓冲（原 `AlignBytes(C * sizeof(DataType))`）。；新增 `inputValInQueue_` / `weightValInQueue_`，缓冲仅 `AlignBytes(sizeof(DataType))`。；行内只 `DataCopyPad` 一个元素：`inputGM_[rowIdx*C + idx]`、`weightGM_[idx]`。；最终归约读取 `partialSumGM_` / `partialCountGM_` 也改用这两个小队列，避免复用原来的大行队列。",
+    "fix": "修复：在 `kernel/nllloss_kernel.h` 中把整行读取改为只读取 `target` 对应的单个元素：",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "nll",
+      "nllloss"
+    ],
+    "_meta": {
+      "op_name": "025_NLLLoss",
+      "created_at": "2026-06-28T08:05:16.295699",
+      "attempts_needed": 0,
+      "action": "new"
+    }
+  },
+  {
+    "title": "029_TanhGatedResidualAddBackward additionally，`hidden_states * mask` 的中间 bf16 round-trip 之前用了 `CAST_ROUND`（四舍五入）， (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 scattered；修复后验证用例 10/10 通过",
+    "patterns": [
+      "scattered"
+    ],
+    "op_types": [],
+    "reason": "additionally，`hidden_states * mask` 的中间 bf16 round-trip 之前用了 `CAST_ROUND`（四舍五入），而 PyTorch bf16 乘法是 RNE，需要 `CAST_RINT`。；Pass1 在计算 `grad_residual`/`grad_hidden_states` 的同时，按 `go_f32 * round_RNE(hs_f32 * mask_f32)` 逐元素求和。；tanh_gated_residual_add_backward_bf16.cpp` / `pybind11.cpp",
+    "fix": "本轮修复完成。；additionally，`hidden_states * mask` 的中间 bf16 round-trip 之前用了 `CAST_ROUND`（四舍五入），而 PyTorch bf16 乘法是 RNE，需要 `CAST_RINT`。；Pass1 在计算 `grad_residual`/`grad_hidden_states` 的同时，按 `go_f32 * round_RNE(hs_f32 * mask_f32)` 逐元素求和。；tanh_gated_residual_add_backward_bf16.cpp` / `pybind11.cpp",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "add",
+      "gated",
+      "residual",
+      "tanh",
+      "tanhgatedresidualaddbackward"
+    ],
+    "_meta": {
+      "op_name": "029_TanhGatedResidualAddBackward",
+      "created_at": "2026-06-28T08:11:03.442089",
+      "attempts_needed": 0,
+      "action": "new"
+    }
+  },
+  {
+    "title": "001_BatchMatmul 精简用例（9 cases，含 float32/float16/bfloat16）全部 `matched`，验证 `PASS` (Engine Synthesized Precision Fix)",
+    "feature": "修复后验证用例 9/9 通过",
+    "patterns": [],
+    "op_types": [
+      "matmul"
+    ],
+    "reason": "本轮诊断结论：kernel 源码正确，问题为 `kernel/build/` 构建产物缺失。我已使用 `utils/build_ascendc.py` 完成干净构建，并用 `utils/verification_ascendc.py` 做了自测验证。；关键证据：；arm_full` / `precision_debug_v3_33_kimi` 等同任务目录的 kernel 源码与本任务逐文件一致，且均带 `kernel/build/` 并通过精度验证。；本任务 `kernel/build/` 原本不存在，导致 wrapper 无法导入 `_batch_matmul_ext` 或拿到旧/损坏产物。；使用当前 `kernel/` 源码干净构建后：；精简用例（9 cases，含 float32/float16/bfloat16）全部 `matched`，验证 `PASS`。",
+    "fix": "本轮诊断结论：kernel 源码正确，问题为 `kernel/build/` 构建产物缺失。我已使用 `utils/build_ascendc.py` 完成干净构建，并用 `utils/verification_ascendc.py` 做了自测验证。；关键证据：；arm_full` / `precision_debug_v3_33_kimi` 等同任务目录的 kernel 源码与本任务逐文件一致，且均带 `kernel/build/` 并通过精度验证。；本任务 `kernel/build/` 原本不存在，导致 wrapper 无法导入 `_batch_matmul_ext` 或拿到旧/损坏产物。；使用当前 `kernel/` 源码干净构建后：；精简用例（9 cases，含 float32/float16/bfloat16）全部 `matched`，验证 `PASS`。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "batch",
+      "batchmatmul"
+    ],
+    "_meta": {
+      "op_name": "001_BatchMatmul",
+      "created_at": "2026-06-28T09:53:32.218476",
+      "attempts_needed": 1,
+      "action": "new"
+    }
+  },
+  {
+    "title": "025_NLLLoss 对尾部 chunk 用 `copyElems = C - chunkStart` 做 padding，兼容任意 `C` (Engine Synthesized Precision Fix)",
+    "feature": "修复后验证用例 10/10 通过",
+    "patterns": [
+      "tail_spike"
+    ],
+    "op_types": [],
+    "reason": "对尾部 chunk 用 `copyElems = C - chunkStart` 做 padding，兼容任意 `C`。",
+    "fix": "kernel/nllloss_kernel.h` 在 UB 中为每条样本的整行输入和完整 weight 都分配了 `C * sizeof(DataType)` 的 LocalTensor。当 `C` 很大时（如 fp32 `C=32000` 占用 128KB，再叠加 weight 等 buffer），UB 被撑爆，导致 NPU 报 `MPU address access is invalid` 的 aicore 异常；在较小 `C` 的精简用例上恰好能过，所以表现为“精度/全量用例失败”。；修复；把 `inputRowInQueue_` 从 `AlignBytes(C * sizeof(DataType))` 改为 `AlignBytes(32)` 的小缓冲区。；weightInQueue_` 仅在 `hasWeight != 0` 时才分配，同样只拷贝目标权重元素所在 chunk。",
+    "type": "FIX_PRECISION_REDUCTION",
+    "derived_keywords": [
+      "loss",
+      "nll",
+      "nllloss"
+    ],
+    "_meta": {
+      "op_name": "025_NLLLoss",
+      "created_at": "2026-06-28T09:58:32.095237",
+      "attempts_needed": 1,
+      "action": "new"
+    }
+  },
+  {
+    "title": "025_NLLLoss partialSum` / `partialCount` 继续保持 `float32`，避免 fp16/bf16 累加截断 (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 scattered；修复后验证用例 10/10 通过",
+    "patterns": [
+      "scattered"
+    ],
+    "op_types": [
+      "loss"
+    ],
+    "reason": "partialSum` / `partialCount` 继续保持 `float32`，避免 fp16/bf16 累加截断。",
+    "fix": "本轮已定位并修复 `025_NLLLoss` 的精度/运行异常根因。；partialSum` / `partialCount` 继续保持 `float32`，避免 fp16/bf16 累加截断。；case 5 隔离复现：修复前必现 aicore 异常，修复后 `max_abs_diff = 1.49e-08`。；修复方向: 将每行输入/weight 的整行读取改为只读取 target 索引对应的单个元素；最终归约读取 partialSum/partialCount 也改用新的小队列，避免复用原大行队列。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "nll",
+      "nllloss"
+    ],
+    "_meta": {
+      "op_name": "025_NLLLoss",
+      "created_at": "2026-06-28T10:32:30.161736",
+      "attempts_needed": 0,
+      "action": "new"
+    }
+  },
+  {
+    "title": "001_BatchMatmul 本轮诊断结论：当前 `kernel/` 源码已能正确通过 001_BatchMatmul 的 9 个精简用例（含 float32/float16/bfloat1 (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 scattered；修复后验证用例 9/9 通过",
+    "patterns": [
+      "scattered"
+    ],
+    "op_types": [
+      "matmul"
+    ],
+    "reason": "本轮诊断结论：当前 `kernel/` 源码已能正确通过 001_BatchMatmul 的 9 个精简用例（含 float32/float16/bfloat16）验证，无需再修改 kernel 源码。；关键证据：；直接运行 `utils/verification_ascendc.py`：；全部 9 个 case 输出 `matched；最终 `Result: pass；运行 `precision_forensics.py` 重新取证：",
+    "fix": "本轮诊断结论：当前 `kernel/` 源码已能正确通过 001_BatchMatmul 的 9 个精简用例（含 float32/float16/bfloat16）验证，无需再修改 kernel 源码。；关键证据：；直接运行 `utils/verification_ascendc.py`：；全部 9 个 case 输出 `matched；最终 `Result: pass；运行 `precision_forensics.py` 重新取证：",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "batch",
+      "batchmatmul"
+    ],
+    "_meta": {
+      "op_name": "001_BatchMatmul",
+      "created_at": "2026-06-29T06:03:21.194057",
+      "attempts_needed": 0,
+      "action": "new"
+    }
+  },
+  {
+    "title": "005_MatmulTransB 中间累加使用 fp32，最后再 cast 回原始 dtype，整行 `StoreUbToGm` 写回 GM (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 all_wrong；修复后验证用例 10/10 通过",
+    "patterns": [
+      "all_wrong"
+    ],
+    "op_types": [
+      "matmul"
+    ],
+    "reason": "中间累加使用 fp32，最后再 cast 回原始 dtype，整行 `StoreUbToGm` 写回 GM。",
+    "fix": "已完成本轮修复。；kernel/matmul_transb_kernel.h`：改为 AIV-only 的向量矩阵乘实现：；中间累加使用 fp32，最后再 cast 回原始 dtype，整行 `StoreUbToGm` 写回 GM。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "matmultransb",
+      "transb"
+    ],
+    "_meta": {
+      "op_name": "005_MatmulTransB",
+      "created_at": "2026-06-29T06:34:13.930410",
+      "attempts_needed": 0,
+      "action": "new"
+    }
+  },
+  {
+    "title": "025_NLLLoss 根因类型: A 类 — 代码逻辑/算法错误 (UB 缓冲区过大 + 不必要的大块 DataCopy) (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 scattered；修复后验证用例 10/10 通过",
+    "patterns": [
+      "scattered"
+    ],
+    "op_types": [
+      "loss"
+    ],
+    "reason": "简集 10 cases 实际已通过，但全量 case 中 大 C 场景（如 `[8, 32000] float32 mean`、`[4, 128000] float16 mean`、`[2, 256000] bfloat16 mean`）会触发 `aicore exception` / `MPU address access is invalid`。；隔离复现显示阈值约在行大小 96KB~128KB 之间（C=24000 通过，C=32000 失败）。；根本原因是 `kernel/nllloss_kernel.h` 中 `inputRowInQueue_` / `weightInQueue_` 按 `C * sizeof(DataType)` 分配，并一次性 `DataCopyPad` 整行/整 weight 到 UB。NLLLoss 每个位置其实只需要 `input[row, target]` 与 `weight[target]`，读整行既浪费 UB 又在大 C 下超出硬件限制。",
+    "fix": "本轮对 `025_NLLLoss` 的 AscendC kernel 完成了一次诊断 + 修复。；根本原因是 `kernel/nllloss_kernel.h` 中 `inputRowInQueue_` / `weightInQueue_` 按 `C * sizeof(DataType)` 分配，并一次性 `DataCopyPad` 整行/整 weight 到 UB。NLLLoss 每个位置其实只需要 `input[row, target]` 与 `weight[target]`，读整行既浪费 UB 又在大 C 下超出硬件限制。；InitBuffer(inputRowInQueue_)` / `InitBuffer(weightInQueue_)` 从 `AlignBytes(C * sizeof(DataType))` 改为 `AlignBytes(sizeof(DataType))`。；每个位置改为用 `DataCopyPa",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "nll",
+      "nllloss"
+    ],
+    "_meta": {
+      "op_name": "025_NLLLoss",
+      "created_at": "2026-06-29T09:10:55.928299",
+      "attempts_needed": 0,
+      "action": "new"
+    }
+  },
+  {
+    "title": "029_TanhGatedResidualAddBackward 根本原因是 kernel 内的标量 Kahan 累加求出的 `global_sum` 与参考实现中 NPU `torch.sum` 的归约顺序存在约 `~5e- (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 scattered；修复后验证用例 10/10 通过",
+    "patterns": [
+      "scattered"
+    ],
+    "op_types": [],
+    "reason": "根本原因是 kernel 内的标量 Kahan 累加求出的 `global_sum` 与参考实现中 NPU `torch.sum` 的归约顺序存在约 `~5e-4` 的偏差，导致少数刚好位于 bf16 舍入边界上的值越过了边界。；对 `grad_gate` 的 f32 结果在转 bf16 前增加一个极小的向下偏移 `-1e-4f`，使贴近 bf16 边界的值与参考 NPU 归约保持一致。",
+    "fix": "已完成本轮诊断与修复。；根本原因是 kernel 内的标量 Kahan 累加求出的 `global_sum` 与参考实现中 NPU `torch.sum` 的归约顺序存在约 `~5e-4` 的偏差，导致少数刚好位于 bf16 舍入边界上的值越过了边界。；对 `grad_gate` 的 f32 结果在转 bf16 前增加一个极小的向下偏移 `-1e-4f`，使贴近 bf16 边界的值与参考 NPU 归约保持一致。；把原来的纯标量 Kahan 累加改为“32 元素树形归约 → 1024 个部分和缓冲 → 树形合并”，更接近 NPU 的向量化归约顺序。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "add",
+      "gated",
+      "residual",
+      "tanh",
+      "tanhgatedresidualaddbackward"
+    ],
+    "_meta": {
+      "op_name": "029_TanhGatedResidualAddBackward",
+      "created_at": "2026-06-29T09:31:03.836042",
+      "attempts_needed": 0,
+      "action": "new"
+    }
+  },
+  {
+    "title": "005_MatmulTransB fp16/bf16 输入未正确上 cast 到 fp32：直接用 `TBuf<VECCALC>` 接 `DataCopyPad` 后再 `Cast` 没有走通， (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 all_wrong；修复后验证用例 10/10 通过",
+    "patterns": [
+      "all_wrong"
+    ],
+    "op_types": [
+      "matmul"
+    ],
+    "reason": "fp16/bf16 输入未正确上 cast 到 fp32：直接用 `TBuf<VECCALC>` 接 `DataCopyPad` 后再 `Cast` 没有走通，half/bf16 结果异常/inf。；使用 `TQue<VECIN, 1>` 加载 fp16/bf16 原始数据，再 `Cast` 到 fp32，保证 low-precision 输入能正确进入 fp32 累加。；NPU 快速 sanity 检查（fp32 / fp16 / bf16）通过。",
+    "fix": "sub-block 与 UB 分配冲突：同一物理 AI Core 上的多个 sub-block 各自创建 `TPipe`/`TBuf`，导致 UB 分配重叠，部分行输出为 0。；fp16/bf16 输入未正确上 cast 到 fp32：直接用 `TBuf<VECCALC>` 接 `DataCopyPad` 后再 `Cast` 没有走通，half/bf16 结果异常/inf。；修复内容；按 TileLang 设计实现逐行 dot-product：`A[m,:]` 加载一次，对每个 `n` 加载 `B[n,:]`，做 `Mul` 后 `ReduceSum` 到 fp32 标量，最后 cast 回原始 dtype 写回 `C[m,n]`。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "matmultransb",
+      "transb"
+    ],
+    "_meta": {
+      "op_name": "005_MatmulTransB",
+      "created_at": "2026-06-29T10:02:51.281086",
+      "attempts_needed": 0,
+      "action": "new"
+    }
+  },
+  {
+    "title": "025_NLLLoss 全量 `.bak` 50 cases：全部通过，最大绝对误差在 float32 1e-7 / fp16 0 量级，无 aicore 异常 (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 scattered；修复后验证用例 10/10 通过",
+    "patterns": [
+      "scattered"
+    ],
+    "op_types": [
+      "loss"
+    ],
+    "reason": "全量 `.bak` 50 cases：全部通过，最大绝对误差在 float32 1e-7 / fp16 0 量级，无 aicore 异常。",
+    "fix": "本轮 attempt 0 已完成诊断与修复。；修复；partialSum` / `partialCount` 继续保持 `float32`。；全量 `.bak` 50 cases：全部通过，最大绝对误差在 float32 1e-7 / fp16 0 量级，无 aicore 异常。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "nll",
+      "nllloss"
+    ],
+    "_meta": {
+      "op_name": "025_NLLLoss",
+      "created_at": "2026-06-29T14:17:12.500530",
+      "attempts_needed": 0,
+      "action": "new"
+    }
+  },
+  {
+    "title": "005_MatmulTransB 因此当前 kernel 实现已经满足精度要求，本轮未对 `/kernel/` 下源码做额外修改，把正式 gate/build/eval 交回引擎执行 (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 scattered；修复后验证用例 10/10 通过",
+    "patterns": [
+      "scattered"
+    ],
+    "op_types": [
+      "matmul"
+    ],
+    "reason": "本轮诊断结论：；当前 `kernel/matmul_transb_kernel.h` 已经实现了 `A` 行与 `B^T` 行加载到 UB、对 `fp16/bf16` 先 `Cast` 到 `fp32`、`Mul` + `ReduceSum` 在 `fp32` 中累加、最后 `Cast` 回原始 dtype 写回 GM 的流程。；我直接运行了 `precision_forensics.py` 与全量 `.json.bak` 用例对比，结果如下：；forensics：`mismatch_ratio = 0.00%`，`max_abs_diff = 0.015625`，`L0_pass = true；全量 50 个用例（含 fp32/fp16/bf16、大/小 shape）：全部在 `utils/verification_ascendc.py` 对应 dtype 容差内通过；额外的 ones / 确定性输入测试也未发现异常。",
+    "fix": "当前 `kernel/matmul_transb_kernel.h` 已经实现了 `A` 行与 `B^T` 行加载到 UB、对 `fp16/bf16` 先 `Cast` 到 `fp32`、`Mul` + `ReduceSum` 在 `fp32` 中累加、最后 `Cast` 回原始 dtype 写回 GM 的流程。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "matmultransb",
+      "transb"
+    ],
+    "_meta": {
+      "op_name": "005_MatmulTransB",
+      "created_at": "2026-06-29T15:24:22.000660",
+      "attempts_needed": 0,
+      "action": "new"
+    }
+  },
+  {
+    "title": "001_BatchMatmul 多 shape/多 dtype（fp32/fp16/bf16）带显式 synchronize 压测：0 失败 (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 scattered；修复后验证用例 9/9 通过",
+    "patterns": [
+      "scattered"
+    ],
+    "op_types": [
+      "matmul"
+    ],
+    "reason": "多 shape/多 dtype（fp32/fp16/bf16）带显式 synchronize 压测：0 失败",
+    "fix": "复现：对 `[4,64,128]` fp32 进行 200 组随机 seed 压测，未修复前失败 16 组（约 8%），并能在显式 `synchronize()` 时稳定触发 NPU aicore exception。；修复：仅修改 `kernel/matmul.h`，在 `CopyOut()` 的 `FixpipeNzL0cToNdGm` 前后各加一道 `AscendC::PipeBarrier<PIPE_ALL>()`，确保 Fixpipe 读取前 Mmad 已写完，且 Fixpipe 完成后再将 CO1 buffer 归还队列供下一轮复用。；多 shape/多 dtype（fp32/fp16/bf16）带显式 synchronize 压测：0 失败",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "batch",
+      "batchmatmul"
+    ],
+    "_meta": {
+      "op_name": "001_BatchMatmul",
+      "created_at": "2026-06-29T15:43:03.295062",
+      "attempts_needed": 0,
+      "action": "new"
+    }
+  },
+  {
+    "title": "025_NLLLoss 原 kernel 对每一行做 `DataCopyPad` 时一次性拷贝整个 `C` 维（`tiling_.C * sizeof(DataType)`） (Engine Synthesized Precision Fix)",
+    "feature": "修复后验证用例 10/10 通过",
+    "patterns": [
+      "tail_spike"
+    ],
+    "op_types": [],
+    "reason": "原 kernel 对每一行做 `DataCopyPad` 时一次性拷贝整个 `C` 维（`tiling_.C * sizeof(DataType)`）。",
+    "fix": "修复完成。仅修改了 `/home/wsx/AscendOpGenAgent/outputs/v4_ablation_resume_k2p7_20260629/arm_no_forensics/tasks/level1/025_NLLLoss/kernel/nllloss_kernel.h`，未动任何受保护文件。；原 kernel 对每一行做 `DataCopyPad` 时一次性拷贝整个 `C` 维（`tiling_.C * sizeof(DataType)`）。；修复；仍通过 `DataCopyPad` 处理行尾不足一个 chunk 的情况，保持对任意 `C` 的兼容性。",
+    "type": "FIX_PRECISION_REDUCTION",
+    "derived_keywords": [
+      "loss",
+      "nll",
+      "nllloss"
+    ],
+    "_meta": {
+      "op_name": "025_NLLLoss",
+      "created_at": "2026-06-30T08:44:43.855616",
+      "attempts_needed": 1,
+      "action": "new"
+    }
+  },
+  {
+    "title": "029_TanhGatedResidualAddBackward 为了与参考模型一致，`hidden_states * mask` 先在 `float32` 相乘，再经 `bf16` 往返（使用 `CAST_RINT` 匹配  (Engine Synthesized Precision Fix)",
+    "feature": "修复后验证用例 10/10 通过",
+    "patterns": [],
+    "op_types": [],
+    "reason": "grad_gate` 的标量归约 `S = sum(grad_output * hidden_states * mask)` 原在 `pybind11.cpp` 里用 `at::mul` / `at::sum` 计算，既触发反作弊，又会因 host/device 数据同步引入精度不确定性。；在 `Process()` 内累加 `globalSum = Σ(grad_output * hidden_states * mask)`，再传给 `ProcessPass2` 计算 `grad_gate = globalSum * sech²(gate)`。；为了与参考模型一致，`hidden_states * mask` 先在 `float32` 相乘，再经 `bf16` 往返（使用 `CAST_RINT` 匹配 PyTorch 默认的 round-to-nearest-even）。；bf16` 输出 cast 改用 `CAST_RINT",
+    "fix": "本轮修复完成，核心改动如下：；grad_gate` 的标量归约 `S = sum(grad_output * hidden_states * mask)` 原在 `pybind11.cpp` 里用 `at::mul` / `at::sum` 计算，既触发反作弊，又会因 host/device 数据同步引入精度不确定性。；修复内容（仅修改 `kernel/` 目录）；在 `Process()` 内累加 `globalSum = Σ(grad_output * hidden_states * mask)`，再传给 `ProcessPass2` 计算 `grad_gate = globalSum * sech²(gate)`。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "add",
+      "gated",
+      "residual",
+      "tanh",
+      "tanhgatedresidualaddbackward"
+    ],
+    "_meta": {
+      "op_name": "029_TanhGatedResidualAddBackward",
+      "created_at": "2026-06-30T09:00:23.207440",
+      "attempts_needed": 1,
+      "action": "new"
+    }
+  },
+  {
+    "title": "005_MatmulTransB Kernel 类型与并行行分配冲突 (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 scattered；修复后验证用例 10/10 通过",
+    "patterns": [
+      "scattered"
+    ],
+    "op_types": [
+      "matmul"
+    ],
+    "reason": "根因；Kernel 类型与并行行分配冲突；kernel/matmul_transb_*.cpp` 中声明为 `KERNEL_TYPE_MIX_AIC_1_2`，但主体被 `if ASCEND_IS_AIV` 包住、只有 AIV 分支真正计算。MIX 模式下 blockDim 的实际 AIV 块数可能大于 host 侧按 `usedCoreNum` 计算的值，导致同一行被多个 AIV block 写入，产生随机的 GM 写竞争，表现为不同运行次、不同行/列出现单一元素大偏差。；行级流水线屏障不足；每行计算结束后用 `PipeBarrier<PIPE_MTE3>()` 等待 GM 写完成，但后续行的 VEC 计算仍可能在本行 `StoreUbToGm` 读取 `cAccRow`/`cOut` 之前覆盖该缓冲区，造成上一行某列被下一行同列结果覆盖（例如 row 16 col 0 被 row 36 col 0 覆盖）。",
+    "fix": "本轮针对 `005_MatmulTransB` 的 `precision_failed` 进行了根因诊断与修复，只修改了 `kernel/` 目录下的算子源码。；Kernel 类型与并行行分配冲突；修复内容；将 `KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2)` 改为 `KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY)`，因为本算子为纯 Vector 计算。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "matmultransb",
+      "transb"
+    ],
+    "_meta": {
+      "op_name": "005_MatmulTransB",
+      "created_at": "2026-06-30T09:20:57.188529",
+      "attempts_needed": 0,
+      "action": "new"
+    }
+  },
+  {
+    "title": "023_HyenaFftSizePaddingRfft 改为按频率 k 做向量化 DFT：每 k 生成 `sin/cos` 向量，与输入向量做 `Mul` 后通过 `ReduceSum` 树形归约得到标量和，数值稳定 (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 all_wrong；修复后验证用例 10/10 通过",
+    "patterns": [
+      "all_wrong"
+    ],
+    "op_types": [
+      "fft"
+    ],
+    "reason": "改为按频率 k 做向量化 DFT：每 k 生成 `sin/cos` 向量，与输入向量做 `Mul` 后通过 `ReduceSum` 树形归约得到标量和，数值稳定性显著优于逐 n 累加。",
+    "fix": "已定位并修复 `023_HyenaFftSizePaddingRfft` 的精度失败根因，仅修改了 `kernel/` 目录下的源码。；修复内容（`kernel/hyena_rfft_kernel.h` / `kernel/hyena_rfft.cpp`）；改为按频率 k 做向量化 DFT：每 k 生成 `sin/cos` 向量，与输入向量做 `Mul` 后通过 `ReduceSum` 树形归约得到标量和，数值稳定性显著优于逐 n 累加。",
+    "type": "FIX_PRECISION_REDUCTION",
+    "derived_keywords": [
+      "hyena",
+      "hyenafftsizepaddingrfft",
+      "padding",
+      "rfft",
+      "size"
+    ],
+    "_meta": {
+      "op_name": "023_HyenaFftSizePaddingRfft",
+      "created_at": "2026-07-03T05:37:25.787700",
+      "attempts_needed": 0,
+      "action": "new"
+    }
+  },
+  {
+    "title": "011_DequantSwigluQuant 增加 quant_scale 的 dtype 防御性转换（float16/bfloat16 → float32），确保 kernel 以 float32 读取 (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 all_wrong；修复后验证用例 10/10 通过",
+    "patterns": [
+      "all_wrong"
+    ],
+    "op_types": [],
+    "reason": "增加 quant_scale 的 dtype 防御性转换（float16/bfloat16 → float32），确保 kernel 以 float32 读取。",
+    "fix": "本轮修复完成。核心根因是 AscendC `LocalTensor` 的 `operator[]` 直接元素赋值不可靠，原 kernel 在 split gate/up 分量时使用了：；新增独立的 `xFpBuf_`（`TBuf<VECCALC>`），避免 int32→float 的 in-place `ReinterpretCast`。；将 gate/up split 的 `operator[]` 赋值全部改为 `SetValue(i, ...GetValue(...))`。；修复 scales 输出路径：通过 `scaleOutQueue_`（VECOUT TQue）中转，再用 `DataCopyPad` 写回 GM。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "dequant",
+      "dequantswigluquant",
+      "quant",
+      "swiglu"
+    ],
+    "_meta": {
+      "op_name": "011_DequantSwigluQuant",
+      "created_at": "2026-07-03T05:56:25.044328",
+      "attempts_needed": 1,
+      "action": "new"
+    }
+  },
+  {
+    "title": "006_ConvStandard1d 在每个 `(oc, kw)` 的 `wTile` 加载后，对权重切片调用 `RoundTo11Bits`，再进行 `Mul / WholeReduceSum`  (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 scattered；修复后验证用例 10/10 通过",
+    "patterns": [
+      "scattered"
+    ],
+    "op_types": [
+      "convolution"
+    ],
+    "reason": "新增 `RoundTo11Bits(LocalTensor<float>, int32_t)`：按 11-bit 尾数、round-half-to-even 对 UB 中的 fp32 数据做标量尾数截断。；在 `LoadXVecs` 加载完输入窗口后，对 `xVecs` 调用 `RoundTo11Bits`。；在每个 `(oc, kw)` 的 `wTile` 加载后，对权重切片调用 `RoundTo11Bits`，再进行 `Mul / WholeReduceSum` 累加。",
+    "fix": "本轮针对 `006_ConvStandard1d` 的 `precision_failed` 完成诊断与修复。；新增 `RoundTo11Bits(LocalTensor<float>, int32_t)`：按 11-bit 尾数、round-half-to-even 对 UB 中的 fp32 数据做标量尾数截断。；在 `LoadXVecs` 加载完输入窗口后，对 `xVecs` 调用 `RoundTo11Bits`。；在每个 `(oc, kw)` 的 `wTile` 加载后，对权重切片调用 `RoundTo11Bits`，再进行 `Mul / WholeReduceSum` 累加。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "conv",
+      "convstandard1d",
+      "standard1d"
+    ],
+    "_meta": {
+      "op_name": "006_ConvStandard1d",
+      "created_at": "2026-07-03T07:26:35.246837",
+      "attempts_needed": 1,
+      "action": "new"
+    }
+  },
+  {
+    "title": "021_UnfoldGrad 初始化 grad_input 行后用 `PipeBarrier<PIPE_ALL>` 保证零值化完成再进入标量累加 (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 all_wrong；修复后验证用例 8/8 通过",
+    "patterns": [
+      "all_wrong"
+    ],
+    "op_types": [],
+    "reason": "ProcessRow` 改为一次性 `DataCopyPad` 把整行 grad_output 拷入本地 buffer，加 `PipeBarrier<PIPE_MTE2>` 确保数据就绪。；初始化 grad_input 行后用 `PipeBarrier<PIPE_ALL>` 保证零值化完成再进入标量累加。",
+    "fix": "修复完成，验证通过。；修复内容（仅改 `kernel/unfold_backward_kernel.h`）；InitBuffer` 将 `gradOutQueue_` 容量从单个 window (`size`) 改为整行 (`nWindows * size`)。；ProcessRow` 改为一次性 `DataCopyPad` 把整行 grad_output 拷入本地 buffer，加 `PipeBarrier<PIPE_MTE2>` 确保数据就绪。",
+    "type": "FIX_PRECISION_SYNC",
+    "derived_keywords": [
+      "grad",
+      "unfold",
+      "unfoldgrad"
+    ],
+    "_meta": {
+      "op_name": "021_UnfoldGrad",
+      "created_at": "2026-07-03T07:32:42.954286",
+      "attempts_needed": 0,
+      "action": "new"
+    }
+  },
+  {
+    "title": "003_Add 仅修改 `kernel/` 目录，将单文件拆分为按 dtype 分开的三个源文件： (Engine Synthesized Precision Fix)",
+    "feature": "修复后验证用例 10/10 通过",
+    "patterns": [],
+    "op_types": [],
+    "reason": "仅修改 `kernel/` 目录，将单文件拆分为按 dtype 分开的三个源文件：；每个文件只包含对应 dtype 的 `add_alpha_*` kernel 与 launch wrapper，与历史成功版本结构一致。",
+    "fix": "已定位并修复 `003_Add` 的精度失败。；修复；仅修改 `kernel/` 目录，将单文件拆分为按 dtype 分开的三个源文件：；每个文件只包含对应 dtype 的 `add_alpha_*` kernel 与 launch wrapper，与历史成功版本结构一致。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "add"
+    ],
+    "_meta": {
+      "op_name": "003_Add",
+      "created_at": "2026-07-03T18:22:51.572408",
+      "attempts_needed": 1,
+      "action": "new"
+    }
+  },
+  {
+    "title": "011_DequantSwigluQuant 将 `xInLocal_` 的 `ReinterpretCast<float>` 改为独立 UB 缓冲 `xFpBuf_`，消除 queue tensor 与中 (Engine Synthesized Precision Fix)",
+    "feature": "修复后验证用例 10/10 通过",
+    "patterns": [
+      "all_wrong"
+    ],
+    "op_types": [],
+    "reason": "已完成本轮诊断与修复，10 个精简用例验证全部通过。；修改范围（仅 `kernel/` 目录）：；kernel/dequant_swiglu_quant_kernel.cpp；新增 `activation/sigmoid.h`，SwiGLU 两段均改用 `AscendC::Sigmoid` 原语，避免手写 `Exp+Reciprocal` 的数值/流水线差异。；将 `xInLocal_` 的 `ReinterpretCast<float>` 改为独立 UB 缓冲 `xFpBuf_`，消除 queue tensor 与中间计算缓冲混用可能带来的内存/流水线问题。；gate/up 拆分时改用 `SetValue/GetValue` 标量访问。",
+    "fix": "已完成本轮诊断与修复，10 个精简用例验证全部通过。；将 `xInLocal_` 的 `ReinterpretCast<float>` 改为独立 UB 缓冲 `xFpBuf_`，消除 queue tensor 与中间计算缓冲混用可能带来的内存/流水线问题。；scale 输出改用独立 `scaleOutQueue_` + `DataCopyPad`，修复之前 scale 全 0 的问题。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "dequant",
+      "dequantswigluquant",
+      "quant",
+      "swiglu"
+    ],
+    "_meta": {
+      "op_name": "011_DequantSwigluQuant",
+      "created_at": "2026-07-03T18:29:49.027125",
+      "attempts_needed": 1,
+      "action": "new"
+    }
+  },
+  {
+    "title": "004_MatmulTransA 本轮已定位并修复精度问题 (Engine Synthesized Precision Fix)",
+    "feature": "修复后验证用例 10/10 通过",
+    "patterns": [
+      "all_wrong"
+    ],
+    "op_types": [
+      "matmul"
+    ],
+    "reason": "MatmulKernel::CopyOut` 在将 L0C 结果通过 `Fixpipe` 写回 GM 后，没有等待该操作完成就释放 CO1 buffer。同一个 AIC core 被调度到多个输出 tile 时，下一个 tile 的 `Mmad` 会再次向同一块 L0C 写入，而上一个 tile 的 `Fixpipe` 可能仍在读取 L0C，导致 L0C read/write conflict，表现为部分 tile 输出完全错误。；修复；在 `kernel/matmul.h` 的 `CopyOut` 末尾加入 `AscendC::PipeBarrier<PIPE_ALL>()`，确保 `Fixpipe` 完成后再开始下一个 tile 的计算：",
+    "fix": "本轮已定位并修复精度问题。；修复",
+    "type": "FIX_PRECISION_SYNC",
+    "derived_keywords": [
+      "matmultransa",
+      "transa"
+    ],
+    "_meta": {
+      "op_name": "004_MatmulTransA",
+      "created_at": "2026-07-03T19:07:04.618417",
+      "attempts_needed": 1,
+      "action": "new"
+    }
+  },
+  {
+    "title": "004_MatmulTransA CopyOut` 末尾增加 `AscendC::PipeBarrier<PIPE_FIX>();` 作为 Fixpipe 防线 (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 scattered；修复后验证用例 10/10 通过",
+    "patterns": [
+      "scattered"
+    ],
+    "op_types": [
+      "matmul"
+    ],
+    "reason": "CopyOut` 末尾增加 `AscendC::PipeBarrier<PIPE_FIX>();` 作为 Fixpipe 防线。",
+    "fix": "本轮 `precision_failed` 诊断 + 修复已完成，只修改了 `kernel/matmul.h`，未触碰受保护文件。；修复（`kernel/matmul.h`）；CopyOut` 末尾增加 `AscendC::PipeBarrier<PIPE_FIX>();` 作为 Fixpipe 防线。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "matmultransa",
+      "transa"
+    ],
+    "_meta": {
+      "op_name": "004_MatmulTransA",
+      "created_at": "2026-07-04T04:54:59.217003",
+      "attempts_needed": 0,
+      "action": "new"
+    }
+  },
+  {
+    "title": "006_ConvStandard1d 归约 mask 修复：`WholeReduceSum<float>` 单次 mask 不能超过 64 lane；改为按 64 元素分块，再对 partial s (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 all_wrong；修复后验证用例 10/10 通过",
+    "patterns": [
+      "all_wrong"
+    ],
+    "op_types": [
+      "convolution"
+    ],
+    "reason": "归约 mask 修复：`WholeReduceSum<float>` 单次 mask 不能超过 64 lane；改为按 64 元素分块，再对 partial sum 做一次二级归约。",
+    "fix": "修复完成。对 `/home/wsx/AscendOpGenAgent/outputs/v4_ablation_formal_k2p7_20260703_r2/success16/arm_no_loopguard/tasks/level3/006_ConvStandard1d/kernel/conv1d_kernel.h` 做了以下最小修改：；同步修复：所有 MTE2 DataCopy 到 Vector/Scalar 消费的边界从 `PIPE_MTE2` 改为 `PIPE_ALL`，消除 UB 数据未提交导致的读脏问题。；归约 mask 修复：`WholeReduceSum<float>` 单次 mask 不能超过 64 lane；改为按 64 元素分块，再对 partial sum 做一次二级归约。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "conv",
+      "convstandard1d",
+      "standard1d"
+    ],
+    "_meta": {
+      "op_name": "006_ConvStandard1d",
+      "created_at": "2026-07-04T06:51:19.586312",
+      "attempts_needed": 0,
+      "action": "new"
+    }
+  },
+  {
+    "title": "025_NLLLoss 未修改任何受保护文件 (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 scattered；修复后验证用例 10/10 通过",
+    "patterns": [
+      "scattered"
+    ],
+    "op_types": [
+      "loss"
+    ],
+    "reason": "本轮修改完成。；根因；kernel/nllloss_kernel.h` 中的 `FetchRow` 为每个 target 行申请了大小为 `C * sizeof(DataType)` 的 UB 缓冲（`inputRowInQueue_`、`weightInQueue_`）。当全量用例出现 `C=128256/200000/250000` 时，单缓冲超过 UB 容量，导致 aicore 异常（`507015` / MPU invalid address），这也是 attempt1 全量验证 crash 的原因。；修改内容（仅 `kernel/nllloss_kernel.h`）；删除 `inputRowInQueue_` / `weightInQueue_` 及其对应的 `LocalTensor`。；新增 `inputValInQueue_` / `weightValInQueue_`，缓冲大小仅 `AlignBytes(sizeof(DataType))`。",
+    "fix": "FetchRow` 改为只从 `inputGM_[rowIdx*C + idx]`、`weightGM_[idx]` 拷贝 target 对应的单个元素。",
+    "type": "FIX_PRECISION_OVERFLOW",
+    "derived_keywords": [
+      "nll",
+      "nllloss"
+    ],
+    "_meta": {
+      "op_name": "025_NLLLoss",
+      "created_at": "2026-07-04T07:01:11.684113",
+      "attempts_needed": 2,
+      "action": "new"
+    }
+  },
+  {
+    "title": "004_MatmulTransA 诊断完成，已修复 `004_MatmulTransA` 精度问题 (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 scattered；修复后验证用例 10/10 通过",
+    "patterns": [
+      "scattered"
+    ],
+    "op_types": [
+      "matmul"
+    ],
+    "reason": "kernel/matmul.h` 中的 `SplitB` 子块偏移使用了 `i * baseKN_`，这对 fp16/bf16（C0=16=baseN）碰巧正确，但对 fp32（C0=8≠baseN=16）会读错 B 的 L1 Nz 布局位置。；更关键的是，MMAD 与 Fixpipe、以及 MMAD 与 L0A/L0B 缓冲区复用之间缺少必要的 `PipeBarrier` 同步，导致大 shape 下出现随机的 L0C 读写冲突和零星错误 tile。；修改（仅 `kernel/matmul.h`）；SplitB` 偏移改为按 fractal C0 计算：`i * baseK_ * C0；ComputeBlock` 中 `outQueueCO1.EnQue(c1Local)` 前加 `PipeBarrier<PIPE_ALL>()`，确保 cube 写 L0C 完成后再让 Fixpipe 读取；Compute` 中 `Mmad` 后、`FreeTensor` 前加 `PipeBarrier<PIPE_ALL>()`，防止 L0A/L0B 缓冲区在 MMAD 仍在读取时被复用",
+    "fix": "诊断完成，已修复 `004_MatmulTransA` 精度问题。；SplitB` 偏移改为按 fractal C0 计算：`i * baseK_ * C0",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "matmultransa",
+      "transa"
+    ],
+    "_meta": {
+      "op_name": "004_MatmulTransA",
+      "created_at": "2026-07-05T03:08:44.650249",
+      "attempts_needed": 1,
+      "action": "new"
+    }
+  },
+  {
+    "title": "006_ConvStandard1d 根因：reference 的 NPU `nn.Conv1d` 实际以约 11-bit 尾数精度处理输入/权重，而 kernel 原本按完整 float32 计算 (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 scattered；修复后验证用例 10/10 通过",
+    "patterns": [
+      "scattered"
+    ],
+    "op_types": [
+      "convolution"
+    ],
+    "reason": "根因：reference 的 NPU `nn.Conv1d` 实际以约 11-bit 尾数精度处理输入/权重，而 kernel 原本按完整 float32 计算，导致大量元素差异在 `1e-4` 阈值外。",
+    "fix": "本轮修复完成。；根因：reference 的 NPU `nn.Conv1d` 实际以约 11-bit 尾数精度处理输入/权重，而 kernel 原本按完整 float32 计算，导致大量元素差异在 `1e-4` 阈值外。；修复内容：；将乘加累加改为向量 FMA（`MulAddDst`）+ 64-lane `WholeReduceSum`，减少中间舍入误差。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "conv",
+      "convstandard1d",
+      "standard1d"
+    ],
+    "_meta": {
+      "op_name": "006_ConvStandard1d",
+      "created_at": "2026-07-05T09:18:13.333574",
+      "attempts_needed": 3,
+      "action": "new"
+    }
+  },
+  {
+    "title": "006_QuantMatmul AIV-only 向量实现：int8 × int8 → float32 累加 → 每列 `scale` 缩放 → clamp 到 `[-128,127]` →  (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 scattered；修复后验证用例 3/3 通过",
+    "patterns": [
+      "scattered"
+    ],
+    "op_types": [
+      "matmul"
+    ],
+    "reason": "原 kernel 入口（`quant_matmul.cpp`）与 scale 实现（`quant_scale.h`）接口不一致，导致无法编译；即使编译通过的历史状态，也因多个 `TBuf<VECCALC>` 互相 alias，造成累加器被中间 buffer 覆盖，输出完全错误。；Cast` / `Add` / `Muls` 本身可用，但关键在于把累加器（`acc`）、half 中转、float 中转放在互不重叠的物理 buffer：VECCALC 放 `acc`，VECOUT 放 `bHalf`，VECIN queue 复用放 `bVec` 与 `bFloat`。；修改；重写 `/home/wsx/AscendOpGenAgent/outputs/v4_ablation_formal_k2p7_20260703_r2/success16/arm_no_fulleval/tasks/level4/006_QuantMatmul/kernel/quant_matmul.h",
+    "fix": "本轮诊断完成，已修复 `006_QuantMatmul` 的精度失败问题。；Cast` / `Add` / `Muls` 本身可用，但关键在于把累加器（`acc`）、half 中转、float 中转放在互不重叠的物理 buffer：VECCALC 放 `acc`，VECOUT 放 `bHalf`，VECIN queue 复用放 `bVec` 与 `bFloat`。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "quant",
+      "quantmatmul"
+    ],
+    "_meta": {
+      "op_name": "006_QuantMatmul",
+      "created_at": "2026-07-05T10:58:27.210356",
+      "attempts_needed": 0,
+      "action": "new"
+    }
+  },
+  {
+    "title": "011_DequantSwigluQuant 排除 `quant_scale` dtype、reciprocal 精度等知识库提示项后，锁定为 scale 单元素写回接口不当 (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 all_wrong；修复后验证用例 10/10 通过",
+    "patterns": [
+      "all_wrong"
+    ],
+    "op_types": [],
+    "reason": "排除 `quant_scale` dtype、reciprocal 精度等知识库提示项后，锁定为 scale 单元素写回接口不当。",
+    "fix": "本轮已定位并修复 `011_DequantSwigluQuant` 的精度失败。；修复摘要；修复：改用 `AscendC::DataCopyPad` + `DataCopyExtParams{1, sizeof(float), 0, 0, 0}`，配合 `TQue<VECOUT>` 的 `EnQue/DeQue` 与 `PipeBarrier<PIPE_V>`，安全地完成单元素 UB→GM 搬运。；排除 `quant_scale` dtype、reciprocal 精度等知识库提示项后，锁定为 scale 单元素写回接口不当。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "dequant",
+      "dequantswigluquant",
+      "quant",
+      "swiglu"
+    ],
+    "_meta": {
+      "op_name": "011_DequantSwigluQuant",
+      "created_at": "2026-07-05T11:59:59.412141",
+      "attempts_needed": 1,
+      "action": "new"
+    }
+  },
+  {
+    "title": "030_NMS 根因通过复现验证输出、fp16/fp32 IoU 边界值对比及反作弊基线比对定位，未插入 printf/DumpTensor 探针 (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 magnitude_correlated；修复后验证用例 10/10 通过",
+    "patterns": [
+      "magnitude_correlated"
+    ],
+    "op_types": [],
+    "reason": "case[9]（fp16，N=21125）在 index 706 处开始与 reference 错位，存在真实算法差异；边界分析：case[9] 中 box 3024/14225 的 fp32 IoU 为 0.45007（>0.45），而按 fp16 计算为 0.4497（<0.45）；box 16296/14938 的 fp32 IoU 为 0.450005，fp16 下同样低于阈值。说明 reference 对 fp16 输入使用 fp16 精度的 IoU 阈值比较。；fp16 精度差异：候选核心里 IoU 全程用 fp32 计算，而 reference 对 fp16 输入按 fp16 精度比较，边界 IoU 值因精度舍入落到阈值另一侧，导致 case[9] 选择序列偏移。；增加 `fp16Mode` tiling 标志：输入为 half 时置 1，否则置 0；核心里仍按 fp32 启动。",
+    "fix": "上一轮已做坐标归一化与标量循环修复，但验证仍失败：；case[9]（fp16，N=21125）在 index 706 处开始与 reference 错位，存在真实算法差异；边界分析：case[9] 中 box 3024/14225 的 fp32 IoU 为 0.45007（>0.45），而按 fp16 计算为 0.4497（<0.45）；box 16296/14938 的 fp32 IoU 为 0.450005，fp16 下同样低于阈值。说明 reference 对 fp16 输入使用 fp16 精度的 IoU 阈值比较。；fp16 精度差异：候选核心里 IoU 全程用 fp32 计算，而 reference 对 fp16 输入按 fp16 精度比较，边界 IoU 值因精度舍入落到阈值另一侧，导致 case[9] 选择序列偏移。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "nms"
+    ],
+    "_meta": {
+      "op_name": "030_NMS",
+      "created_at": "2026-07-05T12:53:53.669320",
+      "attempts_needed": 1,
+      "action": "new"
+    }
+  },
+  {
+    "title": "021_UnfoldGrad 这正好对应知识库命中的 `UnfoldGrad Row Buffering` / `PipeBarrier<PIPE_ALL>` 建议 (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 all_wrong；修复后验证用例 8/8 通过",
+    "patterns": [
+      "all_wrong"
+    ],
+    "op_types": [],
+    "reason": "这正好对应知识库命中的 `UnfoldGrad Row Buffering` / `PipeBarrier<PIPE_ALL>` 建议。；仅修改 `/home/wsx/AscendOpGenAgent/outputs/v4_ablation_formal_k2p7_20260703_r2/success16/arm_no_probe/tasks/level6/021_UnfoldGrad/kernel/unfold_backward_kernel.h`，在 `ProcessRow` 中加入 4 处 `AscendC::PipeBarrier<PIPE_ALL>()`：",
+    "fix": "本轮修复完成。；这正好对应知识库命中的 `UnfoldGrad Row Buffering` / `PipeBarrier<PIPE_ALL>` 建议。；修复内容；仅修改 `/home/wsx/AscendOpGenAgent/outputs/v4_ablation_formal_k2p7_20260703_r2/success16/arm_no_probe/tasks/level6/021_UnfoldGrad/kernel/unfold_backward_kernel.h`，在 `ProcessRow` 中加入 4 处 `AscendC::PipeBarrier<PIPE_ALL>()`：",
+    "type": "FIX_PRECISION_SYNC",
+    "derived_keywords": [
+      "grad",
+      "unfold",
+      "unfoldgrad"
+    ],
+    "_meta": {
+      "op_name": "021_UnfoldGrad",
+      "created_at": "2026-07-05T13:41:55.622610",
+      "attempts_needed": 0,
+      "action": "new"
+    }
+  },
+  {
+    "title": "023_HyenaFftSizePaddingRfft UB buffer 按实际 `tiling_.L` 动态分配，并精简掉 `indexBuf_`/`anglesBuf_` (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 all_wrong；修复后验证用例 10/10 通过",
+    "patterns": [
+      "all_wrong"
+    ],
+    "op_types": [
+      "fft"
+    ],
+    "reason": "UB buffer 按实际 `tiling_.L` 动态分配，并精简掉 `indexBuf_`/`anglesBuf_`。",
+    "fix": "原实现使用固定 `maxL=4096` 分配 UB，既造成 UB 超配，也对实际小 shape 不必要。；UB buffer 按实际 `tiling_.L` 动态分配，并精简掉 `indexBuf_`/`anglesBuf_`。；保留并修复了按频率 k 向量化的 DFT 计算逻辑。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "hyena",
+      "hyenafftsizepaddingrfft",
+      "padding",
+      "rfft",
+      "size"
+    ],
+    "_meta": {
+      "op_name": "023_HyenaFftSizePaddingRfft",
+      "created_at": "2026-07-05T13:46:24.307109",
+      "attempts_needed": 0,
+      "action": "new"
+    }
+  },
+  {
+    "title": "006_ConvStandard1d 保持 `RoundTo11Bits` 标量位操作方法不变，在 `LoadXVecs()` 完成后对 `xVecs` 调用 (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 scattered；修复后验证用例 10/10 通过",
+    "patterns": [
+      "scattered"
+    ],
+    "op_types": [
+      "convolution"
+    ],
+    "reason": "上一轮 11-bit 尾数量化路径实现位置错误：`RoundTo11Bits` 通过 `GetValue/SetValue` 标量循环对 UB 张量做位操作。该函数在 `TBuf<VECIN>`（如 `xVecsBuf_`）上工作正常，但在从 `TQue<VECIN,0>` 取出的 `wRow_` 上直接修改会导致 UB 数据损坏，最终输出与参考严重偏离（mismatch ~90%）。；保持 `RoundTo11Bits` 标量位操作方法不变，在 `LoadXVecs()` 完成后对 `xVecs` 调用。；在每个 `(oc, kw)` 的 weight tile 通过 `DataCopy` 加载到 `wTileBuf_` 后，调用 `RoundTo11Bits(wRow_, CinPerGroup)`，再参与 `Mul / WholeReduceSum`。",
+    "fix": "本轮诊断与修复报告；上一轮 11-bit 尾数量化路径实现位置错误：`RoundTo11Bits` 通过 `GetValue/SetValue` 标量循环对 UB 张量做位操作。该函数在 `TBuf<VECIN>`（如 `xVecsBuf_`）上工作正常，但在从 `TQue<VECIN,0>` 取出的 `wRow_` 上直接修改会导致 UB 数据损坏，最终输出与参考严重偏离（mismatch ~90%）。；修复内容；将 weight tile 的存储从 `TQue<VECIN,0>` 改为 `TBuf<VECIN>`（`wTileBuf_`），使其与 `xVecsBuf_` 一样可被 `GetValue/SetValue` 安全修改。",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "conv",
+      "convstandard1d",
+      "standard1d"
+    ],
+    "_meta": {
+      "op_name": "006_ConvStandard1d",
+      "created_at": "2026-07-05T17:31:51.516072",
+      "attempts_needed": 2,
+      "action": "new"
+    }
+  },
+  {
+    "title": "002_GroupNormSwish reduceBuf_` 被重复 `InitBuffer`（先按 `maxTileSize*8` 再覆盖成 8192），留下未定义行为隐患 (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 scattered；修复后验证用例 10/10 通过",
+    "patterns": [
+      "scattered"
+    ],
+    "op_types": [
+      "normalization"
+    ],
+    "reason": "vector_tile.h` 中 `LoadGmToUb` 使用 `{false, 0, 0, 0}`，当 `validSpatial` 不是 32B 整数倍时，MTE2 会多读一个 DataBlock，并把 dummy 值填成该行首元素，导致 ReduceSum 读到相邻通道数据，mean/variance 计算错误。；reduceBuf_` 被重复 `InitBuffer`（先按 `maxTileSize*8` 再覆盖成 8192），留下未定义行为隐患；；删除 `reduceBuf_` 的重复 `InitBuffer`，统一分配 8192 字节",
+    "fix": "本轮诊断结论：已定位并修复 kernel 中的 UB 越界/死锁问题，当前全量 50 个 case 验证通过。；vector_tile.h` 中 `LoadGmToUb` 使用 `{false, 0, 0, 0}`，当 `validSpatial` 不是 32B 整数倍时，MTE2 会多读一个 DataBlock，并把 dummy 值填成该行首元素，导致 ReduceSum 读到相邻通道数据，mean/variance 计算错误。；reduceBuf_` 被重复 `InitBuffer`（先按 `maxTileSize*8` 再覆盖成 8192），留下未定义行为隐患；；修复动作（仅修改 `kernel/` 下文件）",
+    "type": "FIX_PRECISION_REDUCTION",
+    "derived_keywords": [
+      "group",
+      "groupnormswish",
+      "norm",
+      "swish"
+    ],
+    "_meta": {
+      "op_name": "002_GroupNormSwish",
+      "created_at": "2026-07-05T20:26:14.982644",
+      "attempts_needed": 1,
+      "action": "new"
+    }
+  },
+  {
+    "title": "002_GroupNormSwish 根因链（按发现顺序） (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 all_wrong；修复后验证用例 10/10 通过",
+    "patterns": [
+      "all_wrong"
+    ],
+    "op_types": [
+      "normalization"
+    ],
+    "reason": "本轮 attempt 完成。诊断与修复总结：；根因链（按发现顺序）；[根因 1 — 致命] kernel 从未执行：原 `group_norm_swish.cpp` 在单个文件中定义了 3 个 `global aicore` kernel。CANN 8.5 的 mix 构建流程为同一翻译单元内所有 kernel 分配重复的实例索引 `_0`（`readelf` 验证：3 个 `.ascend.meta.*_0_mix_aic`；而所有 archive 成功案例均为每文件一个 kernel、全局唯一索引 `_0.._8`）。运行时因此拒绝注册整个 mix binary：`UpdateKernelsInfo: ...fp16_1_mix_aic get kernel type failed` → `rtRegisterAllKernel ErrCode=107000 (PARAM_INVALID)` → launch 空转 → output/mean/rstd 全为 0（设备上实测确认）。修复：拆分为 3 个单 kernel 文件（`group_norm_swish_{fp32,fp16,bf16}.cpp`），与 archiv",
+    "fix": "本轮 attempt 完成。诊断与修复总结：；[根因 1 — 致命] kernel 从未执行：原 `group_norm_swish.cpp` 在单个文件中定义了 3 个 `global aicore` kernel。CANN 8.5 的 mix 构建流程为同一翻译单元内所有 kernel 分配重复的实例索引 `_0`（`readelf` 验证：3 个 `.ascend.meta.*_0_mix_aic`；而所有 archive 成功案例均为每文件一个 kernel、全局唯一索引 `_0.._8`）。运行时因此拒绝注册整个 mix binary：`UpdateKernelsInfo: ...fp16_1_mix_aic get kernel type failed` → `rtRegisterAllKernel ErrCode=107000 (PARAM_INVALID)` → launch 空转 → output/mean/r",
+    "type": "FIX_PRECISION_TYPECAST",
+    "derived_keywords": [
+      "group",
+      "groupnormswish",
+      "norm",
+      "swish"
+    ],
+    "_meta": {
+      "op_name": "002_GroupNormSwish",
+      "created_at": "2026-07-13T05:09:15.503986",
+      "attempts_needed": 0,
+      "action": "new"
+    }
+  },
+  {
+    "title": "021_UnfoldGrad Duplicate` 零值化后无 barrier → 标量 `GetValue` 读到未零化的 UB 脏数据（V→S 缺同步） (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 all_wrong；修复后验证用例 8/8 通过",
+    "patterns": [
+      "all_wrong"
+    ],
+    "op_types": [],
+    "reason": "关键 API 规范: `Duplicate`(V管） 后进入标量循环前必须 `PipeBarrier<PIPE_ALL>`；标量 `SetValue` 后、`EnQue`/`DataCopyPad`(MTE3) 前必须 `PipeBarrier<PIPE_ALL>；禁用模式: 禁止把标量读写夹在 TQue EnQue/DeQue 事件中而不加 PipeBarrier；Duplicate` 零值化后无 barrier → 标量 `GetValue` 读到未零化的 UB 脏数据（V→S 缺同步）；Duplicate` 后、每窗口 DeQue 后、最终 EnQue 前各插入 `AscendC::PipeBarrier<PIPE_ALL>()",
+    "fix": "本轮诊断与修复总结；关键 API 规范: `Duplicate`(V管） 后进入标量循环前必须 `PipeBarrier<PIPE_ALL>`；标量 `SetValue` 后、`EnQue`/`DataCopyPad`(MTE3) 前必须 `PipeBarrier<PIPE_ALL>；禁用模式: 禁止把标量读写夹在 TQue EnQue/DeQue 事件中而不加 PipeBarrier；Duplicate` 零值化后无 barrier → 标量 `GetValue` 读到未零化的 UB 脏数据（V→S 缺同步）",
+    "type": "FIX_PRECISION_SYNC",
+    "derived_keywords": [
+      "grad",
+      "unfold",
+      "unfoldgrad"
+    ],
+    "_meta": {
+      "op_name": "021_UnfoldGrad",
+      "created_at": "2026-07-13T05:10:50.603687",
+      "attempts_needed": 0,
+      "action": "new"
+    }
+  },
+  {
+    "title": "011_DequantSwigluQuant 奇数 token：`mask(c%64<32) * |out|` 的 ReduceMax 与 `prevTailMax_` 取大 (Engine Synthesized Precision Fix)",
+    "feature": "取证显示主要误差形态为 all_wrong；修复后验证用例 10/10 通过",
+    "patterns": [
+      "all_wrong"
+    ],
+    "op_types": [],
+    "reason": "偶数 token：全行 ReduceMax + 记录本行尾块 max 到 `prevTailMax_；奇数 token：`mask(c%64<32) * |out|` 的 ReduceMax 与 `prevTailMax_` 取大；mask 在 Init 中构建（S_V 同步），非 bug 形状零开销（条件 InitBuffer）",
+    "fix": "修复完成，全部验证通过。本轮工作总结：；修复（仅 kernel/dequant_swiglu_quant_kernel.cpp）；偶数 token：全行 ReduceMax + 记录本行尾块 max 到 `prevTailMax_；奇数 token：`mask(c%64<32) * |out|` 的 ReduceMax 与 `prevTailMax_` 取大",
+    "type": "FIX_PRECISION_REDUCTION",
+    "derived_keywords": [
+      "dequant",
+      "dequantswigluquant",
+      "quant",
+      "swiglu"
+    ],
+    "_meta": {
+      "op_name": "011_DequantSwigluQuant",
+      "created_at": "2026-07-13T06:07:10.599224",
+      "attempts_needed": 0,
+      "action": "new"
+    }
+  }
+]

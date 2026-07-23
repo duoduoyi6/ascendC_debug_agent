@@ -135,7 +135,7 @@ python3 utils/classify_verify_result.py \
 6. **Gate 自动写 round_summary，Agent 不再手写**: Gate-A 通过后脚本自动提取 sections 小文件并写入 round_summary 的 diagnostics + index 字段；Gate-V 合并 metrics 数值字段。Agent 无需手动写 round_summary 任何字段。
 7. **重试时历史读取顺序**: 先读 `tuning_directions.json` 获取跨轮方向全貌（fix_type/outcome/improvement_ratio 一览），再按需读 `round_summary_N.json` 的 `index.sections.*` 路径深入具体 section 小文件；禁止跳过 `tuning_directions.json` 直接全量读 `precision_audit_{N}.md`。
 8. **[DIRECTION_ASSESSMENT] 严格二值**: "本轮是否延续上一轮方向" 只能填 "是" 或 "否"，Gate-A 二值校验会拒绝其他内容
-9. **知识库检索必须带 --log-path**: 两次 search 调用均需加 `--log-path` 和 `--call-index`，否则检索记录不可观测
+9. **知识库检索必须带 --log-path**: 两次 search 调用均需加 `--log-path` 和 `--call-index`，否则检索记录不可观测。若 engine prompt 明确注入 `ABLATE_KB=1` 或 `ABLATE_DIAGNOSTIC_EVIDENCE=1`，本条不适用，禁止自行检索或读取知识库。
 10. **精简 PASS 不等于最终 PASS**: 若 `{task_dir}/{op_name}.json.bak` 存在，则 Gate-V 通过后必须恢复 `.json.bak -> .json` 再跑全量验证；只有全量验证通过才算最终成功
 
 ### 执行约束（硬约束，不可违反）

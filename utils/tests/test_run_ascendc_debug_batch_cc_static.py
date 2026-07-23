@@ -114,6 +114,9 @@ class TestAblationProfiles(unittest.TestCase):
         )[0]
         self.assertIn("export ABLATE_FORENSICS=1", profile)
         self.assertIn("export ABLATE_PROBE=1", profile)
+        self.assertIn("export ABLATE_KB=1", profile)
+        self.assertIn("export ABLATE_DIAGNOSTIC_EVIDENCE=1", profile)
+        self.assertIn('KB_PATH=""', profile)
         self.assertNotIn("export ABLATE_GATE_A=1", profile)
         self.assertNotIn("export ABLATE_FULL_EVAL=1", profile)
         self.assertNotIn("export ABLATE_LOOP_GUARD=1", profile)
@@ -125,6 +128,15 @@ class TestAblationProfiles(unittest.TestCase):
         self.assertIn("已从 V5 正式矩阵移除", self.text)
         self.assertIn("请使用 no_diagnostic_evidence", self.text)
 
+    def test_describe_profile_exits_before_task_validation(self):
+        describe = self.text.index(
+            'if [[ "$DESCRIBE_ABLATE_PROFILE" == "1" ]]'
+        )
+        task_validation = self.text.index(
+            '[[ -z "$TASK_DIRS" && -z "$TASK_DIRS_FILE" ]]'
+        )
+        self.assertLess(describe, task_validation)
+
     def test_baseline_disables_recovery_and_kb(self):
         self.assertIn("export ABLATE_RECOVERY=1;  export ABLATE_KB=1", self.text)
 
@@ -133,8 +145,8 @@ class TestAblationProfiles(unittest.TestCase):
         self.assertIn("no_audit 不属于正式消融矩阵", self.text)
 
     def test_no_anticheat_keeps_out_of_band_observer_only(self):
-        self.assertIn("anticheat_observer.json", self.text)
-        self.assertIn("engine ablated; post-run observer only", self.text)
+        self.assertNotIn("anticheat_observer.json", self.text)
+        self.assertIn("isolated post-hoc observer required", self.text)
 
     def test_kb_can_be_frozen_read_only(self):
         self.assertIn("--kb-read-only", self.text)

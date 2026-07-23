@@ -772,6 +772,13 @@ def _write_kb_usage_trace(task_dir: Path, attempt: int,
         "mentioned_title_ids": mentioned,
         "usage_trace_complete": "kb_used_ids" in metadata,
         "ablation_disabled": kb_disabled,
+        "ablation_reason": (
+            "no_diagnostic_evidence_dependency"
+            if os.environ.get("ABLATE_DIAGNOSTIC_EVIDENCE") == "1"
+            else "no_kb"
+            if kb_disabled
+            else None
+        ),
         "injected_titles": injected_titles,
         # Compatibility fields: exact-title mention, not a reliable use signal.
         "cited_titles": [item["title"] for item in injected
