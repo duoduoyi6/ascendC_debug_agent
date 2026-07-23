@@ -79,6 +79,9 @@ round-robin 方式实际覆盖 NPU 3、4、5、6、7。只有 `build_failed`、
 排除条件只允许是数据或基础设施不可运行，不能因为算子困难而排除。所有排除必须在
 启动前列入 `dataset_audit.json`，给出原始证据路径。
 
+数据集兼容性补齐记录在 `dataset_amendments.json`。其中缺失的 `model.json`
+仅复制同任务当前 `<op>.json`，不改变 case 集或算子实现。
+
 ## 4. 正式消融矩阵
 
 | Arm | 关闭内容 | 保持内容 | 核心问题 |
