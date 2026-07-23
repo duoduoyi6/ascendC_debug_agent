@@ -24,6 +24,7 @@ V5 继承 V4 的可信成功、外部全量验证、反作弊、知识检索、�
 | 数据集 | `success16` | 独立收集的 27 个算子 |
 | 诊断能力 arm | `no_forensics`、`no_probe` 分开 | 合并为 `no_diagnostic_evidence` |
 | LLM | Kimi 系列 | `qwen3.8-max-preview` |
+| LLM client context | 随历史模型配置 | 1,000,000 tokens（Claude Code 显式配置，950,000 自动压缩） |
 | 执行服务器 | 178 服务器 | `101.245.78.76` |
 | 正式 arm 数 | 8 | 7 |
 
