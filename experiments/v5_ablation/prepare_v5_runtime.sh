@@ -17,6 +17,10 @@ if [[ ! -s "$COMMIT_FILE" ]]; then
   echo "missing deployed commit identity: $COMMIT_FILE" >&2
   exit 2
 fi
+if [[ -e "$CONTROL/dataset_preflight" ]]; then
+  echo "refuse existing dataset preflight: $CONTROL/dataset_preflight" >&2
+  exit 2
+fi
 
 docker build -f "$CONTROL/Dockerfile.v5-agent" -t "$IMAGE" "$CONTROL"
 chmod 0755 "$CONTAINER_MANAGER"
@@ -53,10 +57,6 @@ python3 "$ROOT/utils/verify_v5_arm_contracts.py" \
   --kb "$KB" \
   --report "$CONTROL/arm_contract_verification.json"
 
-if [[ -e "$CONTROL/dataset_preflight" ]]; then
-  echo "refuse existing dataset preflight: $CONTROL/dataset_preflight" >&2
-  exit 2
-fi
 python3 "$ROOT/utils/run_v5_dataset_preflight.py" \
   --repo-root "$ROOT" \
   --source-root "$DATASET/tasks" \

@@ -45,6 +45,15 @@ class V5AssetPathTests(unittest.TestCase):
         self.assertIn("--cap-drop SYS_ADMIN", manager)
         self.assertIn('docker rm -f "$CONTAINER"', manager)
 
+    def test_preflight_refuses_old_output_before_container_creates_mount(self) -> None:
+        prepare = (
+            V5_ROOT / "prepare_v5_runtime.sh"
+        ).read_text(encoding="utf-8")
+        self.assertLess(
+            prepare.index('[[ -e "$CONTROL/dataset_preflight" ]]'),
+            prepare.index('"$CONTAINER_MANAGER" recreate preflight'),
+        )
+
     def test_launcher_closes_each_arm_before_continuing(self) -> None:
         launcher = (
             V5_ROOT / "launch_v5_ablation.sh"
