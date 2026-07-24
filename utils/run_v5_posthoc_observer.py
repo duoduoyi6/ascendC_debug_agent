@@ -456,6 +456,27 @@ def evaluate_with_transient_rechecks(
             ),
         })
     if transient_rows:
+        persistent_aicore_runtime = (
+            row.get("run_state") == "infrastructure_error"
+            and any(
+                token in str(row.get("infrastructure_error") or "").lower()
+                for token in (
+                    "507015",
+                    "npu_aicore_exception",
+                    "acl stream synchronize failed",
+                )
+            )
+        )
+        if persistent_aicore_runtime:
+            row["run_state"] = "completed"
+            row["infrastructure_error"] = None
+            row["persistent_runtime_failure"] = True
+            row["persistent_runtime_failure_type"] = "runtime_error"
+            row["posthoc_clean_success"] = False
+            verification = row.setdefault("verification", {})
+            verification["objective_passed"] = False
+            verification["failure_type"] = "runtime_error"
+            verification["infrastructure_error"] = None
         row["transient_infrastructure_rechecks"] = transient_rows
         row["stable_result_after_transient_recheck"] = (
             row.get("run_state") != "infrastructure_error"

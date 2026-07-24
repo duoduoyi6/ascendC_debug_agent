@@ -6,6 +6,7 @@ subprocess 链路用真实脚本做一个 smoke (验证 stdout 多行 JSON + 退
 """
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -21,7 +22,7 @@ from engine.gate_adapter import (
     parse_gate_output,
     run_gate,
 )
-from precision_gate import _merge_common_checks  # noqa: E402
+from precision_gate import _dispatch, _merge_common_checks  # noqa: E402
 
 
 class TestParseBuildShape(unittest.TestCase):
@@ -162,6 +163,71 @@ class TestPrecisionGateCommonMerge(unittest.TestCase):
         self.assertTrue(merged["checks"]["hash_model_new_ascendc.py"])
         self.assertTrue(merged["checks"]["precision_passed"])
         self.assertEqual(merged["checks"]["stop_reason_code"], "precision_passed")
+
+
+class TestPreAgentAuditDispatch(unittest.TestCase):
+    def _task(self, root: Path, failure_type: str) -> Path:
+        task = root / failure_type
+        (task / "kernel").mkdir(parents=True)
+        (task / "model_new_ascendc.py").write_text(
+            "# candidate\n", encoding="utf-8")
+        verify = task / ".verify_status"
+        verify.mkdir()
+        (verify / "latest.json").write_text(json.dumps({
+            "schema_version": 1,
+            "phase": 8,
+            "attempt": 0,
+            "failure_type": failure_type,
+            "duration_sec": 1.0,
+            "exit_code": 1,
+            "log_path": str(task / ".verify_logs" / "attempt0.log"),
+        }), encoding="utf-8")
+        if failure_type == "precision_failed":
+            tuning = task / "precision_tuning"
+            tuning.mkdir()
+            (tuning / "forensics_report_0.json").write_text(json.dumps({
+                "status": "completed",
+                "attempt": 0,
+                "primary_hint": "tail writes are unmasked",
+                "version": "2.0",
+            }), encoding="utf-8")
+        return task
+
+    def test_dispatch_generates_branch_specific_audit_before_common_gate(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            expected = {
+                "precision_failed": "[FORENSICS_SUMMARY]",
+                "build_failed": "[COMPILE_ERROR_CITATION]",
+                "import_failed": "[IMPORT_TRACEBACK_CITATION]",
+                "runtime_error": "[RUNTIME_ERROR_CITATION]",
+                "timeout": "[SYNC_POINT_ANALYSIS]",
+            }
+            for failure_type, marker in expected.items():
+                with self.subTest(failure_type=failure_type):
+                    task = self._task(root, failure_type)
+                    result = _dispatch("audit", task, "FakeOp", 0)
+                    audit = (
+                        task
+                        / "precision_tuning"
+                        / "precision_audit_0.md"
+                    )
+                    context = (
+                        task
+                        / "precision_tuning"
+                        / "audit_context_attempt_0.json"
+                    )
+                    self.assertTrue(result["passed"], result)
+                    self.assertIn(
+                        marker, audit.read_text(encoding="utf-8"))
+                    self.assertEqual(
+                        json.loads(context.read_text(encoding="utf-8"))[
+                            "failure_type"
+                        ],
+                        failure_type,
+                    )
 
 
 class TestExtractFirstJson(unittest.TestCase):

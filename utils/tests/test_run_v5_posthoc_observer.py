@@ -215,6 +215,65 @@ class V5PosthocIsolationTests(unittest.TestCase):
         self.assertFalse(result["objective_passed"])
         self.assertEqual(result["infrastructure_error"], "ACL stream synchronize failed")
 
+    def test_persistent_507015_becomes_task_runtime_failure_after_rechecks(
+        self,
+    ) -> None:
+        module = _load()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = module.Target(
+                rel="level1/001_Foo",
+                treatment=root / "treatment",
+                source=root / "source",
+            )
+            infrastructure = {
+                "task": target.rel,
+                "run_state": "infrastructure_error",
+                "infrastructure_error": "ACL stream synchronize failed",
+                "verification": {
+                    "objective_passed": False,
+                    "failure_type": "runtime_error",
+                    "infrastructure_error": "ACL stream synchronize failed",
+                    "signal": (
+                        "ACL stream synchronize failed, error code:507015"
+                    ),
+                },
+                "posthoc_clean_success": False,
+            }
+            with (
+                mock.patch.object(
+                    module,
+                    "_evaluate_one",
+                    side_effect=[
+                        dict(infrastructure),
+                        dict(infrastructure),
+                        dict(infrastructure),
+                    ],
+                ) as evaluate,
+                mock.patch.object(module, "_archive_transient_attempt"),
+            ):
+                row = module.evaluate_with_transient_rechecks(
+                    target=target,
+                    output=root / "posthoc",
+                    repo_root=root,
+                    container="v5_cann",
+                    npu="3",
+                    tilelang_env="/env.sh",
+                    timeout=30,
+                    transient_rechecks=2,
+                )
+
+            self.assertEqual(evaluate.call_count, 3)
+            self.assertEqual(row["run_state"], "completed")
+            self.assertIsNone(row["infrastructure_error"])
+            self.assertTrue(row["persistent_runtime_failure"])
+            self.assertEqual(
+                row["persistent_runtime_failure_type"], "runtime_error")
+            self.assertEqual(
+                row["verification"]["failure_type"], "runtime_error")
+            self.assertIsNone(
+                row["verification"]["infrastructure_error"])
+
 
 if __name__ == "__main__":
     unittest.main()

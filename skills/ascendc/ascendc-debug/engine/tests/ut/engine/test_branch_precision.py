@@ -18,6 +18,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _SCRIPTS_DIR = Path(__file__).resolve().parents[4] / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
@@ -343,6 +344,66 @@ class TestCheckAuditL5ProbeFirst(unittest.TestCase):
         r = c.check_audit()
         self.assertFalse(r["checks"]["has_l5_probe"])
         self.assertNotIn("l5_probe_degraded", r)
+
+
+class TestEngineGeneratedGateAAudit(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.task = Path(self._tmp.name) / "005_FakeOp"
+        (self.task / "precision_tuning").mkdir(parents=True)
+        (self.task / "kernel").mkdir()
+        (self.task / "kernel" / "fake.cpp").write_text(
+            "// candidate\n", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_forensics_packet_generates_gate_a_and_context_before_agent(
+        self,
+    ) -> None:
+        tuning = self.task / "precision_tuning"
+        (tuning / "forensics_report_0.json").write_text(json.dumps({
+            "status": "completed",
+            "attempt": 0,
+            "primary_hint": "tail writes are unmasked",
+            "version": "2.0",
+        }), encoding="utf-8")
+
+        result = _LegacyPrecisionChecker(
+            "FakeOp", str(self.task), attempt=0).check_audit()
+
+        self.assertTrue(result["passed"])
+        self.assertTrue((tuning / "precision_audit_0.md").is_file())
+        context = json.loads(
+            (tuning / "audit_context_attempt_0.json").read_text(
+                encoding="utf-8")
+        )
+        self.assertEqual(context["generated_by"], "engine_pre_agent_audit")
+        self.assertEqual(context["primary_hint"], "tail writes are unmasked")
+        self.assertTrue(context["source_parseable"])
+
+    def test_no_forensics_uses_raw_validation_packet(self) -> None:
+        verify = self.task / ".verify_status"
+        verify.mkdir()
+        (verify / "latest.json").write_text(json.dumps({
+            "failure_type": "precision_failed",
+            "objective_passed": False,
+        }), encoding="utf-8")
+
+        with mock.patch.dict(os.environ, {"ABLATE_FORENSICS": "1"}):
+            result = _LegacyPrecisionChecker(
+                "FakeOp", str(self.task), attempt=0).check_audit()
+
+        self.assertTrue(result["passed"])
+        context = json.loads(
+            (
+                self.task
+                / "precision_tuning"
+                / "audit_context_attempt_0.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(context["source_type"], "raw_validation")
+        self.assertEqual(context["primary_hint"], "precision_failed")
 
 
 class TestWriteAuditIndexFallback(unittest.TestCase):

@@ -42,6 +42,9 @@ COMMON = {
     "posthoc_observer_isolated": True,
     "primary_cost_scope": "final_valid_cycle_only",
     "failed_cycles_excluded_from_primary_cost": True,
+    "fresh_container_per_arm": True,
+    "container_privileged": True,
+    "container_cap_drop": ["SYS_ADMIN"],
 }
 
 
@@ -83,6 +86,10 @@ def verify_arm(
         "ablated_capabilities": actual_ablations,
         "kb_path": str(kb) if kb_enabled else None,
         "kb_read_only": kb_enabled,
+        "kb_filesystem_masked": not kb_enabled,
+        "forensics_script_masked": (
+            arm in {"no_diagnostic_evidence", "baseline"}
+        ),
         **COMMON,
     }
     mismatches = {

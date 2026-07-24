@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import sys
 import tempfile
@@ -21,6 +22,10 @@ def _load():
 
 
 class V5FrozenInputTests(unittest.TestCase):
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
     def test_code_manifest_excludes_secret_output_and_git(self) -> None:
         module = _load()
         with tempfile.TemporaryDirectory() as tmp:
@@ -135,6 +140,43 @@ class V5FrozenInputTests(unittest.TestCase):
                 expected_context=1000000,
             )
             self.assertFalse(checks["dataset_preflight_pass"]["passed"])
+
+    def test_source_list_check_requires_exact_frozen_dataset_entries(self) -> None:
+        module = _load()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            control = root / "control"
+            dataset = root / "dataset"
+            (dataset / "tasks" / "level1" / "001_Foo").mkdir(parents=True)
+            (dataset / "tasks" / "level2" / "002_Bar").mkdir(parents=True)
+            control.mkdir()
+            source_list = control / "source_dirs_n27.txt"
+            entries = [
+                str(dataset / "tasks" / "level1" / "001_Foo"),
+                str(dataset / "tasks" / "level2" / "002_Bar"),
+            ]
+            source_list.write_text("\n".join(entries) + "\n")
+            metadata = control / "source_dirs_n27.sha256.json"
+            metadata.write_text(json.dumps({
+                "schema_version": 1,
+                "path": str(source_list),
+                "sha256": self._sha256(source_list),
+                "task_count": 2,
+                "entries": entries,
+            }))
+
+            passed = module.source_list_check(
+                control, dataset, expected_tasks=2)
+
+            self.assertTrue(passed["passed"])
+            self.assertEqual(passed["task_count"], 2)
+
+            source_list.write_text(entries[0] + "\n" + entries[0] + "\n")
+            tampered = module.source_list_check(
+                control, dataset, expected_tasks=2)
+            self.assertFalse(tampered["passed"])
+            self.assertFalse(tampered["sha256_matches"])
+            self.assertFalse(tampered["unique_entries"])
 
 
 if __name__ == "__main__":

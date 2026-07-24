@@ -52,6 +52,7 @@ V5 继承 V4 的可信成功、外部全量验证、反作弊、知识检索、�
 启动前必须生成并冻结：
 
 - 恰好 27 个任务的相对路径清单；
+- 任务清单自身的 SHA256、条目数、去重结果和逐条 dataset-root 归属检查；
 - 每个任务输入文件的 SHA256 manifest；
 - 算子族、初始 failure type、初始 compact/full-eval 状态；
 - 缺失文件、重复任务和不可构建任务审计；
@@ -107,6 +108,12 @@ clean-build 复测并完整归档瞬态日志；首个非基础设施结果作�
 `ASCENDC_DEBUG_KB_READ_ONLY=1`；在线写回不属于本次 V5 treatment，也不从
 `no_kb` 差异中解释。
 
+关闭 KB 的 arm 不只依赖 prompt。运行容器必须把 active KB、仓库内 V5 KB fixture
+和 legacy KB reference 精确 bind-mask 为只读空 KB；`no_diagnostic_evidence` 与
+`baseline` 还必须把 `precision_forensics.py` bind-mask 为不可用占位文件。启动器
+从 Docker mount metadata 写出每个 arm 的 `container_contracts/<arm>_before.json`，
+分析阶段据此拒绝只在提示词层面关闭能力的结果。
+
 ## 5. 控制变量
 
 除 arm 指定开关外，以下条件必须固定：
@@ -118,6 +125,9 @@ clean-build 复测并完整归档瞬态日志；首个非基础设施结果作�
 - 同一 provider endpoint 和 credential 名 `yansong-qwen3-key-1`；
 - 同一 Claude Code/Agent 配置、agent spec、allowed tools 和 reasoning effort；
 - 同一容器镜像、CANN/PyTorch/编译器版本；
+- 每个 arm 从同一镜像重新创建 fresh 容器，禁止复用上一 arm 的可变 rootfs；
+- 容器保持 NPU 运行所需 privileged 模式，但显式 drop `SYS_ADMIN`，代码、control、
+  dataset 只读挂载，仅 `outputs` 可写；
 - 同一 NPU 3、4、5、6、7 和五个 worker；
 - `max_attempts=5`、`max_turns=240`、`soft_task_turns=480`、
   `max_task_turns=600`、`timeout=43200`，除非 preflight 发现目标环境不兼容；
@@ -202,6 +212,11 @@ McNemar 检验；N=27 下不只报告均值和单个 p-value。
 长失败必须追溯实际 Claude result、events、validation、forensics 和 provider 日志，
 不能仅凭最终 `debug_status.json` 推断。
 
+可观测性完整性按 schema 和语义校验，不按文件存在性校验：空 JSON、缺 required
+field、未知 KB ID、probe policy 未通过、不可解析的 forensics/checkpoint/rollback
+产物均记为 incomplete。报告还必须导出 no-improvement attempts、direction switch、
+KB ID 集合、forensics cache/reuse/degraded、rollback 和 signal 计数。
+
 full-eval 覆盖范围按规范化 case 内容而非只按行数判断：
 
 - backup/full case 数大于 active 时必须运行；
@@ -217,6 +232,7 @@ full-eval 覆盖范围按规范化 case 内容而非只按行数判断：
 
 1. V5 commit、代码 fingerprint 和 remote working tree 一致；启动时重新逐文件
    校验 code/control-plane/source/KB manifest，拒绝 missing/extra/changed 文件；
+   `source_dirs_n27.txt` 也必须由独立 SHA256 metadata 锁定并逐条验证；
 2. engine、utils、KB 单元测试全部通过；
 3. 27-task dataset audit 通过；
 4. 容器、NPU 3-7、CANN、Claude CLI 和 27/27 隔离 evaluator preflight 通过；
@@ -235,6 +251,14 @@ full-eval 覆盖范围按规范化 case 内容而非只按行数判断：
     不写入 arm output。
 14. 容器内 code、control、source、KB bind mount 为只读，仅正式 `outputs`
     子目录可写；启动器必须从实际 Docker mount metadata 复核该契约。
+15. 每个 arm 启动前删除上一 arm 容器并从冻结 image 新建；arm label、image ID、
+    privileged/cap-drop、KB/forensics masks 和读写挂载均须写入容器契约并 PASS。
+
+Gate-A 在 Agent 执行前由 engine 从当前 forensics 生成
+`precision_audit_<attempt>.md` 与 `audit_context_attempt_<attempt>.json`，再将后者注入
+Agent prompt；不得等待 Agent 自己生成 Gate-A 输入。关闭 forensics 时，Gate-A 使用
+当前 raw validation status 生成最小预审包，因此 `no_diagnostic_evidence` 仍保留
+Gate-A 这一控制变量。
 
 任一项失败都只记录 blocker，不启动正式实验。
 
@@ -258,8 +282,10 @@ final-valid-cycle 主成本。
 - task-level status、validation、provider、turn/token/cost 和 observability 汇总可复算；
 - treatment profile compliance 审计通过；
 - post-hoc observer 完成且未污染 treatment。
-- post-hoc 中识别出的 NPU 基础设施异常须有限重放；仍无法得到稳定结果时该 arm
-  收口失败，不得将其计作算子/模型失败，也不得进入下一 arm。
+- post-hoc 中识别出的 NPU 基础设施异常须最多追加两次 clean-build 重放。若
+  `507015`/`NPU_AICORE_EXCEPTION`/ACL stream synchronize failure 在三次独立重放中
+  持续出现，则按该算子的 `runtime_error` 终态收口；只有能独立证明为全局设备、
+  驱动或容器不可用的异常才阻断整个 arm。
 
 ## 9. 分析与因果边界
 
@@ -289,6 +315,7 @@ final-valid-cycle 主成本。
 - `experiment_control/control_plane.sha256.json`
 - `experiment_control/provider_config_redacted.json`
 - `experiment_control/dataset_manifest.sha256.json`
+- `experiment_control/source_dirs_n27.sha256.json`
 - `experiment_control/dataset_audit.json`
 - `experiment_control/kb_snapshot.sha256.json`
 - `experiment_control/environment_snapshot.json`
@@ -297,6 +324,7 @@ final-valid-cycle 主成本。
 - `experiment_control/dataset_preflight_results.json`
 - `experiment_control/launch_fingerprint_verification.json`
 - 每个 arm 前后的 `experiment_control/fingerprints/*.json`
+- 每个 arm 启动前的 `experiment_control/container_contracts/<arm>_before.json`
 - 七个 arm 的冻结 dry-run manifest
 
 完成阶段：

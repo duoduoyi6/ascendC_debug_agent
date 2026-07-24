@@ -210,6 +210,197 @@ def check_audit_file_present(task_dir: Path, attempt: int) -> dict:
     }
 
 
+def ensure_engine_audit(
+    task_dir: Path,
+    attempt: int,
+    failure_type: str,
+) -> bool:
+    """Create the engine-owned pre-Agent Gate-A evidence packet."""
+    if os.environ.get("ABLATE_GATE_A") == "1":
+        return False
+    tuning = task_dir / "precision_tuning"
+    audit_path = tuning / f"precision_audit_{attempt}.md"
+    if audit_path.is_file():
+        return True
+
+    forensics_path = tuning / f"forensics_report_{attempt}.json"
+    latest_path = task_dir / ".verify_status" / "latest.json"
+    source_type = "forensics_report"
+    source_path = forensics_path
+    try:
+        source = json.loads(forensics_path.read_text(encoding="utf-8"))
+        if not isinstance(source, dict):
+            raise ValueError("forensics report is not an object")
+    except (OSError, ValueError):
+        if (
+            failure_type == "precision_failed"
+            and os.environ.get("ABLATE_FORENSICS") != "1"
+        ):
+            return False
+        source_type = "raw_validation"
+        source_path = latest_path
+        try:
+            source = json.loads(latest_path.read_text(encoding="utf-8"))
+            if not isinstance(source, dict):
+                raise ValueError("verify status is not an object")
+        except (OSError, ValueError):
+            return False
+
+    knowledge_path = tuning / "knowledge_search_log.json"
+    try:
+        knowledge = json.loads(knowledge_path.read_text(encoding="utf-8"))
+        if not isinstance(knowledge, list):
+            knowledge = []
+    except (OSError, ValueError):
+        knowledge = []
+    matching_knowledge = [
+        row for row in knowledge
+        if isinstance(row, dict) and row.get("attempt") == attempt
+    ]
+
+    directions_path = tuning / "tuning_directions.json"
+    try:
+        directions = json.loads(directions_path.read_text(encoding="utf-8"))
+        previous_entries = [
+            entry for entry in directions.get("entries", [])
+            if isinstance(entry, dict)
+            and int(entry.get("attempt", -1)) < attempt
+        ]
+    except (OSError, ValueError, TypeError):
+        previous_entries = []
+    previous = previous_entries[-1] if previous_entries else {}
+    previous_outcome = str(previous.get("outcome") or "none")
+    direction_answer = (
+        "是" if previous_outcome in {"improved", "passed"} else "否"
+    )
+    primary_hint = str(
+        source.get("primary_hint")
+        or source.get("failure_type")
+        or failure_type
+        or "unknown"
+    )
+    kernel_root = task_dir / "kernel"
+    kernel_files = [
+        str(path.relative_to(task_dir))
+        for path in sorted(kernel_root.rglob("*"))
+        if path.is_file()
+    ] if kernel_root.is_dir() else []
+    generated_at = datetime.now(timezone.utc).isoformat()
+    context = {
+        "schema_version": 1,
+        "attempt": attempt,
+        "generated_by": "engine_pre_agent_audit",
+        "generated_at": generated_at,
+        "source_type": source_type,
+        "source_path": str(source_path),
+        "source_parseable": True,
+        "failure_type": failure_type,
+        "primary_hint": primary_hint,
+        "knowledge_match_count": len(matching_knowledge),
+        "previous_direction": previous or None,
+        "direction_verdict": direction_answer,
+        "target_files": kernel_files,
+    }
+    common_sections = [
+        "[ROOT_CAUSE]",
+        f"Pre-Agent candidate: {primary_hint}; Agent must confirm or reject.",
+        "",
+        "[FIX_PLAN]",
+        "Apply one evidence-backed kernel change, then clean build and validate.",
+        "",
+        "[TARGET_FILES]",
+        *(kernel_files or ["kernel/ (inspect before editing)"]),
+        "",
+        "[EXPERIMENT_RESULTS]",
+        f"previous_outcome: {previous_outcome}",
+        "current_attempt_validation: pending",
+        "",
+        "[DIRECTION_ASSESSMENT]",
+        f"本轮是否延续上一轮方向: {direction_answer}",
+        f"换方向理由: previous_outcome={previous_outcome}",
+    ]
+    source_excerpt = json.dumps(source, ensure_ascii=False)[:3000]
+    if failure_type == "build_failed":
+        sections = [
+            "[COMPILE_ERROR_CITATION]",
+            f"source_path: {source_path}",
+            source_excerpt,
+            "",
+            "[FIX_TYPE]: api_usage_fix",
+            *common_sections,
+        ]
+    elif failure_type == "import_failed":
+        sections = [
+            "[IMPORT_TRACEBACK_CITATION]",
+            f"source_path: {source_path}",
+            source_excerpt,
+            "",
+            "[FIX_TYPE]: pybind_symbol_fix",
+            *common_sections,
+        ]
+    elif failure_type == "runtime_error":
+        sections = [
+            "[RUNTIME_ERROR_CITATION]",
+            f"source_path: {source_path}",
+            source_excerpt,
+            "",
+            *common_sections,
+        ]
+    elif failure_type == "timeout":
+        sections = [
+            "[SYNC_POINT_ANALYSIS]",
+            f"source_path: {source_path}",
+            source_excerpt,
+            "",
+            *common_sections,
+        ]
+        fix_plan = sections.index("[FIX_PLAN]") + 1
+        sections[fix_plan] = (
+            "Inspect sync/barrier/pipe and tiling, then clean build and validate."
+        )
+    else:
+        sections = [
+            "[FORENSICS_SUMMARY]",
+            f"source_type: {source_type}",
+            f"source_path: {source_path}",
+            f"primary_hint: {primary_hint}",
+            f"source_excerpt: {source_excerpt}",
+            "",
+            "[COMPUTATION_DECOMPOSITION]",
+            "Trace input, tiling, kernel stages, and output writes before editing.",
+            "",
+            "[REFERENCE_IMPL_SPEC]",
+            "model.py and the frozen JSONL cases define the reference contract.",
+            "",
+            "[KERNEL_STEP_TRACE]",
+            "Preserve the current evidence hint and validate each changed stage.",
+            "",
+            "[L5_PROBE]",
+            "状态: 跳过（理由: Gate-A 在 Agent 前生成；实际 probe 由 engine "
+            "policy 单独约束并审计）",
+            "",
+            "[KNOWLEDGE_MATCH]",
+            f"matched_records: {len(matching_knowledge)}",
+            f"records: {json.dumps(matching_knowledge, ensure_ascii=False)[:2000]}",
+            "",
+            "[CAUSAL_CHAIN_ANALYSIS]",
+            "Connect the first mismatch or runtime signal to final validation.",
+            "",
+            *common_sections,
+        ]
+
+    tuning.mkdir(parents=True, exist_ok=True)
+    (tuning / f"audit_context_attempt_{attempt}.json").write_text(
+        json.dumps(context, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    audit_path.write_text(
+        "\n".join(sections + ["", f"generated_at: {generated_at}"]) + "\n",
+        encoding="utf-8",
+    )
+    return True
+
+
 # 这些是"必须为 True 才视为通过"的 gating key；其余为纯诊断信息不参与 ok 判定。
 # 设计契约（findings.md §3.3 ② / §7.6）：只有明确反映"前置 / 不变量"失败的 key 才 gating。
 #

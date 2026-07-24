@@ -735,6 +735,59 @@ class TestNoprobeInjection(unittest.TestCase):
                 task, "FakeOp", "precision_failed", 1, "0")
         self.assertNotIn("must_not_inject", prompt)
 
+    def test_gate_a_audit_context_is_injected_into_agent_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            task = Path(d)
+            tuning = task / "precision_tuning"
+            tuning.mkdir()
+            (tuning / "audit_context_attempt_0.json").write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "attempt": 0,
+                    "generated_by": "engine_pre_agent_audit",
+                    "generated_at": "2026-07-25T00:00:00Z",
+                    "source_type": "forensics_report",
+                    "source_path": "precision_tuning/forensics_report_0.json",
+                    "source_parseable": True,
+                    "primary_hint": "tail writes are unmasked",
+                    "direction_verdict": "initial",
+                }),
+                encoding="utf-8",
+            )
+
+            prompt = _build_prompt(
+                task, "FakeOp", "precision_failed", 0, "0")
+
+        self.assertIn("[ENGINE_GATE_A_AUDIT]", prompt)
+        self.assertIn("tail writes are unmasked", prompt)
+        self.assertIn("engine_pre_agent_audit", prompt)
+
+    def test_gate_a_ablation_suppresses_stale_audit_context(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            task = Path(d)
+            tuning = task / "precision_tuning"
+            tuning.mkdir()
+            (tuning / "audit_context_attempt_0.json").write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "attempt": 0,
+                    "generated_by": "engine_pre_agent_audit",
+                    "generated_at": "2026-07-25T00:00:00Z",
+                    "source_type": "forensics_report",
+                    "source_path": "precision_tuning/forensics_report_0.json",
+                    "source_parseable": True,
+                    "primary_hint": "must_not_leak",
+                    "direction_verdict": "initial",
+                }),
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"ABLATE_GATE_A": "1"}):
+                prompt = _build_prompt(
+                    task, "FakeOp", "precision_failed", 0, "0")
+
+        self.assertNotIn("[ENGINE_GATE_A_AUDIT]", prompt)
+        self.assertNotIn("must_not_leak", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

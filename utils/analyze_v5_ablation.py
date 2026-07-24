@@ -50,6 +50,141 @@ def _number(value: Any) -> float:
         return 0.0
 
 
+def _json_dict(path: Path) -> dict[str, Any] | None:
+    value = _load_json(path, None)
+    return value if isinstance(value, dict) else None
+
+
+def _dict_has_keys(value: object, keys: Iterable[str]) -> bool:
+    return isinstance(value, dict) and all(key in value for key in keys)
+
+
+def _valid_probe_policy(path: Path) -> bool:
+    value = _json_dict(path)
+    return (
+        _dict_has_keys(
+            value,
+            (
+                "attempt", "failure_type", "policy", "policy_pass",
+                "metadata_complete", "observed_status",
+            ),
+        )
+        and isinstance(value.get("policy_pass"), bool)
+        and value.get("metadata_complete") is True
+        and value.get("observed_status")
+        in {"skipped", "executed", "not_applicable"}
+        and isinstance(value.get("ablation_violation", False), bool)
+    )
+
+
+def _valid_direction_artifact(tuning: Path) -> bool:
+    directions = _json_dict(tuning / "tuning_directions.json")
+    entries = directions.get("entries") if directions else None
+    if isinstance(entries, list) and entries:
+        return all(
+            _dict_has_keys(
+                entry,
+                (
+                    "attempt", "fix_type", "direction_verdict",
+                    "direction_reason", "outcome", "evidence",
+                ),
+            )
+            for entry in entries
+        )
+    summaries = sorted(tuning.glob("diagnosis_summary_attempt_*.json"))
+    return bool(summaries) and all(
+        _dict_has_keys(
+            _json_dict(path),
+            ("attempt", "fix_type", "direction_verdict", "direction_reason"),
+        )
+        for path in summaries
+    )
+
+
+def _valid_kb_trace(path: Path) -> bool:
+    value = _load_json(path, None)
+    if not isinstance(value, list) or not value:
+        return False
+    required = (
+        "attempt", "retrieved_ids", "injected_ids", "declared_used_ids",
+        "declared_unknown_ids", "usage_trace_complete",
+    )
+    return all(
+        _dict_has_keys(entry, required)
+        and entry.get("usage_trace_complete") is True
+        and all(
+            isinstance(entry.get(key), list)
+            for key in (
+                "retrieved_ids", "injected_ids",
+                "declared_used_ids", "declared_unknown_ids",
+            )
+        )
+        for entry in value
+    )
+
+
+def _valid_forensics_report(path: Path) -> bool:
+    value = _json_dict(path)
+    return (
+        _dict_has_keys(value, ("attempt", "status", "primary_hint"))
+        and bool(
+            value.get("source")
+            or value.get("version")
+            or value.get("generated_at")
+        )
+    )
+
+
+def _valid_checkpoint(tuning: Path) -> bool:
+    current = tuning / "history" / "current_best"
+    metric = _json_dict(current / "metric.json")
+    manifest = _json_dict(current / "manifest.json")
+    return (
+        _dict_has_keys(
+            metric,
+            ("attempt", "case_pass_rate", "match_rate", "correctness_passed"),
+        )
+        and _dict_has_keys(
+            manifest,
+            ("schema_version", "complete", "attempt", "files"),
+        )
+        and manifest.get("complete") is True
+        and manifest.get("attempt") == metric.get("attempt")
+        and isinstance(manifest.get("files"), list)
+        and bool(manifest.get("files"))
+        and all(
+            _dict_has_keys(entry, ("path", "size", "sha256"))
+            for entry in manifest.get("files")
+        )
+        and (current / "src").is_dir()
+    )
+
+
+def _valid_claude_result(path: Path) -> bool:
+    value = _json_dict(path)
+    return (
+        _dict_has_keys(value, ("num_turns", "modelUsage", "total_cost_usd"))
+        and isinstance(value.get("modelUsage"), dict)
+        and bool(value.get("modelUsage"))
+    )
+
+
+def _valid_audit_context(path: Path) -> bool:
+    value = _json_dict(path)
+    return (
+        _dict_has_keys(
+            value,
+            (
+                "schema_version", "attempt", "generated_by", "generated_at",
+                "source_type", "source_path", "source_parseable",
+                "primary_hint", "direction_verdict",
+            ),
+        )
+        and value.get("generated_by") == "engine_pre_agent_audit"
+        and value.get("source_parseable") is True
+    )
+
+
 def claude_result_paths(task: Path) -> list[Path]:
     archive = sorted(
         (task / "precision_tuning" / "claude_results").glob("*.json")
@@ -229,6 +364,7 @@ def _observability(
     validate_started = "validate" in started_steps
     knowledge_started = "knowledge_search" in started_steps
     forensics_started = "forensics" in started_steps
+    audit_started = "audit" in started_steps
     checkpoint_started = bool(
         {"baseline_checkpoint", "checkpoint_and_rollback"} & started_steps
     )
@@ -251,18 +387,42 @@ def _observability(
         and (event.get("result") or {}).get("rolled_back") is True
     ]
 
-    direction_observed = (
-        (tuning / "tuning_directions.json").is_file()
-        or bool(list(tuning.glob("diagnosis_summary_attempt_*.json")))
+    status_observed = _dict_has_keys(
+        _json_dict(task / "debug_status.json"),
+        (
+            "session_outcome", "ended_at", "objective_success",
+            "reportable_success", "anti_cheat_pass", "ast_degrade_pass",
+        ),
     )
-    checkpoint_observed = (
-        (tuning / "history" / "current_best" / "metric.json").is_file()
-        and (tuning / "history" / "current_best" / "manifest.json").is_file()
+    run_summary_observed = _dict_has_keys(
+        _json_dict(task / "run_summary.json"),
+        (
+            "schema_version", "session_outcome", "attempts_used",
+            "turns", "gate", "forensics",
+        ),
+    )
+    claude_paths = claude_result_paths(task)
+    probe_paths = sorted(tuning.glob("probe_policy_attempt*.json"))
+    forensics_paths = sorted(tuning.glob("forensics_report_*.json"))
+    audit_paths = sorted(tuning.glob("audit_context_attempt_*.json"))
+    direction_observed = _valid_direction_artifact(tuning)
+    kb_observed = _valid_kb_trace(tuning / "kb_usage_trace.json")
+    forensics_observed = bool(forensics_paths) and all(
+        _valid_forensics_report(path) for path in forensics_paths
+    )
+    checkpoint_observed = _valid_checkpoint(tuning)
+    rollback_observed = bool(rollback_events) and all(
+        _dict_has_keys(
+            event.get("result"),
+            ("success", "rolled_back", "from_attempt", "best_attempt"),
+        )
+        and (event.get("result") or {}).get("success") is True
+        for event in rollback_events
     )
     checks = {
         "status": _evidence_check(
             required=True,
-            observed=(task / "debug_status.json").is_file(),
+            observed=status_observed,
             reason="terminal_artifact",
         ),
         "events": _evidence_check(
@@ -272,12 +432,14 @@ def _observability(
         ),
         "run_summary": _evidence_check(
             required=True,
-            observed=(task / "run_summary.json").is_file(),
+            observed=run_summary_observed,
             reason="terminal_artifact",
         ),
         "claude_results": _evidence_check(
             required=diagnose_started,
-            observed=bool(claude_result_paths(task)),
+            observed=bool(claude_paths) and all(
+                _valid_claude_result(path) for path in claude_paths
+            ),
             reason=(
                 "diagnose_action_started"
                 if diagnose_started else "diagnose_action_not_triggered"
@@ -287,9 +449,9 @@ def _observability(
             required=(
                 diagnose_started and arm not in DIAGNOSTICS_DISABLED_ARMS
             ),
-            observed=bool(list(tuning.glob("probe_policy_attempt*.json")))
-                          or bool(list(tuning.glob(
-                              "probe_source_audit_attempt*.json"))),
+            observed=bool(probe_paths) and all(
+                _valid_probe_policy(path) for path in probe_paths
+            ),
             reason=(
                 "disabled_by_arm"
                 if arm in DIAGNOSTICS_DISABLED_ARMS
@@ -312,11 +474,7 @@ def _observability(
                 (knowledge_started or diagnose_started)
                 and arm not in KB_DISABLED_ARMS
             ),
-            observed=(
-                (tuning / "knowledge_search_log.json").is_file()
-                or (tuning / "kb_usage_trace.json").is_file()
-                or (tuning / "knowledge_usage_trace.json").is_file()
-            ),
+            observed=kb_observed,
             reason=(
                 "disabled_by_arm"
                 if arm in KB_DISABLED_ARMS
@@ -331,7 +489,7 @@ def _observability(
             required=(
                 forensics_started and arm not in DIAGNOSTICS_DISABLED_ARMS
             ),
-            observed=bool(list(tuning.glob("forensics_report_*.json"))),
+            observed=forensics_observed,
             reason=(
                 "disabled_by_arm"
                 if arm in DIAGNOSTICS_DISABLED_ARMS
@@ -339,6 +497,17 @@ def _observability(
                     "forensics_action_started"
                     if forensics_started else "forensics_action_not_triggered"
                 )
+            ),
+        ),
+        "audit": _evidence_check(
+            required=audit_started,
+            observed=(
+                bool(audit_paths)
+                and all(_valid_audit_context(path) for path in audit_paths)
+            ),
+            reason=(
+                "audit_action_started"
+                if audit_started else "audit_action_not_triggered"
             ),
         ),
         "checkpoint": _evidence_check(
@@ -360,7 +529,7 @@ def _observability(
         ),
         "rollback": _evidence_check(
             required=bool(rollback_events),
-            observed=bool(rollback_events),
+            observed=rollback_observed,
             reason=(
                 "rollback_recorded_in_action_result"
                 if rollback_events else "rollback_not_triggered"
@@ -372,6 +541,113 @@ def _observability(
         "checks": checks,
         "started_actions": sorted(started_steps - {"None"}),
         "completed_actions": sorted(completed_steps - {"None"}),
+    }
+
+
+def _mechanism_metrics(task: Path) -> dict[str, Any]:
+    tuning = task / "precision_tuning"
+    directions = _json_dict(tuning / "tuning_directions.json") or {}
+    entries = directions.get("entries")
+    if not isinstance(entries, list):
+        entries = []
+    kb_trace = _load_json(tuning / "kb_usage_trace.json", [])
+    if not isinstance(kb_trace, list):
+        kb_trace = []
+    reports = [
+        value
+        for path in sorted(tuning.glob("forensics_report_*.json"))
+        if (value := _json_dict(path)) is not None
+    ]
+    events, _ = _event_rows(task)
+    event_text = json.dumps(events, ensure_ascii=False)
+    probe_records = [
+        value
+        for path in sorted(tuning.glob("probe_policy_attempt*.json"))
+        if (value := _json_dict(path)) is not None
+    ]
+    return {
+        "no_improvement_attempts": sum(
+            entry.get("outcome") in {"stagnant", "regressed"}
+            for entry in entries
+            if isinstance(entry, dict)
+        ),
+        "direction_switches": sum(
+            str(entry.get("direction_verdict") or "").lower()
+            in {"否", "switch", "changed", "change"}
+            for entry in entries
+            if isinstance(entry, dict)
+        ),
+        "kb_retrieved_ids": sorted({
+            str(item)
+            for entry in kb_trace
+            if isinstance(entry, dict)
+            for item in (entry.get("retrieved_ids") or [])
+        }),
+        "kb_injected_ids": sorted({
+            str(item)
+            for entry in kb_trace
+            if isinstance(entry, dict)
+            for item in (entry.get("injected_ids") or [])
+        }),
+        "kb_declared_used_ids": sorted({
+            str(item)
+            for entry in kb_trace
+            if isinstance(entry, dict)
+            for item in (entry.get("declared_used_ids") or [])
+        }),
+        "kb_declared_unknown_ids": sorted({
+            str(item)
+            for entry in kb_trace
+            if isinstance(entry, dict)
+            for item in (entry.get("declared_unknown_ids") or [])
+        }),
+        "kb_usage_trace_complete": bool(kb_trace) and all(
+            isinstance(entry, dict)
+            and entry.get("usage_trace_complete") is True
+            for entry in kb_trace
+        ),
+        "kb_declared_ids_valid": bool(kb_trace) and all(
+            isinstance(entry, dict)
+            and not entry.get("declared_unknown_ids")
+            for entry in kb_trace
+        ),
+        "probe_policy_records": len(probe_records),
+        "probe_metadata_complete": bool(probe_records) and all(
+            record.get("metadata_complete") is True
+            for record in probe_records
+        ),
+        "probe_policy_compliant": bool(probe_records) and all(
+            record.get("policy_pass") is True
+            and record.get("ablation_violation") is not True
+            for record in probe_records
+        ),
+        "forensics_report_count": len(reports),
+        "forensics_cache_hits": sum(
+            report.get("cache_hit") is True or report.get("cached") is True
+            for report in reports
+        ),
+        "forensics_reuses": sum(
+            report.get("reused_after_rollback") is True
+            or report.get("reuse_kind") is not None
+            for report in reports
+        ),
+        "forensics_degraded": sum(
+            report.get("degraded_evidence") is True
+            or report.get("forensics_degraded") is True
+            or report.get("unavailable_reason")
+            in {"build_failed", "runtime_error"}
+            or report.get("status") in {"build_failed", "runtime_error"}
+            for report in reports
+        ),
+        "rollback_count": sum(
+            event.get("type") == "action_completed"
+            and str((event.get("action") or {}).get("step"))
+            == "checkpoint_and_rollback"
+            and (event.get("result") or {}).get("rolled_back") is True
+            for event in events
+        ),
+        "sigterm_count": event_text.upper().count("SIGTERM"),
+        "sigkill_count": event_text.upper().count("SIGKILL"),
     }
 
 
@@ -396,10 +672,25 @@ def task_row(
     anti = status.get("anti_cheat_pass") is True
     ast = status.get("ast_degrade_pass") is True
     observability = _observability(task, status, arm)
+    mechanism_metrics = _mechanism_metrics(task)
+    mechanism_compliant = (
+        (
+            arm in DIAGNOSTICS_DISABLED_ARMS
+            or mechanism_metrics["probe_policy_compliant"]
+        )
+        and (
+            arm in KB_DISABLED_ARMS
+            or (
+                mechanism_metrics["kb_usage_trace_complete"]
+                and mechanism_metrics["kb_declared_ids_valid"]
+            )
+        )
+    )
     evidence_backed = (
         arm in EVIDENCE_CAPABLE_ARMS
         and objective and reportable and anti and ast and full_pass
         and observability["complete"]
+        and mechanism_compliant
     )
     row: dict[str, Any] = {
         "arm": arm,
@@ -432,7 +723,10 @@ def task_row(
             (posthoc_row.get("build") or {}).get("passed") is True),
         "notes": str(status.get("notes") or ""),
         "observability_complete": observability["complete"],
+        "mechanism_compliant": mechanism_compliant,
         "observability": observability,
+        "mechanism_metrics": mechanism_metrics,
+        **mechanism_metrics,
         **cost,
     }
     if isinstance(run_summary, dict):
@@ -611,6 +905,48 @@ def _manifest_compliance(
         and supervisor_state.get("done") == int(frozen.get("task_count") or 0)
         and supervisor_state.get("pending") == 0
     )
+    container_contract = _load_json(
+        root
+        / "experiment_control"
+        / "container_contracts"
+        / f"{arm}_before.json",
+        {},
+    )
+    expected_kb_mask = arm in KB_DISABLED_ARMS
+    expected_forensics_mask = arm in DIAGNOSTICS_DISABLED_ARMS
+    container_id = container_contract.get("container_id")
+    contract_ids = [
+        row.get("container_id")
+        for path in sorted(
+            (
+                root
+                / "experiment_control"
+                / "container_contracts"
+            ).glob("*_before.json")
+        )
+        if isinstance((row := _load_json(path, {})), dict)
+        and row.get("container_id")
+    ]
+    container_contract_passed = (
+        container_contract.get("passed") is True
+        and container_contract.get("arm") == arm
+        and container_contract.get("fresh_label") is True
+        and isinstance(container_id, str)
+        and bool(container_id)
+        and contract_ids.count(container_id) == 1
+        and _dict_has_keys(container_contract, ("created_at", "image_id"))
+        and container_contract.get("privileged") is True
+        and container_contract.get("kb_masked") is expected_kb_mask
+        and container_contract.get("forensics_masked")
+        is expected_forensics_mask
+        and "SYS_ADMIN" in (container_contract.get("cap_drop") or [])
+        and container_contract.get("mount_modes") == {
+            "root_rw": False,
+            "outputs_rw": True,
+            "dataset_rw": False,
+            "control_rw": False,
+        }
+    )
     complete = (
         task_count == int(frozen.get("task_count") or 0)
         and terminal_count == int(frozen.get("task_count") or 0)
@@ -618,6 +954,7 @@ def _manifest_compliance(
         and posthoc_count == int(frozen.get("task_count") or 0)
         and posthoc_completed_count == int(frozen.get("task_count") or 0)
         and supervisor_completed
+        and container_contract_passed
     )
     return {
         "arm": arm,
@@ -633,6 +970,8 @@ def _manifest_compliance(
         "posthoc_task_count": posthoc_count,
         "posthoc_completed_count": posthoc_completed_count,
         "supervisor_completed": supervisor_completed,
+        "container_contract_passed": container_contract_passed,
+        "container_contract": container_contract,
         "supervisor_status": supervisor_state.get("event"),
         "expected_task_count": frozen.get("task_count"),
         "manifest_mismatches": mismatches,
@@ -1048,6 +1387,14 @@ def main() -> int:
         "posthoc_run_state", "posthoc_infrastructure_error",
         "posthoc_transient_rechecks",
         "observability_complete",
+        "no_improvement_attempts", "direction_switches",
+        "kb_retrieved_ids", "kb_injected_ids", "kb_declared_used_ids",
+        "kb_declared_unknown_ids", "kb_usage_trace_complete",
+        "kb_declared_ids_valid", "probe_policy_records",
+        "probe_metadata_complete", "probe_policy_compliant",
+        "mechanism_compliant", "forensics_report_count",
+        "forensics_cache_hits", "forensics_reuses", "forensics_degraded",
+        "rollback_count", "sigterm_count", "sigkill_count",
     ]
     _write_csv(args.output / "per_task.csv", rows, per_task_fields)
     _write_csv(

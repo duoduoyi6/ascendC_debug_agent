@@ -117,14 +117,20 @@ def _merge_common_checks(branch_output: dict, common_outcome) -> dict:
 
 def _dispatch(step: str, task_dir: Path, op_name: str, attempt: int) -> dict:
     """主调度：通用层 → 分支层。返回单个 dict (gate 输出)。"""
+    current_failure_type = _load_failure_type(task_dir)
+    if step in {"audit", "fix"}:
+        _gate_common.ensure_engine_audit(
+            task_dir,
+            attempt,
+            current_failure_type or "precision_failed",
+        )
+
     # 1. 通用层
     common_outcome = _gate_common.run_common(step, task_dir, op_name, attempt)
     if not common_outcome.ok:
         return common_outcome.to_gate_output()
 
     # 2. 分支派发
-    current_failure_type = _load_failure_type(task_dir)
-
     # 首次 Gate 调用时记录 session 起始 failure_type（追踪用，不用于 STOP）
     if _load_session_branch(task_dir) is None:
         _record_session_branch(task_dir, current_failure_type or "unknown")

@@ -58,6 +58,9 @@ CONTROL_PLANE_FILES = (
     "Dockerfile.v5-agent",
     "claude_qwen38max.sh",
     "launch_v5_ablation.sh",
+    "manage_v5_container.sh",
+    "blocked_kb.json",
+    "blocked_forensics.py",
     "prepare_v5_manifests.py",
     "prepare_v5_runtime.sh",
     "qwen38max.settings.json",
@@ -279,8 +282,19 @@ def main() -> int:
     if invalid:
         raise SystemExit(f"dataset audit failed for: {', '.join(invalid)}")
 
-    (args.control / "source_dirs_n27.txt").write_text(
+    source_list_path = args.control / "source_dirs_n27.txt"
+    source_list_path.write_text(
         "\n".join(source_lines) + "\n", encoding="utf-8"
+    )
+    write_json(
+        args.control / "source_dirs_n27.sha256.json",
+        {
+            "schema_version": 1,
+            "path": str(source_list_path),
+            "sha256": sha256(source_list_path),
+            "task_count": len(source_lines),
+            "entries": source_lines,
+        },
     )
     write_json(
         args.control / "dataset_audit.json",
@@ -421,6 +435,9 @@ def main() -> int:
         "posthoc_observer_isolated": True,
         "primary_cost_scope": "final_valid_cycle_only",
         "failed_cycles_excluded_from_primary_cost": True,
+        "fresh_container_per_arm": True,
+        "container_privileged": True,
+        "container_cap_drop": ["SYS_ADMIN"],
     }
     for arm in ARMS:
         kb_enabled = arm not in {
@@ -434,6 +451,10 @@ def main() -> int:
                 "ablated_capabilities": sorted(PROFILE_ABLATIONS[arm]),
                 "kb_path": str(args.kb) if kb_enabled else None,
                 "kb_read_only": kb_enabled,
+                "kb_filesystem_masked": not kb_enabled,
+                "forensics_script_masked": (
+                    arm in {"no_diagnostic_evidence", "baseline"}
+                ),
                 **common,
             },
         )

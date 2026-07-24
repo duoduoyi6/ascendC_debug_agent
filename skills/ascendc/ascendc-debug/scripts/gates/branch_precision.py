@@ -23,7 +23,7 @@ import os
 import re
 from pathlib import Path
 
-from .common import GateOutcome, MAX_ATTEMPTS
+from .common import GateOutcome, MAX_ATTEMPTS, ensure_engine_audit
 
 
 MAX_STAGNANT_ROUNDS = 2
@@ -133,14 +133,32 @@ class _LegacyPrecisionChecker:
     # Gate-A: 审计报告
     # ================================================================
 
+    def _ensure_engine_audit(self) -> None:
+        """Build the pre-Agent evidence packet consumed by Gate-A and the Agent."""
+        ensure_engine_audit(
+            Path(self.task_dir),
+            self.attempt,
+            "precision_failed",
+        )
+
     def check_audit(self) -> dict:
         prereq = self._check_prerequisite_forensics()
+        if (
+            not prereq["satisfied"]
+            and os.environ.get("ABLATE_FORENSICS") == "1"
+        ):
+            prereq = {
+                "satisfied": True,
+                "reason": "forensics_disabled_raw_validation_audit",
+                "detail": {"forensics_ablation": True},
+            }
         if not prereq["satisfied"]:
             checks = {"prerequisite_forensics": False}
             checks.update(prereq["detail"])
             result = self._result("GATE-A", checks)
             result["prerequisite_error"] = prereq["reason"]
             return result
+        self._ensure_engine_audit()
 
         path = os.path.join(self.tuning_dir, f"precision_audit_{self.attempt}.md")
         checks = {

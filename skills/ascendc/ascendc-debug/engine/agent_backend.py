@@ -601,6 +601,28 @@ def _knowledge_search_context(task_dir: Path, attempt: int) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _audit_context(task_dir: Path, attempt: int) -> str:
+    """Inject the engine-owned Gate-A evidence packet into the Agent prompt."""
+    if os.environ.get("ABLATE_GATE_A") == "1":
+        return ""
+    path = (
+        task_dir
+        / "precision_tuning"
+        / f"audit_context_attempt_{attempt}.json"
+    )
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(value, dict):
+        return ""
+    return (
+        "\n[ENGINE_GATE_A_AUDIT]\n【Gate-A 引擎预审证据】\n"
+        + json.dumps(value, ensure_ascii=False, indent=2)[:6000]
+        + "\n请显式确认或推翻 primary_hint，并让修改方向与该证据一致。\n"
+    )
+
+
 def _build_prompt(task_dir: Path, op_name: str, failure_type: str,
                   attempt: int, npu: Optional[str]) -> str:
     """构造收窄到「单个 attempt」的 diagnose prompt。
@@ -628,6 +650,7 @@ def _build_prompt(task_dir: Path, op_name: str, failure_type: str,
     return (head + _cheat_warning(task_dir)
             + recovery_context
             + _knowledge_search_context(task_dir, attempt)
+            + _audit_context(task_dir, attempt)
             + _SINGLE_ROUND_CONSTRAINT.replace("{task_dir}", str(task_dir))
             + probe_constraint
             + (_NOPROBE_CONSTRAINT if os.environ.get("ABLATE_PROBE") == "1" else "")

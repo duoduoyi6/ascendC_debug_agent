@@ -26,6 +26,8 @@ class V5ArmContractTests(unittest.TestCase):
             "ablated_capabilities": ["kb"],
             "kb_path": None,
             "kb_read_only": False,
+            "kb_filesystem_masked": True,
+            "forensics_script_masked": False,
             **module.COMMON,
         }
         row = module.verify_arm(
@@ -47,6 +49,8 @@ class V5ArmContractTests(unittest.TestCase):
             "ablated_capabilities": ["kb"],
             "kb_path": None,
             "kb_read_only": True,
+            "kb_filesystem_masked": True,
+            "forensics_script_masked": True,
             **module.COMMON,
         }
         row = module.verify_arm(

@@ -10,6 +10,7 @@ KEY_CONFIG="$ROOT/.secrets/v5_qwen38max_provider.json"
 INITIAL_KB="$CONTROL/initial_kb_102_cleaned_20260715.json"
 OUTPUT="$ROOT/outputs/v5_ablation_n27_qwen38max_20260724"
 CLAUDE_WRAPPER="$CONTROL/claude_qwen38max.sh"
+CONTAINER_MANAGER="$CONTROL/manage_v5_container.sh"
 ARM_LOCK="$CONTROL/ARMED_BY_USER.txt"
 CONTAINERS=v5_cann,v5_cann,v5_cann,v5_cann,v5_cann
 NPUS=3,4,5,6,7
@@ -22,6 +23,8 @@ fi
 
 for required in \
   "$SOURCE_LIST" \
+  "$CONTROL/source_dirs_n27.sha256.json" \
+  "$CONTAINER_MANAGER" \
   "$KEY_CONFIG" \
   "$INITIAL_KB" \
   "$CONTROL/code_snapshot.sha256.json" \
@@ -62,6 +65,8 @@ check_mount_mode "$ROOT" false
 check_mount_mode "$ROOT/outputs" true
 check_mount_mode "$DATASET" false
 check_mount_mode "$CONTROL" false
+"$CONTAINER_MANAGER" verify preflight \
+  > "$CONTROL/launch_preflight_container_contract.json"
 
 python3 "$ROOT/utils/verify_v5_arm_contracts.py" \
   --repo-root "$ROOT" \
@@ -118,9 +123,13 @@ cp -a "$CONTROL/dataset_amendments.json" "$OUTPUT/experiment_control/"
 cp -a "$CONTROL/launch_fingerprint_verification.json" "$OUTPUT/experiment_control/"
 cp -a "$CONTROL/arm_manifests" "$OUTPUT/experiment_control/"
 cp -a "$SOURCE_LIST" "$OUTPUT/experiment_control/"
+cp -a "$CONTROL/source_dirs_n27.sha256.json" "$OUTPUT/experiment_control/"
 printf '%s\n' "${ARMS[@]}" > "$OUTPUT/experiment_control/arm_order.txt"
 
 for arm in "${ARMS[@]}"; do
+  mkdir -p "$OUTPUT/experiment_control/container_contracts"
+  "$CONTAINER_MANAGER" recreate "$arm" \
+    > "$OUTPUT/experiment_control/container_contracts/${arm}_before.json"
   python3 "$ROOT/utils/verify_v5_frozen_inputs.py" \
     --root "$ROOT" \
     --dataset "$DATASET" \
@@ -195,6 +204,8 @@ for arm in "${ARMS[@]}"; do
     --verify-arm "$arm"
   echo "[$(date --iso-8601=seconds)] posthoc completed arm=$arm"
 done
+
+"$CONTAINER_MANAGER" remove
 
 python3 "$ROOT/utils/analyze_v5_ablation.py" \
   --experiment-root "$OUTPUT" \

@@ -22,6 +22,44 @@ def _load():
 
 class V5AnalysisTests(unittest.TestCase):
     @staticmethod
+    def _write_terminal_artifacts(task: Path) -> None:
+        (task / "debug_status.json").write_text(json.dumps({
+            "session_outcome": "success",
+            "ended_at": "2026-07-25T00:00:00Z",
+            "objective_success": True,
+            "reportable_success": True,
+            "anti_cheat_pass": True,
+            "ast_degrade_pass": True,
+        }))
+        (task / "run_summary.json").write_text(json.dumps({
+            "schema_version": 1,
+            "session_outcome": "success",
+            "attempts_used": 1,
+            "turns": 4,
+            "gate": {},
+            "forensics": {},
+        }))
+
+    @staticmethod
+    def _write_claude_result(tuning: Path) -> None:
+        archive = tuning / "claude_results"
+        archive.mkdir(parents=True, exist_ok=True)
+        (archive / "attempt0.json").write_text(json.dumps({
+            "num_turns": 4,
+            "total_cost_usd": 0.25,
+            "modelUsage": {
+                "qwen3.8-max-preview": {
+                    "inputTokens": 100,
+                    "outputTokens": 10,
+                    "cacheCreationInputTokens": 0,
+                    "cacheReadInputTokens": 0,
+                    "contextWindow": 1000000,
+                    "maxOutputTokens": 65536,
+                },
+            },
+        }))
+
+    @staticmethod
     def _write_events(task: Path, rows: list[dict]) -> None:
         path = task / ".debug_events" / "events.jsonl"
         path.parent.mkdir(parents=True)
@@ -193,19 +231,60 @@ class V5AnalysisTests(unittest.TestCase):
             task = Path(tmp)
             tuning = task / "precision_tuning"
             tuning.mkdir()
-            (task / "debug_status.json").write_text("{}")
-            (task / "run_summary.json").write_text("{}")
-            (tuning / "tuning_directions.json").write_text("{}")
-            (tuning / "probe_policy_attempt0.json").write_text("{}")
-            (tuning / "knowledge_search_log.json").write_text("{}")
-            (tuning / "forensics_report_0.json").write_text("{}")
-            archive = tuning / "claude_results"
-            archive.mkdir()
-            (archive / "attempt0.json").write_text("{}")
+            self._write_terminal_artifacts(task)
+            self._write_claude_result(tuning)
+            (tuning / "tuning_directions.json").write_text(json.dumps({
+                "entries": [{
+                    "attempt": 0,
+                    "fix_type": "tail_mask",
+                    "direction_verdict": "initial",
+                    "direction_reason": "first repair direction",
+                    "outcome": "improved",
+                    "evidence": {},
+                }],
+            }))
+            (tuning / "probe_policy_attempt0.json").write_text(json.dumps({
+                "attempt": 0,
+                "failure_type": "precision_failed",
+                "policy": "required",
+                "policy_pass": True,
+                "metadata_complete": True,
+                "observed_status": "executed",
+                "ablation_violation": False,
+            }))
+            (tuning / "kb_usage_trace.json").write_text(json.dumps([{
+                "attempt": 0,
+                "retrieved_ids": ["kb-1"],
+                "injected_ids": ["kb-1"],
+                "declared_used_ids": ["kb-1"],
+                "declared_unknown_ids": [],
+                "usage_trace_complete": True,
+            }]))
+            (tuning / "forensics_report_0.json").write_text(json.dumps({
+                "attempt": 0,
+                "status": "completed",
+                "primary_hint": "tail writes are unmasked",
+                "version": "2.0",
+            }))
             current_best = tuning / "history" / "current_best"
             current_best.mkdir(parents=True)
-            (current_best / "metric.json").write_text("{}")
-            (current_best / "manifest.json").write_text("{}")
+            (current_best / "src").mkdir()
+            (current_best / "metric.json").write_text(json.dumps({
+                "attempt": 0,
+                "case_pass_rate": 0.7,
+                "match_rate": 0.9,
+                "correctness_passed": False,
+            }))
+            (current_best / "manifest.json").write_text(json.dumps({
+                "schema_version": 1,
+                "complete": True,
+                "attempt": 0,
+                "files": [{
+                    "path": "foo.cpp",
+                    "size": 12,
+                    "sha256": "sha256",
+                }],
+            }))
             self._write_events(task, [
                 {
                     "type": "action_started",
@@ -231,6 +310,8 @@ class V5AnalysisTests(unittest.TestCase):
                         "success": True,
                         "checkpoint": {"success": True, "updated": False},
                         "rolled_back": True,
+                        "from_attempt": 1,
+                        "best_attempt": 0,
                     },
                 },
             ])
@@ -249,12 +330,16 @@ class V5AnalysisTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             task = Path(tmp)
             tuning = task / "precision_tuning"
-            archive = tuning / "claude_results"
-            archive.mkdir(parents=True)
-            (archive / "attempt0.json").write_text("{}")
-            (task / "debug_status.json").write_text("{}")
-            (task / "run_summary.json").write_text("{}")
-            (tuning / "diagnosis_summary_attempt_0.json").write_text("{}")
+            self._write_terminal_artifacts(task)
+            self._write_claude_result(tuning)
+            (tuning / "diagnosis_summary_attempt_0.json").write_text(
+                json.dumps({
+                    "attempt": 0,
+                    "fix_type": "raw_log_diagnosis",
+                    "direction_verdict": "initial",
+                    "direction_reason": "structured diagnostics disabled",
+                })
+            )
             self._write_events(task, [
                 {
                     "type": "action_started",
@@ -276,6 +361,40 @@ class V5AnalysisTests(unittest.TestCase):
                     result["checks"][name]["reason"], "disabled_by_arm")
             self.assertFalse(result["checks"]["rollback"]["observed"])
             self.assertTrue(result["checks"]["rollback"]["complete"])
+
+    def test_observability_rejects_empty_semantic_artifacts(self) -> None:
+        module = _load()
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp)
+            tuning = task / "precision_tuning"
+            archive = tuning / "claude_results"
+            archive.mkdir(parents=True)
+            (task / "debug_status.json").write_text("{}")
+            (task / "run_summary.json").write_text("{}")
+            (archive / "attempt0.json").write_text("{}")
+            (tuning / "tuning_directions.json").write_text("{}")
+            (tuning / "probe_policy_attempt0.json").write_text("{}")
+            (tuning / "kb_usage_trace.json").write_text("{}")
+            (tuning / "forensics_report_0.json").write_text("{}")
+            self._write_events(task, [
+                {
+                    "type": "action_started",
+                    "action": {"step": step},
+                }
+                for step in (
+                    "forensics", "knowledge_search",
+                    "diagnose_and_fix", "validate",
+                )
+            ])
+
+            result = module._observability(task, {}, "full")
+
+            self.assertFalse(result["complete"])
+            for name in (
+                "status", "run_summary", "claude_results",
+                "probe", "direction", "kb", "forensics",
+            ):
+                self.assertFalse(result["checks"][name]["observed"], name)
 
     def test_observability_flags_missing_direction_after_validate_started(self) -> None:
         module = _load()
@@ -303,7 +422,14 @@ class V5AnalysisTests(unittest.TestCase):
             tuning.mkdir()
             (task / "debug_status.json").write_text("{}")
             (task / "run_summary.json").write_text("{}")
-            (tuning / "kb_usage_trace.json").write_text("{}")
+            (tuning / "kb_usage_trace.json").write_text(json.dumps([{
+                "attempt": 0,
+                "retrieved_ids": ["kb-1"],
+                "injected_ids": ["kb-1"],
+                "declared_used_ids": ["kb-1"],
+                "declared_unknown_ids": [],
+                "usage_trace_complete": True,
+            }]))
             self._write_events(task, [{
                 "type": "action_started",
                 "action": {"step": "diagnose_and_fix"},
@@ -411,6 +537,28 @@ class V5AnalysisTests(unittest.TestCase):
                 "kb_read_only": True,
             }
             (manifests / "arm_full.json").write_text(json.dumps(frozen))
+            contracts = (
+                root / "experiment_control" / "container_contracts"
+            )
+            contracts.mkdir()
+            (contracts / "full_before.json").write_text(json.dumps({
+                "passed": True,
+                "arm": "full",
+                "container_id": "container-full",
+                "created_at": "2026-07-25T00:00:00Z",
+                "image_id": "sha256:image",
+                "fresh_label": True,
+                "privileged": True,
+                "mount_modes": {
+                    "root_rw": False,
+                    "outputs_rw": True,
+                    "dataset_rw": False,
+                    "control_rw": False,
+                },
+                "kb_masked": False,
+                "forensics_masked": False,
+                "cap_drop": ["SYS_ADMIN"],
+            }))
             task_row = {
                 "task": "level1/op",
                 "terminal_complete": True,

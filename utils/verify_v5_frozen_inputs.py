@@ -197,6 +197,62 @@ def preflight_artifact_checks(
     }
 
 
+def source_list_check(
+    control: Path,
+    dataset: Path,
+    *,
+    expected_tasks: int,
+) -> dict[str, Any]:
+    list_path = control / "source_dirs_n27.txt"
+    meta = _load_json(control / "source_dirs_n27.sha256.json")
+    try:
+        entries = [
+            line.strip()
+            for line in list_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    except OSError:
+        entries = []
+    expected_entries = meta.get("entries")
+    if not isinstance(expected_entries, list):
+        expected_entries = []
+    source_root = (dataset / "tasks").resolve()
+    invalid_entries = []
+    for raw in entries:
+        path = Path(raw)
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(source_root)
+        except (OSError, ValueError):
+            invalid_entries.append(raw)
+            continue
+        if not resolved.is_dir():
+            invalid_entries.append(raw)
+    actual_sha = sha256(list_path) if list_path.is_file() else None
+    sha256_matches = actual_sha == meta.get("sha256")
+    unique_entries = (
+        len(entries) == expected_tasks
+        and len(set(entries)) == expected_tasks
+    )
+    return {
+        "passed": (
+            list_path.is_file()
+            and sha256_matches
+            and len(entries) == expected_tasks
+            and unique_entries
+            and entries == expected_entries
+            and not invalid_entries
+        ),
+        "expected_sha256": meta.get("sha256"),
+        "actual_sha256": actual_sha,
+        "sha256_matches": sha256_matches,
+        "task_count": len(entries),
+        "unique_task_count": len(set(entries)),
+        "unique_entries": unique_entries,
+        "invalid_entries": invalid_entries,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
@@ -279,6 +335,11 @@ def main() -> int:
         expected_model=args.expected_model,
         expected_context=args.expected_context,
     ))
+    checks["source_list"] = source_list_check(
+        args.control,
+        args.dataset,
+        expected_tasks=args.expected_tasks,
+    )
     checks["formal_output_absent"] = {
         "passed": args.allow_existing_formal_output or not args.formal_output.exists(),
         "path": str(args.formal_output),

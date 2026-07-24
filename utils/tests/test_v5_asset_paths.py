@@ -31,13 +31,15 @@ class V5AssetPathTests(unittest.TestCase):
             self.assertNotIn(old_path, payload)
 
     def test_runtime_mounts_freeze_code_control_and_dataset(self) -> None:
-        prepare = (
-            V5_ROOT / "prepare_v5_runtime.sh"
+        manager = (
+            V5_ROOT / "manage_v5_container.sh"
         ).read_text(encoding="utf-8")
-        self.assertIn('-v "$ROOT:$ROOT:ro"', prepare)
-        self.assertIn('-v "$ROOT/outputs:$ROOT/outputs"', prepare)
-        self.assertIn('-v "$DATASET:$DATASET:ro"', prepare)
-        self.assertIn('-v "$CONTROL:$CONTROL:ro"', prepare)
+        self.assertIn('-v "$ROOT:$ROOT:ro"', manager)
+        self.assertIn('-v "$ROOT/outputs:$ROOT/outputs"', manager)
+        self.assertIn('-v "$DATASET:$DATASET:ro"', manager)
+        self.assertIn('-v "$CONTROL:$CONTROL:ro"', manager)
+        self.assertIn("--cap-drop SYS_ADMIN", manager)
+        self.assertIn('docker rm -f "$CONTAINER"', manager)
 
     def test_launcher_closes_each_arm_before_continuing(self) -> None:
         launcher = (
@@ -46,6 +48,7 @@ class V5AssetPathTests(unittest.TestCase):
         self.assertIn("--verify-arm \"$arm\"", launcher)
         self.assertIn("verify_v5_no_workers.py", launcher)
         self.assertIn("--transient-rechecks 2", launcher)
+        self.assertIn('"$CONTAINER_MANAGER" recreate "$arm"', launcher)
         self.assertLess(
             launcher.index("--verify-arm \"$arm\""),
             launcher.index("posthoc completed arm=$arm"),
