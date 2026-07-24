@@ -16,6 +16,7 @@ repo_kb_fixture="$ROOT/experiments/v5_ablation/fixtures/initial_kb_102_cleaned_2
 repo_old_kb="$ROOT/skills/ascendc/ascendc-debug/references/old_precision_knowledge_base.json"
 active_kb="$CONTROL/initial_kb_102_cleaned_20260715.json"
 forensics_script="$ROOT/skills/ascendc/ascendc-debug/scripts/precision_forensics.py"
+preflight_output="$CONTROL/dataset_preflight"
 
 kb_disabled=0
 diagnostics_disabled=0
@@ -37,6 +38,9 @@ remove_container() {
 
 recreate_container() {
   remove_container
+  if [[ "$arm" == "preflight" ]]; then
+    mkdir -p "$preflight_output"
+  fi
   args=(
     run -d
     --name "$CONTAINER"
@@ -53,6 +57,9 @@ recreate_container() {
     -v "$DATASET:$DATASET:ro"
     -v "$CONTROL:$CONTROL:ro"
   )
+  if [[ "$arm" == "preflight" ]]; then
+    args+=(-v "$preflight_output:$preflight_output")
+  fi
   if [[ "$kb_disabled" == "1" ]]; then
     args+=(
       -v "$blocked_kb:$repo_kb_fixture:ro"
@@ -87,6 +94,10 @@ verify_container() {
   outputs_rw="$(mount_mode "$ROOT/outputs")"
   dataset_rw="$(mount_mode "$DATASET")"
   control_rw="$(mount_mode "$CONTROL")"
+  preflight_output_rw=false
+  if [[ "$arm" == "preflight" ]]; then
+    preflight_output_rw="$(mount_mode "$preflight_output")"
+  fi
   passed=true
   [[ "$actual_image_id" == "$expected_image_id" ]] || passed=false
   [[ "$actual_arm" == "$arm" ]] || passed=false
@@ -97,6 +108,9 @@ verify_container() {
   [[ "$outputs_rw" == "true" ]] || passed=false
   [[ "$dataset_rw" == "false" ]] || passed=false
   [[ "$control_rw" == "false" ]] || passed=false
+  if [[ "$arm" == "preflight" ]]; then
+    [[ "$preflight_output_rw" == "true" ]] || passed=false
+  fi
   if [[ "$kb_disabled" == "1" ]]; then
     [[ "$(mount_mode "$repo_kb_fixture")" == "false" ]] || passed=false
     [[ "$(mount_mode "$repo_old_kb")" == "false" ]] || passed=false
@@ -112,7 +126,8 @@ verify_container() {
   printf '"privileged":%s,"cap_drop":%s,' "$privileged" "$cap_drop"
   printf '"mount_modes":{"root_rw":%s,"outputs_rw":%s,' \
     "$root_rw" "$outputs_rw"
-  printf '"dataset_rw":%s,"control_rw":%s},' "$dataset_rw" "$control_rw"
+  printf '"dataset_rw":%s,"control_rw":%s,' "$dataset_rw" "$control_rw"
+  printf '"preflight_output_rw":%s},' "$preflight_output_rw"
   printf '"kb_masked":%s,"forensics_masked":%s}\n' \
     "$kb_disabled" "$diagnostics_disabled"
   [[ "$passed" == "true" ]]

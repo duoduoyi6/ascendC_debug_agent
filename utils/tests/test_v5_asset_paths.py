@@ -38,6 +38,10 @@ class V5AssetPathTests(unittest.TestCase):
         self.assertIn('-v "$ROOT/outputs:$ROOT/outputs"', manager)
         self.assertIn('-v "$DATASET:$DATASET:ro"', manager)
         self.assertIn('-v "$CONTROL:$CONTROL:ro"', manager)
+        self.assertIn(
+            '-v "$preflight_output:$preflight_output"', manager)
+        self.assertIn(
+            '[[ "$preflight_output_rw" == "true" ]]', manager)
         self.assertIn("--cap-drop SYS_ADMIN", manager)
         self.assertIn('docker rm -f "$CONTAINER"', manager)
 
