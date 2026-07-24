@@ -25,6 +25,7 @@ for required in \
   "$KEY_CONFIG" \
   "$INITIAL_KB" \
   "$CONTROL/code_snapshot.sha256.json" \
+  "$CONTROL/control_plane.sha256.json" \
   "$CONTROL/dataset_manifest.sha256.json" \
   "$CONTROL/provider_config_redacted.json" \
   "$CONTROL/qwen38max.smoke.meta.json" \
@@ -83,6 +84,7 @@ python3 "$ROOT/utils/verify_v5_frozen_inputs.py" \
 mkdir -p "$OUTPUT/experiment_control"
 mkdir -p "$OUTPUT/experiment_control/fingerprints"
 cp -a "$CONTROL/code_snapshot.sha256.json" "$OUTPUT/experiment_control/"
+cp -a "$CONTROL/control_plane.sha256.json" "$OUTPUT/experiment_control/"
 cp -a "$CONTROL/dataset_manifest.sha256.json" "$OUTPUT/experiment_control/"
 cp -a "$CONTROL/source_snapshot_effective.sha256.json" "$OUTPUT/experiment_control/"
 cp -a "$CONTROL/dataset_audit.json" "$OUTPUT/experiment_control/"

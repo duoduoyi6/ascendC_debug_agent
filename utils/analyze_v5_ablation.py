@@ -69,6 +69,8 @@ def summarize_claude_cost(paths: Iterable[Path]) -> dict[str, Any]:
         "cost_usd": 0.0,
     }
     models: set[str] = set()
+    context_windows: set[int] = set()
+    max_output_tokens: set[int] = set()
     provider_errors: list[str] = []
     result_count = 0
     for path in paths:
@@ -83,6 +85,10 @@ def summarize_claude_cost(paths: Iterable[Path]) -> dict[str, Any]:
             for model, record in usage.items():
                 if isinstance(record, dict):
                     models.add(str(model))
+                    if isinstance(record.get("contextWindow"), int):
+                        context_windows.add(record["contextWindow"])
+                    if isinstance(record.get("maxOutputTokens"), int):
+                        max_output_tokens.add(record["maxOutputTokens"])
                     totals["input_tokens"] += _number(record.get("inputTokens"))
                     totals["output_tokens"] += _number(record.get("outputTokens"))
                     totals["cache_creation_tokens"] += _number(
@@ -122,6 +128,8 @@ def summarize_claude_cost(paths: Iterable[Path]) -> dict[str, Any]:
     totals["cost_usd"] = round(float(totals["cost_usd"]), 8)
     totals["result_count"] = result_count
     totals["models"] = sorted(models)
+    totals["context_windows"] = sorted(context_windows)
+    totals["max_output_tokens"] = sorted(max_output_tokens)
     totals["provider_errors"] = sorted(provider_errors)
     return totals
 
@@ -306,6 +314,7 @@ def _observability(
             ),
             observed=(
                 (tuning / "knowledge_search_log.json").is_file()
+                or (tuning / "kb_usage_trace.json").is_file()
                 or (tuning / "knowledge_usage_trace.json").is_file()
             ),
             reason=(
@@ -386,11 +395,12 @@ def task_row(
     reportable = status.get("reportable_success") is True
     anti = status.get("anti_cheat_pass") is True
     ast = status.get("ast_degrade_pass") is True
+    observability = _observability(task, status, arm)
     evidence_backed = (
         arm in EVIDENCE_CAPABLE_ARMS
         and objective and reportable and anti and ast and full_pass
+        and observability["complete"]
     )
-    observability = _observability(task, status, arm)
     row: dict[str, Any] = {
         "arm": arm,
         "task": rel,
@@ -398,6 +408,9 @@ def task_row(
         "entry_failure_type": status.get("entry_failure_type"),
         "final_failure_type": status.get("final_failure_type"),
         "attempts_used": int(_number(status.get("attempts_used"))),
+        "terminal_complete": bool(
+            status.get("session_outcome") and status.get("ended_at")
+        ),
         "objective_success": objective,
         "reportable_success": reportable,
         "anti_cheat_pass": anti,
@@ -502,7 +515,10 @@ def paired_bootstrap_ci(
 
 
 def _manifest_compliance(
-    root: Path, arm: str, task_count: int, posthoc_count: int
+    root: Path,
+    arm: str,
+    task_rows: list[dict[str, Any]],
+    posthoc_rows: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     frozen = _load_json(
         root / "experiment_control" / "arm_manifests" / f"arm_{arm}.json", {})
@@ -552,18 +568,50 @@ def _manifest_compliance(
     if arm == "no_anticheat":
         for path in task_root.glob("level*/*/_anticheat.json"):
             prohibited.append(str(path.relative_to(root)))
+    task_count = len(task_rows)
+    terminal_count = sum(row["terminal_complete"] for row in task_rows)
+    posthoc_count = len(posthoc_rows)
+    posthoc_completed_count = sum(
+        row.get("run_state") == "completed"
+        for row in posthoc_rows.values()
+    )
+    expected_model = frozen.get("model")
+    expected_context = frozen.get("model_context_window")
+    model_usage_violations = [
+        {
+            "task": row["task"],
+            "models": row["models"],
+            "context_windows": row["context_windows"],
+        }
+        for row in task_rows
+        if row["result_count"] > 0
+        and (
+            row["models"] != [expected_model]
+            or row["context_windows"] != [expected_context]
+        )
+    ]
     complete = (
         task_count == int(frozen.get("task_count") or 0)
+        and terminal_count == int(frozen.get("task_count") or 0)
         and posthoc_count == int(frozen.get("task_count") or 0)
+        and posthoc_completed_count == int(frozen.get("task_count") or 0)
     )
     return {
         "arm": arm,
-        "passed": complete and not mismatches and not prohibited,
-        "terminal_task_count": task_count,
+        "passed": (
+            complete
+            and not mismatches
+            and not prohibited
+            and not model_usage_violations
+        ),
+        "task_directory_count": task_count,
+        "terminal_task_count": terminal_count,
         "posthoc_task_count": posthoc_count,
+        "posthoc_completed_count": posthoc_completed_count,
         "expected_task_count": frozen.get("task_count"),
         "manifest_mismatches": mismatches,
         "prohibited_artifacts": prohibited,
+        "model_usage_violations": model_usage_violations,
     }
 
 
@@ -740,7 +788,7 @@ def _write_report(
         lines.append(
             f"- `{row['arm']}`: {'PASS' if row['passed'] else 'FAIL'}; "
             f"terminal={row['terminal_task_count']}, "
-            f"posthoc={row['posthoc_task_count']}."
+            f"posthoc_completed={row['posthoc_completed_count']}."
         )
     lines.extend([
         "",
@@ -773,15 +821,16 @@ def main() -> int:
         task_root = args.experiment_root / f"arm_{arm}" / "tasks"
         tasks = sorted(path for path in task_root.glob("level*/*") if path.is_dir())
         posthoc = _posthoc_map(args.experiment_root, arm)
-        rows.extend(task_row(
+        arm_rows = [task_row(
             args.experiment_root,
             arm,
             task,
             coverage=coverage,
             posthoc=posthoc,
-        ) for task in tasks)
+        ) for task in tasks]
+        rows.extend(arm_rows)
         compliance.append(_manifest_compliance(
-            args.experiment_root, arm, len(tasks), len(posthoc)))
+            args.experiment_root, arm, arm_rows, posthoc))
 
     classify_long_failures(rows)
     summaries = _arm_summary(rows)
@@ -817,13 +866,14 @@ def main() -> int:
     )
     per_task_fields = [
         "arm", "task", "session_outcome", "entry_failure_type",
-        "final_failure_type", "attempts_used", "objective_success",
+        "final_failure_type", "attempts_used", "terminal_complete",
+        "objective_success",
         "reportable_success", "evidence_backed_success",
         "posthoc_clean_success", "full_eval_pass", "turns",
         "input_tokens", "output_tokens", "cache_creation_tokens",
         "cache_read_tokens", "total_tokens", "cost_usd",
         "long_failure", "long_failure_components", "models",
-        "provider_errors", "notes",
+        "context_windows", "max_output_tokens", "provider_errors", "notes",
         "observability_complete",
     ]
     _write_csv(args.output / "per_task.csv", rows, per_task_fields)

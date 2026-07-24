@@ -214,7 +214,7 @@ full-eval 覆盖范围按规范化 case 内容而非只按行数判断：
 正式启动必须同时满足：
 
 1. V5 commit、代码 fingerprint 和 remote working tree 一致；启动时重新逐文件
-   校验 code/source/KB manifest，拒绝 missing/extra/changed 文件；
+   校验 code/control-plane/source/KB manifest，拒绝 missing/extra/changed 文件；
 2. engine、utils、KB 单元测试全部通过；
 3. 27-task dataset audit 通过；
 4. 容器、NPU 3-7、CANN、Claude CLI 和 27/27 隔离 evaluator preflight 通过；
@@ -279,6 +279,7 @@ final-valid-cycle 主成本。
 准备阶段：
 
 - `experiment_control/code_snapshot.sha256.json`
+- `experiment_control/control_plane.sha256.json`
 - `experiment_control/provider_config_redacted.json`
 - `experiment_control/dataset_manifest.sha256.json`
 - `experiment_control/dataset_audit.json`

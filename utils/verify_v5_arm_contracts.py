@@ -25,6 +25,7 @@ COMMON = {
     "containers": ["v5_cann"] * 5,
     "npus": [3, 4, 5, 6, 7],
     "model": "qwen3.8-max-preview",
+    "model_context_window": 1000000,
     "provider_assignment_mode": "fixed_single_provider",
     "provider_names": ["yansong-qwen3-key-1"],
     "declared_parallel_limit": 5,

@@ -89,6 +89,14 @@ def _load_files(path: Path) -> dict[str, str]:
     return {str(key): str(value) for key, value in files.items()}
 
 
+def selected_file_manifest(root: Path, paths: Any) -> dict[str, str]:
+    return {
+        str(rel): sha256(root / str(rel))
+        for rel in paths
+        if (root / str(rel)).is_file()
+    }
+
+
 def _write_bits(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode) & (
         stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
@@ -118,9 +126,19 @@ def main() -> int:
         args.root, skip_runtime=True, code_root=True)
     source_actual = file_manifest(
         args.dataset, skip_runtime=True, code_root=False)
+    control_expected = _load_files(
+        args.control / "control_plane.sha256.json")
+    control_actual = selected_file_manifest(
+        args.control, control_expected)
+    control_source = selected_file_manifest(
+        args.root / "experiments" / "v5_ablation", control_expected)
     checks: dict[str, Any] = {
         "code_snapshot": compare_manifest(code_expected, code_actual),
         "source_snapshot": compare_manifest(source_expected, source_actual),
+        "control_plane_snapshot": compare_manifest(
+            control_expected, control_actual),
+        "control_plane_matches_code": compare_manifest(
+            control_source, control_actual),
     }
 
     kb_meta = json.loads(

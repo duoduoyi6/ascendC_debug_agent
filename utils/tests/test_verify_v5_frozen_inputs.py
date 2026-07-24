@@ -49,6 +49,27 @@ class V5FrozenInputTests(unittest.TestCase):
         self.assertEqual(result["missing"], ["b"])
         self.assertEqual(result["extra"], ["c"])
 
+    def test_control_plane_manifest_detects_deployed_drift(self) -> None:
+        module = _load()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            deployed = root / "deployed"
+            source.mkdir()
+            deployed.mkdir()
+            (source / "launch.sh").write_text("echo frozen\n")
+            (deployed / "launch.sh").write_text("echo changed\n")
+
+            source_manifest = module.selected_file_manifest(
+                source, ["launch.sh"])
+            deployed_manifest = module.selected_file_manifest(
+                deployed, ["launch.sh"])
+            result = module.compare_manifest(
+                source_manifest, deployed_manifest)
+
+            self.assertFalse(result["passed"])
+            self.assertEqual(result["changed"], ["launch.sh"])
+
 
 if __name__ == "__main__":
     unittest.main()

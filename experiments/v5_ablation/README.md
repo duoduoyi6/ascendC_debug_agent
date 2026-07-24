@@ -37,10 +37,10 @@ An explicit `507015`/`NPU_AICORE_EXCEPTION` preflight result is clean-built
 again at most twice; every transient attempt is archived, and a stable
 non-infrastructure result becomes the formal initial classification.
 
-During a formal run, code/source/KB fingerprints are checked before and after
-every arm. Provider environment files live in an ephemeral directory below
-`.secrets` and are removed by the supervisor. Each post-hoc task is rebuilt
-with `build_ascendc.py --clean` before verification. After all seven arms,
+During a formal run, code/control-plane/source/KB fingerprints are checked
+before and after every arm. Provider environment files live in an ephemeral
+directory below `.secrets` and are removed by the supervisor. Each post-hoc
+task is rebuilt with `build_ascendc.py --clean` before verification. After all seven arms,
 `utils/analyze_v5_ablation.py` writes the paired success, final-valid-cycle
 cost, long-failure, failed-cycle and arm-compliance closure package.
 

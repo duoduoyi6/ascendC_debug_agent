@@ -46,6 +46,8 @@ class V5AnalysisTests(unittest.TestCase):
                         "cacheCreationInputTokens": 30,
                         "cacheReadInputTokens": 40,
                         "costUSD": 99,
+                        "contextWindow": 1000000,
+                        "maxOutputTokens": 65536,
                     }
                 },
             }
@@ -60,6 +62,8 @@ class V5AnalysisTests(unittest.TestCase):
             self.assertEqual(result["total_tokens"], 190)
             self.assertEqual(result["cost_usd"], 1.25)
             self.assertEqual(result["models"], ["qwen3.8-max-preview"])
+            self.assertEqual(result["context_windows"], [1000000])
+            self.assertEqual(result["max_output_tokens"], [65536])
 
     def test_mcnemar_and_bootstrap_are_paired(self) -> None:
         module = _load()
@@ -206,6 +210,142 @@ class V5AnalysisTests(unittest.TestCase):
             self.assertFalse(result["complete"])
             self.assertTrue(result["checks"]["direction"]["required"])
             self.assertFalse(result["checks"]["direction"]["observed"])
+
+    def test_observability_recognizes_current_kb_usage_trace_name(self) -> None:
+        module = _load()
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp)
+            tuning = task / "precision_tuning"
+            tuning.mkdir()
+            (task / "debug_status.json").write_text("{}")
+            (task / "run_summary.json").write_text("{}")
+            (tuning / "kb_usage_trace.json").write_text("{}")
+            self._write_events(task, [{
+                "type": "action_started",
+                "action": {"step": "diagnose_and_fix"},
+            }])
+
+            result = module._observability(task, {}, "full")
+
+            self.assertTrue(result["checks"]["kb"]["required"])
+            self.assertTrue(result["checks"]["kb"]["observed"])
+            self.assertTrue(result["checks"]["kb"]["complete"])
+
+    def test_evidence_backed_success_requires_complete_observability(self) -> None:
+        module = _load()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "arm_full" / "tasks" / "level1" / "op"
+            (task / "precision_tuning").mkdir(parents=True)
+            (task / "debug_status.json").write_text(json.dumps({
+                "session_outcome": "success",
+                "ended_at": "2026-07-25T00:00:00Z",
+                "objective_success": True,
+                "reportable_success": True,
+                "anti_cheat_pass": True,
+                "ast_degrade_pass": True,
+            }))
+
+            row = module.task_row(
+                root,
+                "full",
+                task,
+                coverage={
+                    "level1/op": {
+                        "full_eval_applicable": False,
+                        "coverage_equivalent": True,
+                    },
+                },
+                posthoc={
+                    "level1/op": {
+                        "run_state": "completed",
+                        "posthoc_clean_success": True,
+                    },
+                },
+            )
+
+            self.assertFalse(row["observability_complete"])
+            self.assertFalse(row["evidence_backed_success"])
+
+    def test_manifest_compliance_requires_terminal_posthoc_and_model_usage(self) -> None:
+        module = _load()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "arm_full" / "tasks" / "level1" / "op").mkdir(
+                parents=True)
+            manifests = root / "experiment_control" / "arm_manifests"
+            manifests.mkdir(parents=True)
+            runtime = {
+                "targets": [{}],
+                "containers": "v5_cann",
+                "npus": "3",
+                "max_attempts": 5,
+                "max_turns": "240",
+                "soft_task_turns": 480,
+                "max_task_turns": 600,
+                "timeout_sec": 43200,
+                "agent": "constructive",
+                "entry_failure_type": "precision_failed",
+                "ablate_profile": "full",
+                "kb_path": "/kb",
+                "model": "qwen3.8-max-preview",
+                "provider_assignment_mode": "fixed_single_provider",
+                "providers": ["provider"],
+                "provider_env_storage": "ephemeral_secret_dir",
+                "usage_query_enabled": False,
+                "mixed_provider_enabled": False,
+                "kb_read_only": True,
+            }
+            (root / "arm_full" / "experiment_manifest.json").write_text(
+                json.dumps(runtime))
+            frozen = {
+                "task_count": 1,
+                "containers": ["v5_cann"],
+                "npus": [3],
+                "max_attempts": 5,
+                "max_turns": 240,
+                "soft_task_turns": 480,
+                "max_task_turns": 600,
+                "timeout": 43200,
+                "agent": "constructive",
+                "entry_failure_type": "precision_failed",
+                "arm": "full",
+                "kb_path": "/kb",
+                "model": "qwen3.8-max-preview",
+                "model_context_window": 1000000,
+                "provider_assignment_mode": "fixed_single_provider",
+                "provider_names": ["provider"],
+                "provider_env_storage": "ephemeral_secret_dir",
+                "usage_query_enabled": False,
+                "mixed_provider_enabled": False,
+                "kb_read_only": True,
+            }
+            (manifests / "arm_full.json").write_text(json.dumps(frozen))
+            task_row = {
+                "task": "level1/op",
+                "terminal_complete": True,
+                "result_count": 1,
+                "models": ["qwen3.8-max-preview"],
+                "context_windows": [1000000],
+            }
+            posthoc = {"level1/op": {"run_state": "completed"}}
+
+            passed = module._manifest_compliance(
+                root, "full", [task_row], posthoc)
+            self.assertTrue(passed["passed"])
+
+            task_row["terminal_complete"] = False
+            missing_terminal = module._manifest_compliance(
+                root, "full", [task_row], posthoc)
+            self.assertFalse(missing_terminal["passed"])
+            self.assertEqual(missing_terminal["terminal_task_count"], 0)
+
+            task_row["terminal_complete"] = True
+            task_row["context_windows"] = [200000]
+            wrong_context = module._manifest_compliance(
+                root, "full", [task_row], posthoc)
+            self.assertFalse(wrong_context["passed"])
+            self.assertEqual(len(wrong_context["model_usage_violations"]), 1)
 
 
 if __name__ == "__main__":

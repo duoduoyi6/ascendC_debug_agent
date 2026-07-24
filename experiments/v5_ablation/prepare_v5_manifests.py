@@ -54,6 +54,15 @@ PROFILE_ABLATIONS = {
         "full_eval", "recovery", "anticheat_detect_only",
     ],
 }
+CONTROL_PLANE_FILES = (
+    "Dockerfile.v5-agent",
+    "claude_qwen38max.sh",
+    "launch_v5_ablation.sh",
+    "prepare_v5_manifests.py",
+    "prepare_v5_runtime.sh",
+    "qwen38max.settings.json",
+    "smoke_qwen38max_provider.sh",
+)
 
 
 def sha256(path: Path) -> str:
@@ -314,6 +323,30 @@ def main() -> int:
                 args.root, skip_runtime=True, code_root=True),
         },
     )
+    control_files: dict[str, str] = {}
+    for name in CONTROL_PLANE_FILES:
+        source = args.root / "experiments" / "v5_ablation" / name
+        deployed = args.control / name
+        if not source.is_file() or not deployed.is_file():
+            raise SystemExit(
+                f"missing control-plane file source={source} deployed={deployed}"
+            )
+        source_sha = sha256(source)
+        deployed_sha = sha256(deployed)
+        if source_sha != deployed_sha:
+            raise SystemExit(
+                f"control-plane drift before freeze: {name} "
+                f"repo={source_sha} deployed={deployed_sha}"
+            )
+        control_files[name] = deployed_sha
+    write_json(
+        args.control / "control_plane.sha256.json",
+        {
+            "root": str(args.control),
+            "source_root": str(args.root / "experiments" / "v5_ablation"),
+            "files": control_files,
+        },
+    )
 
     kb_data = json.loads(args.kb.read_text(encoding="utf-8"))
     kb_entries = kb_data if isinstance(kb_data, list) else kb_data.get("entries", [])
@@ -330,6 +363,7 @@ def main() -> int:
         args.control / "provider_config_redacted.json",
         {
             "model": "qwen3.8-max-preview",
+            "model_context_window": 1000000,
             "base_url": "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic",
             "providers": [
                 {
@@ -370,6 +404,7 @@ def main() -> int:
         "containers": ["v5_cann"] * 5,
         "npus": [3, 4, 5, 6, 7],
         "model": "qwen3.8-max-preview",
+        "model_context_window": 1000000,
         "provider_assignment_mode": "fixed_single_provider",
         "provider_names": ["yansong-qwen3-key-1"],
         "declared_parallel_limit": 5,
