@@ -2,7 +2,8 @@
 set -Eeuo pipefail
 
 ROOT=/home/wsx/AscendOpGenAgent
-CONTROL=/root/v5_ablation_control_20260724
+ASSETS_ROOT=/home/wsx/AscendOpGenAgent_assets
+CONTROL="$ASSETS_ROOT/v5_ablation_control_20260724"
 KEY_CONFIG="$ROOT/.secrets/v5_qwen38max_provider.json"
 ENV_FILE="$ROOT/.secrets/v5_qwen38max_smoke.env"
 RESULT="$CONTROL/qwen38max.smoke.result.json"

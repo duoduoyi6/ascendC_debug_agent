@@ -2,7 +2,9 @@
 set -Eeuo pipefail
 
 ROOT=/home/wsx/AscendOpGenAgent
-CONTROL=/root/v5_ablation_control_20260724
+ASSETS_ROOT=/home/wsx/AscendOpGenAgent_assets
+CONTROL="$ASSETS_ROOT/v5_ablation_control_20260724"
+DATASET="$ASSETS_ROOT/cannbot_debug_inputs_n27_20260723"
 SOURCE_LIST="$CONTROL/source_dirs_n27.txt"
 KEY_CONFIG="$ROOT/.secrets/v5_qwen38max_provider.json"
 INITIAL_KB="$CONTROL/initial_kb_102_cleaned_20260715.json"
@@ -64,7 +66,7 @@ PY
 
 python3 "$ROOT/utils/verify_v5_frozen_inputs.py" \
   --root "$ROOT" \
-  --dataset /root/cannbot_debug_inputs_n27_20260723 \
+  --dataset "$DATASET" \
   --kb "$INITIAL_KB" \
   --secret "$KEY_CONFIG" \
   --control "$CONTROL" \
@@ -122,7 +124,7 @@ for arm in "${ARMS[@]}"; do
   python3 "$ROOT/utils/run_v5_posthoc_observer.py" \
     --repo-root "$ROOT" \
     --arm-output "$arm_output" \
-    --source-root /root/cannbot_debug_inputs_n27_20260723/tasks \
+    --source-root "$DATASET/tasks" \
     --output "$OUTPUT/posthoc/arm_$arm" \
     --container v5_cann \
     --npus "$NPUS" \

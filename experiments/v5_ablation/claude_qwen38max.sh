@@ -15,7 +15,8 @@ export CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000
 export CLAUDE_CODE_AUTO_COMPACT_WINDOW=950000
 export ENABLE_TOOL_SEARCH=false
 
+CONTROL=/home/wsx/AscendOpGenAgent_assets/v5_ablation_control_20260724
 real_claude="$(command -v claude)"
 exec "$real_claude" \
-  --settings /root/v5_ablation_control_20260724/qwen38max.settings.json \
+  --settings "$CONTROL/qwen38max.settings.json" \
   "$@"

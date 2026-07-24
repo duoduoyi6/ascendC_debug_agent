@@ -47,7 +47,7 @@ V5 继承 V4 的可信成功、外部全量验证、反作弊、知识检索、�
 
 正式数据集位于：
 
-`/root/cannbot_debug_inputs_n27_20260723/`
+`/home/wsx/AscendOpGenAgent_assets/cannbot_debug_inputs_n27_20260723/`
 
 启动前必须生成并冻结：
 

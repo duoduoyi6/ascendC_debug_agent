@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-CONTROL=/root/v5_ablation_control_20260724
 ROOT=/home/wsx/AscendOpGenAgent
-DATASET=/root/cannbot_debug_inputs_n27_20260723
+ASSETS_ROOT=/home/wsx/AscendOpGenAgent_assets
+CONTROL="$ASSETS_ROOT/v5_ablation_control_20260724"
+DATASET="$ASSETS_ROOT/cannbot_debug_inputs_n27_20260723"
 KB="$CONTROL/initial_kb_102_cleaned_20260715.json"
 IMAGE=ascendc-v5-agent:20260724
 CONTAINER=v5_cann
@@ -32,8 +33,8 @@ else
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
     -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
     -v /home/wsx/AscendOpGenAgent:/home/wsx/AscendOpGenAgent \
-    -v /root/cannbot_debug_inputs_n27_20260723:/root/cannbot_debug_inputs_n27_20260723:ro \
-    -v /root/v5_ablation_control_20260724:/root/v5_ablation_control_20260724 \
+    -v "$DATASET:$DATASET:ro" \
+    -v "$CONTROL:$CONTROL" \
     "$IMAGE"
 fi
 

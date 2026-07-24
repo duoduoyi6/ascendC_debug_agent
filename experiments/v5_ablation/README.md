@@ -20,11 +20,13 @@ The API credential is intentionally absent. On the server it must exist only at
 
 ## Preparation
 
-Deploy the repository to `/home/wsx/AscendOpGenAgent`, copy this directory's
-control files and frozen KB to `/root/v5_ablation_control_20260724`, and write
-the deployed Git commit to:
+Deploy the repository to `/home/wsx/AscendOpGenAgent`. Keep frozen experiment
+assets in the sibling directory `/home/wsx/AscendOpGenAgent_assets`, with the
+dataset at `cannbot_debug_inputs_n27_20260723` and this directory's control
+files and frozen KB at `v5_ablation_control_20260724`. Write the deployed Git
+commit to:
 
-`/root/v5_ablation_control_20260724/V5_GIT_COMMIT.txt`
+`/home/wsx/AscendOpGenAgent_assets/v5_ablation_control_20260724/V5_GIT_COMMIT.txt`
 
 Then run `prepare_v5_runtime.sh`. It builds/starts the container, regenerates
 fingerprints, verifies the actual model, proves all ablation profiles, runs the
@@ -32,8 +34,9 @@ fingerprints, verifies the actual model, proves all ablation profiles, runs the
 source/KB inputs read-only.
 
 Preparation does not start a formal arm. `launch_v5_ablation.sh` remains locked
-until `/root/v5_ablation_control_20260724/ARMED_BY_USER.txt` contains exactly
-`START_V5_ABLATION`.
+until
+`/home/wsx/AscendOpGenAgent_assets/v5_ablation_control_20260724/ARMED_BY_USER.txt`
+contains exactly `START_V5_ABLATION`.
 
 See `docs/v5_ablation_experiment_master_design_20260724.md` for the experiment
 contract and analysis rules.
