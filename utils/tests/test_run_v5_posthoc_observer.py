@@ -32,6 +32,7 @@ class V5PosthocIsolationTests(unittest.TestCase):
             (source / "kernel").mkdir(parents=True)
             (treatment / "kernel" / "build").mkdir(parents=True)
             (treatment / ".verify_logs").mkdir()
+            (treatment / ".bench_baseline").mkdir()
             (source / "model.py").write_text("# frozen\n", encoding="utf-8")
             (source / "model_new_ascendc.py").write_text(
                 "# original candidate\n", encoding="utf-8")
@@ -52,6 +53,8 @@ class V5PosthocIsolationTests(unittest.TestCase):
                 "stale\n", encoding="utf-8")
             (treatment / ".verify_logs" / "old.stdout").write_text(
                 "old\n", encoding="utf-8")
+            (treatment / ".bench_baseline" / "stale.txt").write_text(
+                "stale treatment baseline\n", encoding="utf-8")
 
             target = module.Target(
                 rel="level1/001_Foo", treatment=treatment, source=source)
@@ -76,6 +79,7 @@ class V5PosthocIsolationTests(unittest.TestCase):
                 (work / "model.py").read_text(encoding="utf-8"), "# frozen\n")
             self.assertFalse((work / "kernel" / "build").exists())
             self.assertFalse((work / ".verify_logs").exists())
+            self.assertFalse((work / ".bench_baseline" / "stale.txt").exists())
             self.assertEqual(
                 (work / ".bench_baseline" / "model_new_ascendc.py").read_text(),
                 "# original candidate\n",

@@ -21,6 +21,15 @@ def _load():
 
 
 class V5AnalysisTests(unittest.TestCase):
+    @staticmethod
+    def _write_events(task: Path, rows: list[dict]) -> None:
+        path = task / ".debug_events" / "events.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            "".join(json.dumps(row) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+
     def test_append_only_results_avoid_latest_file_double_count(self) -> None:
         module = _load()
         with tempfile.TemporaryDirectory() as tmp:
@@ -89,6 +98,114 @@ class V5AnalysisTests(unittest.TestCase):
             arm_rows = [row for row in rows if row["arm"] == arm]
             self.assertFalse(arm_rows[0]["long_failure"])
             self.assertTrue(arm_rows[1]["long_failure"])
+
+    def test_observability_uses_real_direction_and_rollback_records(self) -> None:
+        module = _load()
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp)
+            tuning = task / "precision_tuning"
+            tuning.mkdir()
+            (task / "debug_status.json").write_text("{}")
+            (task / "run_summary.json").write_text("{}")
+            (tuning / "tuning_directions.json").write_text("{}")
+            (tuning / "probe_policy_attempt0.json").write_text("{}")
+            (tuning / "knowledge_search_log.json").write_text("{}")
+            (tuning / "forensics_report_0.json").write_text("{}")
+            archive = tuning / "claude_results"
+            archive.mkdir()
+            (archive / "attempt0.json").write_text("{}")
+            current_best = tuning / "history" / "current_best"
+            current_best.mkdir(parents=True)
+            (current_best / "metric.json").write_text("{}")
+            (current_best / "manifest.json").write_text("{}")
+            self._write_events(task, [
+                {
+                    "type": "action_started",
+                    "action": {"step": step},
+                }
+                for step in (
+                    "baseline_checkpoint", "forensics", "knowledge_search",
+                    "diagnose_and_fix", "validate", "checkpoint_and_rollback",
+                )
+            ] + [
+                {
+                    "type": "action_completed",
+                    "action": {"step": "baseline_checkpoint"},
+                    "result": {
+                        "success": True,
+                        "checkpoint": {"success": True, "updated": True},
+                    },
+                },
+                {
+                    "type": "action_completed",
+                    "action": {"step": "checkpoint_and_rollback"},
+                    "result": {
+                        "success": True,
+                        "checkpoint": {"success": True, "updated": False},
+                        "rolled_back": True,
+                    },
+                },
+            ])
+
+            result = module._observability(
+                task, {"attempts_used": 1}, "full")
+
+            self.assertTrue(result["complete"])
+            self.assertTrue(result["checks"]["direction"]["observed"])
+            self.assertTrue(result["checks"]["checkpoint"]["observed"])
+            self.assertTrue(result["checks"]["rollback"]["required"])
+            self.assertTrue(result["checks"]["rollback"]["observed"])
+
+    def test_observability_marks_disabled_or_untriggered_evidence_complete(self) -> None:
+        module = _load()
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp)
+            tuning = task / "precision_tuning"
+            archive = tuning / "claude_results"
+            archive.mkdir(parents=True)
+            (archive / "attempt0.json").write_text("{}")
+            (task / "debug_status.json").write_text("{}")
+            (task / "run_summary.json").write_text("{}")
+            (tuning / "diagnosis_summary_attempt_0.json").write_text("{}")
+            self._write_events(task, [
+                {
+                    "type": "action_started",
+                    "action": {"step": "diagnose_and_fix"},
+                },
+                {
+                    "type": "action_started",
+                    "action": {"step": "validate"},
+                },
+            ])
+
+            result = module._observability(
+                task, {"attempts_used": 1}, "no_diagnostic_evidence")
+
+            self.assertTrue(result["complete"])
+            for name in ("probe", "kb", "forensics"):
+                self.assertFalse(result["checks"][name]["required"])
+                self.assertEqual(
+                    result["checks"][name]["reason"], "disabled_by_arm")
+            self.assertFalse(result["checks"]["rollback"]["observed"])
+            self.assertTrue(result["checks"]["rollback"]["complete"])
+
+    def test_observability_flags_missing_direction_after_validate_started(self) -> None:
+        module = _load()
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp)
+            (task / "debug_status.json").write_text("{}")
+            (task / "run_summary.json").write_text("{}")
+            self._write_events(task, [{
+                "type": "action_started",
+                "action": {"step": "validate"},
+            }])
+
+            result = module._observability(
+                task, {"attempts_used": 1}, "full")
+
+            self.assertFalse(result["complete"])
+            self.assertTrue(result["checks"]["direction"]["required"])
+            self.assertFalse(result["checks"]["direction"]["observed"])
 
 
 if __name__ == "__main__":

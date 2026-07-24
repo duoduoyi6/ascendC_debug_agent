@@ -25,6 +25,7 @@ from typing import Any
 CASE_RE = re.compile(r"^case\[\d+\]: output(?:\[[^\]]+\])+:\s*(.*)$", re.M)
 STATUS_RE = re.compile(r"^Status\s*:\s*(\w+)", re.M)
 RUNTIME_NAMES = {
+    ".bench_baseline",
     ".debug_events",
     ".verify_logs",
     ".verify_status",

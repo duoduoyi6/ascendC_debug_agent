@@ -26,6 +26,9 @@ ARMS = (
 EVIDENCE_CAPABLE_ARMS = {
     "full", "no_kb", "no_diagnostic_evidence", "no_loopguard",
 }
+DIAGNOSTICS_DISABLED_ARMS = {"no_diagnostic_evidence", "baseline"}
+KB_DISABLED_ARMS = {"no_kb", "no_diagnostic_evidence", "baseline"}
+RECOVERY_DISABLED_ARMS = {"baseline"}
 PROVIDER_ERROR_RE = re.compile(
     r"\b(?:400|401|403|429|5\d\d)\b|refusal|context[_ -]?limit|"
     r"output[_ -]?limit|max[_ -]?turn",
@@ -161,28 +164,205 @@ def _full_eval_evidence(task: Path, applicable: bool) -> tuple[bool, str]:
     return passed, paths[-1].name
 
 
-def _observability(task: Path, status: dict[str, Any]) -> dict[str, bool]:
-    tuning = task / "precision_tuning"
-    attempts = int(_number(status.get("attempts_used")))
+def _event_rows(task: Path) -> tuple[list[dict[str, Any]], bool]:
+    path = task / ".debug_events" / "events.jsonl"
+    if not path.is_file():
+        return [], False
+    rows: list[dict[str, Any]] = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            if not isinstance(payload, dict):
+                return [], False
+            rows.append(payload)
+    except (OSError, ValueError, TypeError):
+        return [], False
+    return rows, True
+
+
+def _evidence_check(
+    *,
+    required: bool,
+    observed: bool,
+    reason: str,
+) -> dict[str, Any]:
     return {
-        "status": (task / "debug_status.json").is_file(),
-        "events": (task / ".debug_events" / "events.jsonl").is_file(),
-        "run_summary": (task / "run_summary.json").is_file(),
-        "claude_results": bool(claude_result_paths(task)),
-        "probe": bool(list(tuning.glob("probe_*attempt*.json"))) or attempts == 0,
-        "direction": bool(list(tuning.glob("direction_*attempt*.json"))) or attempts == 0,
-        "kb": bool(list(tuning.glob("*knowledge*.json"))) or attempts == 0,
-        "forensics": bool(list(tuning.glob("forensics_report_*.json"))) or attempts == 0,
-        "checkpoint": (
-            (tuning / "checkpoints").exists()
-            or (tuning / "best_checkpoint.json").exists()
-            or attempts == 0
+        "required": required,
+        "observed": observed,
+        "complete": observed or not required,
+        "reason": reason,
+    }
+
+
+def _observability(
+    task: Path,
+    status: dict[str, Any],
+    arm: str,
+) -> dict[str, Any]:
+    tuning = task / "precision_tuning"
+    events, events_valid = _event_rows(task)
+    started_steps = {
+        str((event.get("action") or {}).get("step"))
+        for event in events
+        if event.get("type") == "action_started"
+    }
+    completed = [
+        event for event in events
+        if event.get("type") == "action_completed"
+    ]
+    completed_steps = {
+        str((event.get("action") or {}).get("step"))
+        for event in completed
+    }
+
+    diagnose_started = "diagnose_and_fix" in started_steps
+    validate_started = "validate" in started_steps
+    knowledge_started = "knowledge_search" in started_steps
+    forensics_started = "forensics" in started_steps
+    checkpoint_started = bool(
+        {"baseline_checkpoint", "checkpoint_and_rollback"} & started_steps
+    )
+    checkpoint_completed = [
+        event for event in completed
+        if str((event.get("action") or {}).get("step"))
+        in {"baseline_checkpoint", "checkpoint_and_rollback"}
+    ]
+    checkpoint_state_required = any(
+        (
+            ((event.get("result") or {}).get("checkpoint") or {}).get("success")
+            is True
+        )
+        for event in checkpoint_completed
+    )
+    rollback_events = [
+        event for event in completed
+        if str((event.get("action") or {}).get("step"))
+        == "checkpoint_and_rollback"
+        and (event.get("result") or {}).get("rolled_back") is True
+    ]
+
+    direction_observed = (
+        (tuning / "tuning_directions.json").is_file()
+        or bool(list(tuning.glob("diagnosis_summary_attempt_*.json")))
+    )
+    checkpoint_observed = (
+        (tuning / "history" / "current_best" / "metric.json").is_file()
+        and (tuning / "history" / "current_best" / "manifest.json").is_file()
+    )
+    checks = {
+        "status": _evidence_check(
+            required=True,
+            observed=(task / "debug_status.json").is_file(),
+            reason="terminal_artifact",
         ),
-        "rollback": (
-            bool(list(tuning.glob("*rollback*.json")))
-            or status.get("objective_success") is True
-            or attempts == 0
+        "events": _evidence_check(
+            required=True,
+            observed=events_valid,
+            reason="event_source",
         ),
+        "run_summary": _evidence_check(
+            required=True,
+            observed=(task / "run_summary.json").is_file(),
+            reason="terminal_artifact",
+        ),
+        "claude_results": _evidence_check(
+            required=diagnose_started,
+            observed=bool(claude_result_paths(task)),
+            reason=(
+                "diagnose_action_started"
+                if diagnose_started else "diagnose_action_not_triggered"
+            ),
+        ),
+        "probe": _evidence_check(
+            required=(
+                diagnose_started and arm not in DIAGNOSTICS_DISABLED_ARMS
+            ),
+            observed=bool(list(tuning.glob("probe_policy_attempt*.json")))
+                          or bool(list(tuning.glob(
+                              "probe_source_audit_attempt*.json"))),
+            reason=(
+                "disabled_by_arm"
+                if arm in DIAGNOSTICS_DISABLED_ARMS
+                else (
+                    "diagnose_action_started"
+                    if diagnose_started else "diagnose_action_not_triggered"
+                )
+            ),
+        ),
+        "direction": _evidence_check(
+            required=validate_started,
+            observed=direction_observed,
+            reason=(
+                "validate_action_started"
+                if validate_started else "validate_action_not_triggered"
+            ),
+        ),
+        "kb": _evidence_check(
+            required=(
+                (knowledge_started or diagnose_started)
+                and arm not in KB_DISABLED_ARMS
+            ),
+            observed=(
+                (tuning / "knowledge_search_log.json").is_file()
+                or (tuning / "knowledge_usage_trace.json").is_file()
+            ),
+            reason=(
+                "disabled_by_arm"
+                if arm in KB_DISABLED_ARMS
+                else (
+                    "knowledge_or_diagnose_action_started"
+                    if knowledge_started or diagnose_started
+                    else "knowledge_action_not_triggered"
+                )
+            ),
+        ),
+        "forensics": _evidence_check(
+            required=(
+                forensics_started and arm not in DIAGNOSTICS_DISABLED_ARMS
+            ),
+            observed=bool(list(tuning.glob("forensics_report_*.json"))),
+            reason=(
+                "disabled_by_arm"
+                if arm in DIAGNOSTICS_DISABLED_ARMS
+                else (
+                    "forensics_action_started"
+                    if forensics_started else "forensics_action_not_triggered"
+                )
+            ),
+        ),
+        "checkpoint": _evidence_check(
+            required=(
+                checkpoint_started and arm not in RECOVERY_DISABLED_ARMS
+            ),
+            observed=(
+                bool(checkpoint_completed)
+                and (checkpoint_observed or not checkpoint_state_required)
+            ),
+            reason=(
+                "disabled_by_arm"
+                if arm in RECOVERY_DISABLED_ARMS
+                else (
+                    "checkpoint_action_started"
+                    if checkpoint_started else "checkpoint_action_not_triggered"
+                )
+            ),
+        ),
+        "rollback": _evidence_check(
+            required=bool(rollback_events),
+            observed=bool(rollback_events),
+            reason=(
+                "rollback_recorded_in_action_result"
+                if rollback_events else "rollback_not_triggered"
+            ),
+        ),
+    }
+    return {
+        "complete": all(check["complete"] for check in checks.values()),
+        "checks": checks,
+        "started_actions": sorted(started_steps - {"None"}),
+        "completed_actions": sorted(completed_steps - {"None"}),
     }
 
 
@@ -210,6 +390,7 @@ def task_row(
         arm in EVIDENCE_CAPABLE_ARMS
         and objective and reportable and anti and ast and full_pass
     )
+    observability = _observability(task, status, arm)
     row: dict[str, Any] = {
         "arm": arm,
         "task": rel,
@@ -231,7 +412,8 @@ def task_row(
         "posthoc_build_pass": (
             (posthoc_row.get("build") or {}).get("passed") is True),
         "notes": str(status.get("notes") or ""),
-        "observability": _observability(task, status),
+        "observability_complete": observability["complete"],
+        "observability": observability,
         **cost,
     }
     if isinstance(run_summary, dict):
@@ -642,6 +824,7 @@ def main() -> int:
         "cache_read_tokens", "total_tokens", "cost_usd",
         "long_failure", "long_failure_components", "models",
         "provider_errors", "notes",
+        "observability_complete",
     ]
     _write_csv(args.output / "per_task.csv", rows, per_task_fields)
     _write_csv(
