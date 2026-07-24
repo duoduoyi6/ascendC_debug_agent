@@ -175,10 +175,22 @@ def prepare_isolated_task(
     full_digest = _case_set_digest(full_cases)
     active_work = work_dir / _active_name(full_cases)
     active_work.write_bytes(full_cases.read_bytes())
+    active_aliases: list[str] = []
+    source_model_json = target.source / "model.json"
+    if (
+        source_model_json.is_file()
+        and active_source.is_file()
+        and source_model_json != active_source
+        and _count_cases(source_model_json) == active_count
+        and _case_set_digest(source_model_json) == active_digest
+    ):
+        (work_dir / "model.json").write_bytes(full_cases.read_bytes())
+        active_aliases.append("model.json")
     return {
         "available": True,
         "work_dir": str(work_dir),
         "active_json": active_work.name,
+        "active_json_aliases": active_aliases,
         "active_cases": active_count,
         "active_case_set_sha256": active_digest,
         "full_json_source": str(full_cases),
@@ -242,6 +254,13 @@ def _classify_verify(proc: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     }
 
 
+def _classify_build(proc: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+    return {
+        "return_code": proc.returncode,
+        "passed": proc.returncode == 0,
+    }
+
+
 def _evaluate_one(
     *,
     target: Target,
@@ -273,18 +292,42 @@ def _evaluate_one(
         result_path.write_text(json.dumps(row, ensure_ascii=False, indent=2))
         return row
 
-    verify = _docker_run(
+    build = _docker_run(
         container=container,
         npu=npu,
         repo_root=repo_root,
         task_dir=work_dir,
         tilelang_env=tilelang_env,
         timeout=timeout,
-        command="python3 utils/verification_ascendc.py",
+        command="python3 utils/build_ascendc.py {task} --clean",
     )
-    (logs_dir / "verify.stdout").write_text(verify.stdout, encoding="utf-8")
-    (logs_dir / "verify.stderr").write_text(verify.stderr, encoding="utf-8")
-    verify_result = _classify_verify(verify)
+    (logs_dir / "build.stdout").write_text(build.stdout, encoding="utf-8")
+    (logs_dir / "build.stderr").write_text(build.stderr, encoding="utf-8")
+    build_result = _classify_build(build)
+
+    if build_result["passed"]:
+        verify = _docker_run(
+            container=container,
+            npu=npu,
+            repo_root=repo_root,
+            task_dir=work_dir,
+            tilelang_env=tilelang_env,
+            timeout=timeout,
+            command="python3 utils/verification_ascendc.py",
+        )
+        (logs_dir / "verify.stdout").write_text(verify.stdout, encoding="utf-8")
+        (logs_dir / "verify.stderr").write_text(verify.stderr, encoding="utf-8")
+        verify_result = _classify_verify(verify)
+    else:
+        verify_result = {
+            "return_code": None,
+            "status": "SKIPPED",
+            "passed_outputs": 0,
+            "total_outputs": 0,
+            "match_rate": None,
+            "objective_passed": False,
+            "skipped_reason": "clean_build_failed",
+        }
 
     anticheat = _docker_run(
         container=container,
@@ -313,10 +356,12 @@ def _evaluate_one(
 
     row.update({
         "run_state": "completed",
+        "build": build_result,
         "verification": verify_result,
         "anticheat": anticheat_payload,
         "posthoc_clean_success": (
-            verify_result["objective_passed"]
+            build_result["passed"]
+            and verify_result["objective_passed"]
             and anticheat_payload.get("verdict") == "CLEAN"
         ),
     })
@@ -329,6 +374,9 @@ def _write_summary(output: Path, rows: list[dict[str, Any]]) -> None:
         "generated_at": _now(),
         "task_count": len(rows),
         "completed": sum(row.get("run_state") == "completed" for row in rows),
+        "build_success": sum(
+            bool((row.get("build") or {}).get("passed")) for row in rows
+        ),
         "objective_success": sum(
             bool((row.get("verification") or {}).get("objective_passed"))
             for row in rows
@@ -346,7 +394,7 @@ def _write_summary(output: Path, rows: list[dict[str, Any]]) -> None:
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     with (output / "posthoc_results.csv").open("w", newline="", encoding="utf-8") as stream:
         fields = [
-            "task", "npu", "run_state", "objective_passed",
+            "task", "npu", "run_state", "build_passed", "objective_passed",
             "anticheat_verdict", "posthoc_clean_success",
             "full_cases", "coverage_equivalent",
         ]
@@ -357,6 +405,7 @@ def _write_summary(output: Path, rows: list[dict[str, Any]]) -> None:
                 "task": row["task"],
                 "npu": row["npu"],
                 "run_state": row.get("run_state"),
+                "build_passed": (row.get("build") or {}).get("passed"),
                 "objective_passed": (
                     row.get("verification") or {}).get("objective_passed"),
                 "anticheat_verdict": (

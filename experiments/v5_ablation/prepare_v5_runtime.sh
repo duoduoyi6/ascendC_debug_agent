@@ -62,6 +62,12 @@ python3 "$ROOT/utils/smoke_v5_ablation_profiles.py" \
   --output "$CONTROL/ablation_profile_smoke.json" \
   --kb-path "$KB"
 
+python3 "$ROOT/utils/verify_v5_arm_contracts.py" \
+  --repo-root "$ROOT" \
+  --control "$CONTROL" \
+  --kb "$KB" \
+  --report "$CONTROL/arm_contract_verification.json"
+
 if [[ -e "$CONTROL/dataset_preflight" ]]; then
   echo "refuse existing dataset preflight: $CONTROL/dataset_preflight" >&2
   exit 2

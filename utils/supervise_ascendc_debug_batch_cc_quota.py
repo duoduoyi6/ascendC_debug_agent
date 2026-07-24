@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.error
@@ -571,6 +572,21 @@ def write_manifest(path: Path, args: argparse.Namespace, providers: list[Provide
             "usage_query_enabled": not args.disable_usage_query,
             "mixed_provider_enabled": not args.disable_mixed_provider,
             "mixed_provider_min_remaining": args.mixed_provider_min_remaining,
+            "model": (
+                providers[0].model
+                if len({provider.model for provider in providers}) == 1
+                else sorted({provider.model for provider in providers})
+            ),
+            "provider_assignment_mode": (
+                "mixed_provider"
+                if not args.disable_mixed_provider
+                else "fixed_single_provider"
+            ),
+            "provider_env_storage": (
+                "ephemeral_secret_dir"
+                if args.provider_env_base
+                else "experiment_output"
+            ),
             "providers": [provider.name for provider in providers],
             "targets": [{"rel": target.rel, "source": str(target.source), "task": str(target.task)}
                         for target in targets],
@@ -605,6 +621,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mixed-provider-min-remaining", type=float, default=10.0)
     parser.add_argument("--disable-mixed-provider", action="store_true")
     parser.add_argument("--disable-usage-query", action="store_true")
+    parser.add_argument(
+        "--provider-env-base",
+        type=Path,
+        default=None,
+        help="Create provider env files in a temporary 0700 directory here.",
+    )
     parser.add_argument("--reset-all", action="store_true")
     return parser.parse_args()
 
@@ -616,7 +638,17 @@ def main() -> int:
     state_path = args.output / "quota_batch_cc_state.json"
     tasks_root = args.output / "tasks"
     cycles_root = args.output / "cycles"
-    env_root = args.output / ".provider_env"
+    ephemeral_env_root = args.provider_env_base is not None
+    if args.provider_env_base is not None:
+        args.provider_env_base.mkdir(parents=True, exist_ok=True)
+        args.provider_env_base.chmod(0o700)
+        env_root = Path(tempfile.mkdtemp(
+            prefix="ascendc-provider-",
+            dir=args.provider_env_base,
+        ))
+        env_root.chmod(0o700)
+    else:
+        env_root = args.output / ".provider_env"
     elapsed_path = args.output / "task_final_elapsed.tsv"
 
     providers = load_providers(args.key_config)
@@ -762,6 +794,8 @@ def main() -> int:
             usage_stop.set()
         if usage_thread is not None:
             usage_thread.join(timeout=max(1, min(args.usage_timeout + 1, 15)))
+        if ephemeral_env_root:
+            remove_tree(env_root)
 
 
 if __name__ == "__main__":

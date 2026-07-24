@@ -104,6 +104,11 @@ def main() -> int:
     parser.add_argument("--control", type=Path, required=True)
     parser.add_argument("--formal-output", type=Path, required=True)
     parser.add_argument("--report", type=Path, required=True)
+    parser.add_argument(
+        "--allow-existing-formal-output",
+        action="store_true",
+        help="Allow an existing output when checking between formal arms.",
+    )
     args = parser.parse_args()
 
     code_expected = _load_files(args.control / "code_snapshot.sha256.json")
@@ -149,8 +154,10 @@ def main() -> int:
         "mode": oct(secret_mode) if secret_mode is not None else None,
     }
     checks["formal_output_absent"] = {
-        "passed": not args.formal_output.exists(),
+        "passed": args.allow_existing_formal_output or not args.formal_output.exists(),
         "path": str(args.formal_output),
+        "exists": args.formal_output.exists(),
+        "required_absent": not args.allow_existing_formal_output,
     }
     passed = all(check["passed"] for check in checks.values())
     payload = {

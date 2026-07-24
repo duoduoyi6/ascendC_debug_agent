@@ -51,7 +51,7 @@ PROFILE_ABLATIONS = {
     "no_fulleval": ["full_eval"],
     "baseline": [
         "forensics", "probe", "kb", "loop_guard", "gate_a",
-        "full_eval", "recovery",
+        "full_eval", "recovery", "anticheat_detect_only",
     ],
 }
 
@@ -375,6 +375,7 @@ def main() -> int:
         "declared_parallel_limit": 5,
         "usage_query_enabled": False,
         "mixed_provider_enabled": False,
+        "provider_env_storage": "ephemeral_secret_dir",
         "max_attempts": 5,
         "max_turns": 240,
         "soft_task_turns": 480,
@@ -382,7 +383,6 @@ def main() -> int:
         "timeout": 43200,
         "agent": "constructive",
         "entry_failure_type": "precision_failed",
-        "kb_read_only": True,
         "posthoc_observer_isolated": True,
         "primary_cost_scope": "final_valid_cycle_only",
         "failed_cycles_excluded_from_primary_cost": True,
@@ -396,8 +396,9 @@ def main() -> int:
             {
                 "schema_version": 1,
                 "arm": arm,
-                "ablated_capabilities": PROFILE_ABLATIONS[arm],
+                "ablated_capabilities": sorted(PROFILE_ABLATIONS[arm]),
                 "kb_path": str(args.kb) if kb_enabled else None,
+                "kb_read_only": kb_enabled,
                 **common,
             },
         )

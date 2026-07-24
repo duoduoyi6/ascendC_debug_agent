@@ -7,6 +7,7 @@ import json
 import sys
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
 
 
@@ -107,6 +108,52 @@ class SupervisorConfigurationTests(unittest.TestCase):
         self.assertIn('parser.add_argument("--kb-read-only", action="store_true")', self.text)
         self.assertIn('"kb_read_only": args.kb_read_only', self.text)
         self.assertIn('cmd.append("--kb-read-only")', self.text)
+
+    def test_manifest_redacts_ephemeral_provider_env_path(self) -> None:
+        supervisor = _load_supervisor()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = Namespace(
+                source_dirs_file=root / "sources.txt",
+                key_config=root / "secret.json",
+                output=root / "out",
+                workdir=root,
+                containers="v5_cann",
+                npus="3",
+                timeout=1,
+                max_attempts=5,
+                agent_timeout=None,
+                max_turns="240",
+                soft_task_turns=480,
+                max_task_turns=600,
+                ablate_profile="full",
+                kb_path=None,
+                kb_read_only=False,
+                max_cycles=0,
+                agent="constructive",
+                entry_failure_type="precision_failed",
+                usage_poll_interval=300,
+                disable_usage_query=True,
+                disable_mixed_provider=True,
+                mixed_provider_min_remaining=10.0,
+                provider_env_base=root / ".secrets" / "runtime",
+            )
+            provider = supervisor.Provider(
+                name="test", api_key="super-secret-key",
+                base_url="https://example.invalid",
+                model="model",
+            )
+            target = supervisor.Target(
+                source=root / "source", task=root / "task")
+            manifest = root / "manifest.json"
+
+            supervisor.write_manifest(manifest, args, [provider], [target])
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+
+            self.assertEqual(
+                payload["provider_env_storage"], "ephemeral_secret_dir")
+            self.assertNotIn("runtime", json.dumps(payload))
+            self.assertNotIn("super-secret-key", json.dumps(payload))
 
 
 if __name__ == "__main__":

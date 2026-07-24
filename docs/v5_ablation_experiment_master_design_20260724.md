@@ -223,6 +223,10 @@ full-eval 覆盖范围按规范化 case 内容而非只按行数判断：
     的 stale build/runtime 产物，不回写 treatment task；
 11. 单 provider、关闭 usage query、五并发和七个 arm 的冻结 manifest 与 launcher
     参数一致。
+12. 每个 arm 启动前和 post-hoc 完成后重新校验 code/source/KB fingerprint；发生
+    漂移立即停止，不进入下一 arm。
+13. provider env 只落在 `.secrets` 下的临时 `0700` 目录，supervisor 退出时删除，
+    不写入 arm output。
 
 任一项失败都只记录 blocker，不启动正式实验。
 
@@ -277,8 +281,10 @@ final-valid-cycle 主成本。
 - `experiment_control/kb_snapshot.sha256.json`
 - `experiment_control/environment_snapshot.json`
 - `experiment_control/ablation_profile_smoke.json`
+- `experiment_control/arm_contract_verification.json`
 - `experiment_control/dataset_preflight_results.json`
 - `experiment_control/launch_fingerprint_verification.json`
+- 每个 arm 前后的 `experiment_control/fingerprints/*.json`
 - 七个 arm 的冻结 dry-run manifest
 
 完成阶段：
@@ -289,6 +295,9 @@ final-valid-cycle 主成本。
 - long-failure root-cause table；
 - arm compliance/evidence completeness matrix；
 - 可复算脚本、原始派生数据和最终 Markdown 报告。
+- `utils/analyze_v5_ablation.py` 自动生成的 `v5_analysis.json`、逐任务 CSV、配对
+  成功检验、共同成功集合成本、长失败、失败 cycle、arm compliance 和 Markdown
+  报告。
 
 ## 11. 当前状态
 

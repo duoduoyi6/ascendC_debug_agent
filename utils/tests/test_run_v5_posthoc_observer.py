@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "run_v5_posthoc_observer.py"
@@ -35,6 +37,8 @@ class V5PosthocIsolationTests(unittest.TestCase):
                 "# original candidate\n", encoding="utf-8")
             (source / "1_Foo.json").write_text(
                 '{"inputs":[1]}\n{"inputs":[2]}\n', encoding="utf-8")
+            (source / "model.json").write_text(
+                '{"inputs":[1]}\n{"inputs":[2]}\n', encoding="utf-8")
             (source / "1_Foo.json.bak").write_text(
                 '{"inputs":[1]}\n{"inputs":[99]}\n', encoding="utf-8")
             (treatment / "model.py").write_text("# treatment\n", encoding="utf-8")
@@ -59,6 +63,11 @@ class V5PosthocIsolationTests(unittest.TestCase):
                 (work / "1_Foo.json").read_text(encoding="utf-8"),
                 (source / "1_Foo.json.bak").read_text(encoding="utf-8"),
             )
+            self.assertEqual(
+                (work / "model.json").read_text(encoding="utf-8"),
+                (source / "1_Foo.json.bak").read_text(encoding="utf-8"),
+            )
+            self.assertEqual(result["active_json_aliases"], ["model.json"])
             self.assertEqual(
                 (treatment / "1_Foo.json").read_text(encoding="utf-8"),
                 '{"inputs":[1]}\n',
@@ -94,6 +103,52 @@ class V5PosthocIsolationTests(unittest.TestCase):
                 module._case_set_digest(first),
                 module._case_set_digest(second),
             )
+
+    def test_evaluator_clean_builds_before_verify(self) -> None:
+        module = _load()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = module.Target(
+                rel="level1/001_Foo",
+                treatment=root / "treatment",
+                source=root / "source",
+            )
+            commands: list[str] = []
+
+            def fake_docker_run(**kwargs):
+                commands.append(kwargs["command"])
+                if "build_ascendc.py" in kwargs["command"]:
+                    return subprocess.CompletedProcess([], 1, "build out", "build err")
+                return subprocess.CompletedProcess(
+                    [], 0, '{"verdict":"CLEAN"}', "")
+
+            with (
+                mock.patch.object(
+                    module,
+                    "prepare_isolated_task",
+                    return_value={"available": True},
+                ),
+                mock.patch.object(
+                    module, "_docker_run", side_effect=fake_docker_run),
+            ):
+                row = module._evaluate_one(
+                    target=target,
+                    output=root / "posthoc",
+                    repo_root=root,
+                    container="v5_cann",
+                    npu="3",
+                    tilelang_env="/env.sh",
+                    timeout=30,
+                )
+
+            self.assertEqual(commands[0], "python3 utils/build_ascendc.py {task} --clean")
+            self.assertFalse(any(
+                command == "python3 utils/verification_ascendc.py"
+                for command in commands
+            ))
+            self.assertFalse(row["posthoc_clean_success"])
+            self.assertEqual(
+                row["verification"]["skipped_reason"], "clean_build_failed")
 
 
 if __name__ == "__main__":

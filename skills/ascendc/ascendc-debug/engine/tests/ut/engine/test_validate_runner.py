@@ -317,6 +317,32 @@ class TestRunFullEval(unittest.TestCase):
         self.assertTrue(
             (self.task_dir / "precision_tuning" / ".full_eval_state.json").exists())
 
+    def test_full_eval_swaps_and_restores_model_json_alias(self) -> None:
+        model_json = self.task_dir / "model.json"
+        model_json.write_bytes(self.light.read_bytes())
+        before = model_json.read_bytes()
+        seen: dict[str, bytes] = {}
+
+        def fake_run_logged(
+            _cmd, *, cwd, env, stdout_path, stderr_path, title, timeout
+        ):
+            seen["active"] = self.light.read_bytes()
+            seen["model"] = model_json.read_bytes()
+            Path(stdout_path).write_text(
+                "case[0]: output: matched\n", encoding="utf-8")
+            return 0
+
+        with mock.patch.object(
+            validate_runner, "_run_logged", side_effect=fake_run_logged
+        ):
+            fe = self._call()
+
+        self.assertEqual(seen["active"], self.full.read_bytes())
+        self.assertEqual(seen["model"], self.full.read_bytes())
+        self.assertEqual(self.light.read_bytes(), before)
+        self.assertEqual(model_json.read_bytes(), before)
+        self.assertEqual(fe["active_json_aliases"], ["model.json"])
+
     def test_full_eval_partial_fail_restores_json(self) -> None:
         before = self.light.read_bytes()
         cases = "case[0]: output: matched\ncase[1]: output: matched\n" \

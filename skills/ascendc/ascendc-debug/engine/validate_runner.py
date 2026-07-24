@@ -438,6 +438,16 @@ def _run_full_eval(
     active_digest = (
         _normalized_case_set_digest(active_path) if active_path.exists() else None
     )
+    active_aliases: list[Path] = []
+    model_json = task_dir / "model.json"
+    if (
+        model_json.is_file()
+        and model_json != active_path
+        and active_path.is_file()
+        and _count_nonempty_lines(model_json) == cur_lines
+        and _normalized_case_set_digest(model_json) == active_digest
+    ):
+        active_aliases.append(model_json)
     full_digest = _normalized_case_set_digest(full_json)
     if full_lines == cur_lines and active_digest == full_digest:
         result = {
@@ -445,6 +455,7 @@ def _run_full_eval(
             "coverage_equivalent": True,
             "equivalence_basis": "normalized_case_set_sha256",
             "active_json": active_path.name,
+            "active_json_aliases": [path.name for path in active_aliases],
             "active_json_cases": cur_lines,
             "active_case_set_sha256": active_digest,
             "full_json_source": full_json.name,
@@ -473,10 +484,16 @@ def _run_full_eval(
     stdout_path.write_text("", encoding="utf-8")
     stderr_path.write_text("", encoding="utf-8")
 
-    original_bytes = active_path.read_bytes() if active_path.exists() else None
+    active_targets = [active_path, *active_aliases]
+    original_bytes = {
+        path: path.read_bytes() if path.exists() else None
+        for path in active_targets
+    }
     try:
-        backup_path.write_bytes(original_bytes if original_bytes is not None else b"")
-        active_path.write_text(full_json.read_text(errors="replace"), encoding="utf-8")
+        backup_path.write_bytes(original_bytes[active_path] or b"")
+        full_bytes = full_json.read_bytes()
+        for path in active_targets:
+            path.write_bytes(full_bytes)
         verify_cmd = [
             sys.executable,
             str(repo_root / "utils" / "verification_ascendc.py"),
@@ -492,9 +509,12 @@ def _run_full_eval(
             timeout=timeout,
         )
     finally:
-        if original_bytes is not None:
+        for path, content in original_bytes.items():
             try:
-                active_path.write_bytes(original_bytes)
+                if content is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.write_bytes(content)
             except OSError:
                 pass
         try:
@@ -512,6 +532,7 @@ def _run_full_eval(
         "coverage_equivalent": False,
         "equivalence_basis": "normalized_case_set_sha256",
         "active_json": active_path.name,
+        "active_json_aliases": [path.name for path in active_aliases],
         "active_json_cases": cur_lines,
         "active_case_set_sha256": active_digest,
         "full_json_source": full_json.name,

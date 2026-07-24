@@ -29,6 +29,7 @@ for required in \
   "$CONTROL/provider_config_redacted.json" \
   "$CONTROL/qwen38max.smoke.meta.json" \
   "$CONTROL/ablation_profile_smoke.json" \
+  "$CONTROL/arm_contract_verification.json" \
   "$CONTROL/dataset_preflight/dataset_preflight_results.json" \
   "$CONTROL/dataset_amendments.json"; do
   if [[ ! -s "$required" ]]; then
@@ -44,6 +45,12 @@ for arm in "${ARMS[@]}"; do
     exit 2
   fi
 done
+
+python3 "$ROOT/utils/verify_v5_arm_contracts.py" \
+  --repo-root "$ROOT" \
+  --control "$CONTROL" \
+  --kb "$INITIAL_KB" \
+  --report "$CONTROL/launch_arm_contract_verification.json"
 
 if [[ -e "$OUTPUT" ]]; then
   echo "refuse existing output: $OUTPUT" >&2
@@ -74,6 +81,7 @@ python3 "$ROOT/utils/verify_v5_frozen_inputs.py" \
   --report "$CONTROL/launch_fingerprint_verification.json"
 
 mkdir -p "$OUTPUT/experiment_control"
+mkdir -p "$OUTPUT/experiment_control/fingerprints"
 cp -a "$CONTROL/code_snapshot.sha256.json" "$OUTPUT/experiment_control/"
 cp -a "$CONTROL/dataset_manifest.sha256.json" "$OUTPUT/experiment_control/"
 cp -a "$CONTROL/source_snapshot_effective.sha256.json" "$OUTPUT/experiment_control/"
@@ -83,6 +91,9 @@ cp -a "$CONTROL/provider_config_redacted.json" "$OUTPUT/experiment_control/"
 cp -a "$CONTROL/environment_snapshot.json" "$OUTPUT/experiment_control/"
 cp -a "$CONTROL/qwen38max.smoke.meta.json" "$OUTPUT/experiment_control/"
 cp -a "$CONTROL/ablation_profile_smoke.json" "$OUTPUT/experiment_control/"
+cp -a "$CONTROL/arm_contract_verification.json" "$OUTPUT/experiment_control/"
+cp -a "$CONTROL/launch_arm_contract_verification.json" \
+  "$OUTPUT/experiment_control/"
 cp -a "$CONTROL/dataset_preflight/dataset_preflight_results.json" \
   "$OUTPUT/experiment_control/"
 cp -a "$CONTROL/dataset_amendments.json" "$OUTPUT/experiment_control/"
@@ -92,6 +103,15 @@ cp -a "$SOURCE_LIST" "$OUTPUT/experiment_control/"
 printf '%s\n' "${ARMS[@]}" > "$OUTPUT/experiment_control/arm_order.txt"
 
 for arm in "${ARMS[@]}"; do
+  python3 "$ROOT/utils/verify_v5_frozen_inputs.py" \
+    --root "$ROOT" \
+    --dataset "$DATASET" \
+    --kb "$INITIAL_KB" \
+    --secret "$KEY_CONFIG" \
+    --control "$CONTROL" \
+    --formal-output "$OUTPUT" \
+    --allow-existing-formal-output \
+    --report "$OUTPUT/experiment_control/fingerprints/${arm}_before.json"
   arm_output="$OUTPUT/arm_$arm"
   kb_args=()
   case "$arm" in
@@ -116,6 +136,7 @@ for arm in "${ARMS[@]}"; do
     --ablate-profile "$arm" \
     --tilelang-env /usr/local/Ascend/ascend-toolkit/set_env.sh \
     --claude-bin "$CLAUDE_WRAPPER" \
+    --provider-env-base "$ROOT/.secrets/runtime_provider_env" \
     --disable-usage-query \
     --disable-mixed-provider \
     "${kb_args[@]}" \
@@ -131,7 +152,21 @@ for arm in "${ARMS[@]}"; do
     --tilelang-env /usr/local/Ascend/ascend-toolkit/set_env.sh \
     --timeout 43200 \
     --expected-tasks 27
+  python3 "$ROOT/utils/verify_v5_frozen_inputs.py" \
+    --root "$ROOT" \
+    --dataset "$DATASET" \
+    --kb "$INITIAL_KB" \
+    --secret "$KEY_CONFIG" \
+    --control "$CONTROL" \
+    --formal-output "$OUTPUT" \
+    --allow-existing-formal-output \
+    --report "$OUTPUT/experiment_control/fingerprints/${arm}_after.json"
   echo "[$(date --iso-8601=seconds)] posthoc completed arm=$arm"
 done
+
+python3 "$ROOT/utils/analyze_v5_ablation.py" \
+  --experiment-root "$OUTPUT" \
+  --output "$OUTPUT/analysis" \
+  --expected-tasks 27
 
 echo "V5 formal ablation completed."
