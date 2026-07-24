@@ -21,6 +21,17 @@ def _load():
 
 
 class V5DatasetPreflightTests(unittest.TestCase):
+    def test_empty_mountpoint_is_allowed_but_nonempty_output_is_refused(
+            self) -> None:
+        module = _load()
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "preflight"
+            output.mkdir()
+            module.prepare_output_dir(output)
+            (output / "existing.json").write_text("{}\n")
+            with self.assertRaises(SystemExit):
+                module.prepare_output_dir(output)
+
     def test_prepare_is_deep_copy_and_removes_runtime(self) -> None:
         module = _load()
         with tempfile.TemporaryDirectory() as tmp:

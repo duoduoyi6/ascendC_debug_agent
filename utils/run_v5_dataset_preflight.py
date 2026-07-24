@@ -54,6 +54,14 @@ def _ignore_copy(_directory: str, names: list[str]) -> set[str]:
     }
 
 
+def prepare_output_dir(output: Path) -> None:
+    if output.exists():
+        if not output.is_dir() or any(output.iterdir()):
+            raise SystemExit(f"refuse existing preflight output: {output}")
+    else:
+        output.mkdir(parents=True)
+
+
 def prepare_isolated_task(target: Target, work_dir: Path) -> None:
     if work_dir.exists():
         shutil.rmtree(work_dir)
@@ -316,8 +324,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if args.output.exists():
-        raise SystemExit(f"refuse existing preflight output: {args.output}")
+    prepare_output_dir(args.output)
     targets = [
         Target(
             rel=f"{path.parent.name}/{path.name}",
@@ -333,7 +340,6 @@ def main() -> int:
     if not npus:
         raise SystemExit("at least one NPU is required")
 
-    args.output.mkdir(parents=True)
     partitions = [
         targets[index::len(npus)]
         for index in range(len(npus))
