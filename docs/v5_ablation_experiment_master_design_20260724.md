@@ -76,6 +76,10 @@ round-robin 方式实际覆盖 NPU 3、4、5、6、7。只有 `build_failed`、
 `timeout`、`precision_failed` 五种可调试初始失败可纳入；验证成功、分类器错误和
 基础设施不可达均视为 preflight blocker。
 
+若单次 preflight 明确出现 `507015` 或 `NPU_AICORE_EXCEPTION`，最多追加两次
+clean-build 复测并完整归档瞬态日志；首个非基础设施结果作为正式初始分类。若三次
+均为同类异常，则仍保留 `runtime_error`，不得手工改写为精度失败。
+
 排除条件只允许是数据或基础设施不可运行，不能因为算子困难而排除。所有排除必须在
 启动前列入 `dataset_audit.json`，给出原始证据路径。
 

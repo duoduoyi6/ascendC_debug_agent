@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "run_v5_dataset_preflight.py"
@@ -52,6 +53,79 @@ class V5DatasetPreflightTests(unittest.TestCase):
                 "timeout", "precision_failed",
             },
         )
+
+    def test_507015_is_rechecked_and_stable_precision_result_wins(self) -> None:
+        module = _load()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = module.Target(
+                rel="level3/004_MatmulTransA",
+                source=root / "source",
+            )
+            transient = {
+                "task": target.rel,
+                "failure_type": "runtime_error",
+                "status": {
+                    "exit_signal": "NPU_AICORE_EXCEPTION",
+                    "stderr_tail": "runtime result = 507015",
+                },
+            }
+            stable = {
+                "task": target.rel,
+                "failure_type": "precision_failed",
+                "preflight_passed": True,
+                "status": {"exit_signal": None},
+            }
+            with mock.patch.object(
+                module, "evaluate_one", side_effect=[transient, stable]
+            ) as evaluate:
+                row = module.evaluate_with_transient_rechecks(
+                    target=target,
+                    output=root / "preflight",
+                    repo_root=root,
+                    container="v5_cann",
+                    npu="6",
+                    tilelang_env="/env.sh",
+                    timeout=30,
+                    transient_rechecks=2,
+                )
+
+            self.assertEqual(evaluate.call_count, 2)
+            self.assertEqual(row["failure_type"], "precision_failed")
+            self.assertTrue(row["stable_result_after_transient_recheck"])
+            self.assertEqual(
+                len(row["transient_infrastructure_rechecks"]), 1)
+            self.assertTrue(
+                (root / "preflight" / "transient_rechecks" / target.rel
+                 / "attempt_0" / "result.json").is_file()
+            )
+
+    def test_repeated_507015_remains_runtime_error(self) -> None:
+        module = _load()
+        transient = {
+            "task": "level3/004_MatmulTransA",
+            "failure_type": "runtime_error",
+            "status": {"stderr_tail": "507015"},
+        }
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            module, "evaluate_one", side_effect=[transient] * 3
+        ):
+            row = module.evaluate_with_transient_rechecks(
+                target=module.Target(
+                    rel="level3/004_MatmulTransA",
+                    source=Path(tmp) / "source",
+                ),
+                output=Path(tmp) / "preflight",
+                repo_root=Path(tmp),
+                container="v5_cann",
+                npu="6",
+                tilelang_env="/env.sh",
+                timeout=30,
+                transient_rechecks=2,
+            )
+        self.assertEqual(row["failure_type"], "runtime_error")
+        self.assertFalse(row["stable_result_after_transient_recheck"])
+        self.assertEqual(len(row["transient_infrastructure_rechecks"]), 3)
 
 
 if __name__ == "__main__":

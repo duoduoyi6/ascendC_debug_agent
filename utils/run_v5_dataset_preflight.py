@@ -186,6 +186,89 @@ def evaluate_one(
     return row
 
 
+def _is_transient_npu_runtime(row: dict[str, Any]) -> bool:
+    if row.get("failure_type") != "runtime_error":
+        return False
+    status = row.get("status") or {}
+    evidence = "\n".join(
+        str(status.get(key) or "")
+        for key in ("exit_signal", "stdout_tail", "stderr_tail")
+    )
+    return (
+        "507015" in evidence
+        or "NPU_AICORE_EXCEPTION" in evidence
+    )
+
+
+def _archive_transient_attempt(
+    output: Path,
+    target: Target,
+    attempt: int,
+    row: dict[str, Any],
+) -> None:
+    archive = output / "transient_rechecks" / target.rel / f"attempt_{attempt}"
+    archive.mkdir(parents=True, exist_ok=True)
+    (archive / "result.json").write_text(
+        json.dumps(row, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    logs = output / "logs" / target.rel
+    if logs.is_dir():
+        shutil.copytree(logs, archive / "logs", dirs_exist_ok=True)
+
+
+def evaluate_with_transient_rechecks(
+    *,
+    target: Target,
+    output: Path,
+    repo_root: Path,
+    container: str,
+    npu: str,
+    tilelang_env: str,
+    timeout: int,
+    transient_rechecks: int,
+) -> dict[str, Any]:
+    transient_rows = []
+    row: dict[str, Any] = {}
+    for attempt in range(transient_rechecks + 1):
+        row = evaluate_one(
+            target=target,
+            output=output,
+            repo_root=repo_root,
+            container=container,
+            npu=npu,
+            tilelang_env=tilelang_env,
+            timeout=timeout,
+        )
+        if not _is_transient_npu_runtime(row):
+            break
+        _archive_transient_attempt(output, target, attempt, row)
+        transient_rows.append({
+            "attempt": attempt,
+            "failure_type": row.get("failure_type"),
+            "exit_signal": (row.get("status") or {}).get("exit_signal"),
+            "archive": str(
+                Path("transient_rechecks")
+                / target.rel
+                / f"attempt_{attempt}"
+            ),
+        })
+    if transient_rows:
+        row["transient_infrastructure_rechecks"] = transient_rows
+        row["stable_result_after_transient_recheck"] = (
+            not _is_transient_npu_runtime(row)
+        )
+        result_path = (
+            output / "results" / f"{target.rel.replace('/', '__')}.json"
+        )
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(
+            json.dumps(row, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    return row
+
+
 def _evaluate_partition(
     *,
     targets: list[Target],
@@ -195,9 +278,10 @@ def _evaluate_partition(
     npu: str,
     tilelang_env: str,
     timeout: int,
+    transient_rechecks: int,
 ) -> list[dict[str, Any]]:
     return [
-        evaluate_one(
+        evaluate_with_transient_rechecks(
             target=target,
             output=output,
             repo_root=repo_root,
@@ -205,6 +289,7 @@ def _evaluate_partition(
             npu=npu,
             tilelang_env=tilelang_env,
             timeout=timeout,
+            transient_rechecks=transient_rechecks,
         )
         for target in targets
     ]
@@ -223,6 +308,12 @@ def main() -> int:
     )
     parser.add_argument("--timeout", type=int, default=43200)
     parser.add_argument("--expected-tasks", type=int, default=27)
+    parser.add_argument(
+        "--transient-rechecks",
+        type=int,
+        default=2,
+        help="Extra clean-build retries for explicit 507015/AICore transients.",
+    )
     args = parser.parse_args()
 
     if args.output.exists():
@@ -259,6 +350,7 @@ def main() -> int:
                 npu=npus[index],
                 tilelang_env=args.tilelang_env,
                 timeout=args.timeout,
+                transient_rechecks=max(0, args.transient_rechecks),
             )
             for index, partition in enumerate(partitions)
             if partition
@@ -276,6 +368,10 @@ def main() -> int:
         "used_npus": used_npus,
         "required_npus": [int(npu) for npu in npus],
         "all_required_npus_exercised": used_npus == sorted(map(int, npus)),
+        "transient_recheck_task_count": sum(
+            bool(row.get("transient_infrastructure_rechecks"))
+            for row in rows
+        ),
         "failure_type_counts": {
             failure_type: sum(
                 row["failure_type"] == failure_type for row in rows)

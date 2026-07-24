@@ -33,6 +33,9 @@ fingerprints, verifies the actual model, proves all ablation profiles, runs the
 27-task clean-build and initial-validation preflight across NPU 3-7, and makes
 source/KB inputs read-only. Preparation also verifies that every frozen arm
 manifest matches the executable profile and launch constants.
+An explicit `507015`/`NPU_AICORE_EXCEPTION` preflight result is clean-built
+again at most twice; every transient attempt is archived, and a stable
+non-infrastructure result becomes the formal initial classification.
 
 During a formal run, code/source/KB fingerprints are checked before and after
 every arm. Provider environment files live in an ephemeral directory below
