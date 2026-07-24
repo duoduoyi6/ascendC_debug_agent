@@ -10,6 +10,8 @@ IMAGE=ascendc-v5-agent:20260724
 CONTAINER=v5_cann
 COMMIT_FILE="$CONTROL/V5_GIT_COMMIT.txt"
 
+mkdir -p "$ROOT/outputs" "$ROOT/.secrets"
+
 if [[ ! -s "$COMMIT_FILE" ]]; then
   echo "missing deployed commit identity: $COMMIT_FILE" >&2
   exit 2
@@ -18,11 +20,33 @@ fi
 docker build -f "$CONTROL/Dockerfile.v5-agent" -t "$IMAGE" "$CONTROL"
 
 if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
-  container_image="$(docker inspect -f '{{.Config.Image}}' "$CONTAINER")"
-  if [[ "$container_image" != "$IMAGE" ]]; then
-    echo "existing container uses unexpected image: $container_image" >&2
-    exit 2
-  fi
+    container_image="$(docker inspect -f '{{.Config.Image}}' "$CONTAINER")"
+    container_image_id="$(docker inspect -f '{{.Image}}' "$CONTAINER")"
+    expected_image_id="$(docker image inspect -f '{{.Id}}' "$IMAGE")"
+    root_rw="$(docker inspect -f \
+      "{{range .Mounts}}{{if eq .Destination \"$ROOT\"}}{{.RW}}{{end}}{{end}}" \
+      "$CONTAINER")"
+    outputs_rw="$(docker inspect -f \
+      "{{range .Mounts}}{{if eq .Destination \"$ROOT/outputs\"}}{{.RW}}{{end}}{{end}}" \
+      "$CONTAINER")"
+    dataset_rw="$(docker inspect -f \
+      "{{range .Mounts}}{{if eq .Destination \"$DATASET\"}}{{.RW}}{{end}}{{end}}" \
+      "$CONTAINER")"
+    control_rw="$(docker inspect -f \
+      "{{range .Mounts}}{{if eq .Destination \"$CONTROL\"}}{{.RW}}{{end}}{{end}}" \
+      "$CONTAINER")"
+    if [[ "$container_image" != "$IMAGE" \
+          || "$container_image_id" != "$expected_image_id" \
+          || "$root_rw" != "false" \
+          || "$outputs_rw" != "true" \
+          || "$dataset_rw" != "false" \
+          || "$control_rw" != "false" ]]; then
+      echo "recreating $CONTAINER to enforce the frozen mount/image contract"
+      docker rm -f "$CONTAINER" >/dev/null
+    fi
+fi
+
+if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
   docker start "$CONTAINER" >/dev/null
 else
   docker run -d \
@@ -32,9 +56,10 @@ else
     -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
     -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /home/wsx/AscendOpGenAgent:/home/wsx/AscendOpGenAgent \
+    -v "$ROOT:$ROOT:ro" \
+    -v "$ROOT/outputs:$ROOT/outputs" \
     -v "$DATASET:$DATASET:ro" \
-    -v "$CONTROL:$CONTROL" \
+    -v "$CONTROL:$CONTROL:ro" \
     "$IMAGE"
 fi
 

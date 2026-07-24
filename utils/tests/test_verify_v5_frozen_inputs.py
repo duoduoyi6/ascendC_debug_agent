@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import tempfile
 import unittest
@@ -69,6 +70,71 @@ class V5FrozenInputTests(unittest.TestCase):
 
             self.assertFalse(result["passed"])
             self.assertEqual(result["changed"], ["launch.sh"])
+
+    def test_preflight_checks_require_passed_content_not_just_files(self) -> None:
+        module = _load()
+        with tempfile.TemporaryDirectory() as tmp:
+            control = Path(tmp)
+            (control / "dataset_preflight").mkdir()
+            (control / "qwen38max.smoke.meta.json").write_text(json.dumps({
+                "passed": True,
+                "models": ["qwen3.8-max-preview"],
+                "context_windows": [1000000],
+            }))
+            (control / "ablation_profile_smoke.json").write_text(json.dumps({
+                "passed": True,
+                "profiles": [
+                    {"profile": arm} for arm in module.ARMS
+                ],
+            }))
+            (control / "arm_contract_verification.json").write_text(json.dumps({
+                "passed": True,
+                "arms": [
+                    {"arm": arm, "passed": True} for arm in module.ARMS
+                ],
+            }))
+            preflight_path = (
+                control / "dataset_preflight"
+                / "dataset_preflight_results.json"
+            )
+            preflight_path.write_text(json.dumps({
+                "passed": True,
+                "task_count": 27,
+                "passed_count": 27,
+                "used_npus": [3, 4, 5, 6, 7],
+                "required_npus": [3, 4, 5, 6, 7],
+                "all_required_npus_exercised": True,
+            }))
+            (control / "dataset_audit.json").write_text(json.dumps({
+                "task_count": 27,
+                "invalid_tasks": [],
+            }))
+
+            checks = module.preflight_artifact_checks(
+                control,
+                expected_tasks=27,
+                required_npus=[3, 4, 5, 6, 7],
+                expected_model="qwen3.8-max-preview",
+                expected_context=1000000,
+            )
+            self.assertTrue(all(row["passed"] for row in checks.values()))
+
+            preflight_path.write_text(json.dumps({
+                "passed": False,
+                "task_count": 27,
+                "passed_count": 26,
+                "used_npus": [3, 4, 5, 6, 7],
+                "required_npus": [3, 4, 5, 6, 7],
+                "all_required_npus_exercised": True,
+            }))
+            checks = module.preflight_artifact_checks(
+                control,
+                expected_tasks=27,
+                required_npus=[3, 4, 5, 6, 7],
+                expected_model="qwen3.8-max-preview",
+                expected_context=1000000,
+            )
+            self.assertFalse(checks["dataset_preflight_pass"]["passed"])
 
 
 if __name__ == "__main__":

@@ -47,6 +47,22 @@ for arm in "${ARMS[@]}"; do
   fi
 done
 
+check_mount_mode() {
+  local destination="$1" expected="$2" actual
+  actual="$(docker inspect -f \
+    "{{range .Mounts}}{{if eq .Destination \"$destination\"}}{{.RW}}{{end}}{{end}}" \
+    v5_cann)"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "invalid v5_cann mount: destination=$destination expected_rw=$expected actual=$actual" >&2
+    exit 2
+  fi
+}
+
+check_mount_mode "$ROOT" false
+check_mount_mode "$ROOT/outputs" true
+check_mount_mode "$DATASET" false
+check_mount_mode "$CONTROL" false
+
 python3 "$ROOT/utils/verify_v5_arm_contracts.py" \
   --repo-root "$ROOT" \
   --control "$CONTROL" \
@@ -153,7 +169,8 @@ for arm in "${ARMS[@]}"; do
     --npus "$NPUS" \
     --tilelang-env /usr/local/Ascend/ascend-toolkit/set_env.sh \
     --timeout 43200 \
-    --expected-tasks 27
+    --expected-tasks 27 \
+    --transient-rechecks 2
   python3 "$ROOT/utils/verify_v5_frozen_inputs.py" \
     --root "$ROOT" \
     --dataset "$DATASET" \
@@ -163,6 +180,19 @@ for arm in "${ARMS[@]}"; do
     --formal-output "$OUTPUT" \
     --allow-existing-formal-output \
     --report "$OUTPUT/experiment_control/fingerprints/${arm}_after.json"
+  closure_output="$OUTPUT/closure/arm_$arm"
+  mkdir -p "$closure_output"
+  python3 "$ROOT/utils/verify_v5_no_workers.py" \
+    --tasks-root "$arm_output/tasks" \
+    --report "$closure_output/host_workers.json"
+  docker exec v5_cann python3 "$ROOT/utils/verify_v5_no_workers.py" \
+    --tasks-root "$arm_output/tasks" \
+    --report "$closure_output/container_workers.json"
+  python3 "$ROOT/utils/analyze_v5_ablation.py" \
+    --experiment-root "$OUTPUT" \
+    --output "$closure_output" \
+    --expected-tasks 27 \
+    --verify-arm "$arm"
   echo "[$(date --iso-8601=seconds)] posthoc completed arm=$arm"
 done
 

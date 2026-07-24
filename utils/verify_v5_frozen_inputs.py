@@ -24,6 +24,15 @@ RUNTIME_NAMES = {
     "precision_tuning",
 }
 CODE_EXCLUDED_TOP_LEVEL = {".git", ".secrets", "outputs"}
+ARMS = (
+    "full",
+    "no_kb",
+    "no_diagnostic_evidence",
+    "no_loopguard",
+    "no_anticheat",
+    "no_fulleval",
+    "baseline",
+)
 
 
 def sha256(path: Path) -> str:
@@ -103,6 +112,91 @@ def _write_bits(path: Path) -> int:
     )
 
 
+def _load_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def preflight_artifact_checks(
+    control: Path,
+    *,
+    expected_tasks: int,
+    required_npus: list[int],
+    expected_model: str,
+    expected_context: int,
+) -> dict[str, dict[str, Any]]:
+    provider = _load_json(control / "qwen38max.smoke.meta.json")
+    profiles = _load_json(control / "ablation_profile_smoke.json")
+    contracts = _load_json(control / "arm_contract_verification.json")
+    preflight = _load_json(
+        control / "dataset_preflight" / "dataset_preflight_results.json")
+    audit = _load_json(control / "dataset_audit.json")
+    profile_names = [
+        row.get("profile")
+        for row in profiles.get("profiles", [])
+        if isinstance(row, dict)
+    ]
+    contract_names = [
+        row.get("arm")
+        for row in contracts.get("arms", [])
+        if isinstance(row, dict)
+    ]
+    return {
+        "provider_smoke_pass": {
+            "passed": (
+                provider.get("passed") is True
+                and provider.get("models") == [expected_model]
+                and provider.get("context_windows") == [expected_context]
+            ),
+            "models": provider.get("models"),
+            "context_windows": provider.get("context_windows"),
+        },
+        "profile_smoke_pass": {
+            "passed": (
+                profiles.get("passed") is True
+                and profile_names == list(ARMS)
+            ),
+            "profiles": profile_names,
+        },
+        "arm_contract_pass": {
+            "passed": (
+                contracts.get("passed") is True
+                and contract_names == list(ARMS)
+                and all(
+                    row.get("passed") is True
+                    for row in contracts.get("arms", [])
+                    if isinstance(row, dict)
+                )
+            ),
+            "arms": contract_names,
+        },
+        "dataset_preflight_pass": {
+            "passed": (
+                preflight.get("passed") is True
+                and preflight.get("task_count") == expected_tasks
+                and preflight.get("passed_count") == expected_tasks
+                and preflight.get("used_npus") == required_npus
+                and preflight.get("required_npus") == required_npus
+                and preflight.get("all_required_npus_exercised") is True
+            ),
+            "task_count": preflight.get("task_count"),
+            "passed_count": preflight.get("passed_count"),
+            "used_npus": preflight.get("used_npus"),
+        },
+        "dataset_audit_pass": {
+            "passed": (
+                audit.get("task_count") == expected_tasks
+                and audit.get("invalid_tasks") == []
+            ),
+            "task_count": audit.get("task_count"),
+            "invalid_tasks": audit.get("invalid_tasks"),
+        },
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
@@ -112,12 +206,19 @@ def main() -> int:
     parser.add_argument("--control", type=Path, required=True)
     parser.add_argument("--formal-output", type=Path, required=True)
     parser.add_argument("--report", type=Path, required=True)
+    parser.add_argument("--expected-tasks", type=int, default=27)
+    parser.add_argument("--required-npus", default="3,4,5,6,7")
+    parser.add_argument("--expected-model", default="qwen3.8-max-preview")
+    parser.add_argument("--expected-context", type=int, default=1000000)
     parser.add_argument(
         "--allow-existing-formal-output",
         action="store_true",
         help="Allow an existing output when checking between formal arms.",
     )
     args = parser.parse_args()
+    required_npus = [
+        int(value) for value in args.required_npus.split(",") if value
+    ]
 
     code_expected = _load_files(args.control / "code_snapshot.sha256.json")
     source_expected = _load_files(
@@ -171,6 +272,13 @@ def main() -> int:
         "passed": secret_mode == 0o600,
         "mode": oct(secret_mode) if secret_mode is not None else None,
     }
+    checks.update(preflight_artifact_checks(
+        args.control,
+        expected_tasks=args.expected_tasks,
+        required_npus=required_npus,
+        expected_model=args.expected_model,
+        expected_context=args.expected_context,
+    ))
     checks["formal_output_absent"] = {
         "passed": args.allow_existing_formal_output or not args.formal_output.exists(),
         "path": str(args.formal_output),

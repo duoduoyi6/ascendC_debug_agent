@@ -186,7 +186,9 @@ McNemar 检验；N=27 下不只报告均值和单个 p-value。
 
 ### 7.2 机制指标
 
-- Long-failure count：按 turns、tokens、cost 三个分布共同识别；
+- Long-failure count：在 `full` arm 的 27 个 final-valid-cycle 上分别冻结
+  turns、tokens、cost 的 P75；所有 arm 使用同一组阈值，失败任务至少命中其中
+  两个维度才记为 long failure，禁止按各 arm 自身分位数重新定标；
 - No-improvement turns / attempts；
 - context-limit、output-limit、max-turn、refusal、400/401/403/429/5xx；
 - probe policy compliance、probe metadata completeness；
@@ -231,6 +233,8 @@ full-eval 覆盖范围按规范化 case 内容而非只按行数判断：
     漂移立即停止，不进入下一 arm。
 13. provider env 只落在 `.secrets` 下的临时 `0700` 目录，supervisor 退出时删除，
     不写入 arm output。
+14. 容器内 code、control、source、KB bind mount 为只读，仅正式 `outputs`
+    子目录可写；启动器必须从实际 Docker mount metadata 复核该契约。
 
 任一项失败都只记录 blocker，不启动正式实验。
 
@@ -254,12 +258,15 @@ final-valid-cycle 主成本。
 - task-level status、validation、provider、turn/token/cost 和 observability 汇总可复算；
 - treatment profile compliance 审计通过；
 - post-hoc observer 完成且未污染 treatment。
+- post-hoc 中识别出的 NPU 基础设施异常须有限重放；仍无法得到稳定结果时该 arm
+  收口失败，不得将其计作算子/模型失败，也不得进入下一 arm。
 
 ## 9. 分析与因果边界
 
 允许的结论：
 
-- 某 arm 相对 full 的配对净变化；
+- 某 arm 相对 full 的配对净变化；成本主比较使用各自
+  `full ∩ target_arm` 的共同成功算子，全 arm 共同交集只作补充；
 - 联合诊断证据能力与成功率、长失败或成本之间的稳定关联；
 - 某完整证据闸门对报告可信度的必要性。
 

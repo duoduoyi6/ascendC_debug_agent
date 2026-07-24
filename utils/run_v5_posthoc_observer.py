@@ -24,6 +24,12 @@ from typing import Any
 
 CASE_RE = re.compile(r"^case\[\d+\]: output(?:\[[^\]]+\])+:\s*(.*)$", re.M)
 STATUS_RE = re.compile(r"^Status\s*:\s*(\w+)", re.M)
+INFRASTRUCTURE_RE = re.compile(
+    r"507015|NPU_AICORE_EXCEPTION|ACL stream synchronize failed|"
+    r"(?:NPU|device).*(?:unavailable|not available|lost)|"
+    r"(?:driver|runtime).*(?:unavailable|initiali[sz]ation failed)",
+    re.I,
+)
 RUNTIME_NAMES = {
     ".bench_baseline",
     ".debug_events",
@@ -245,6 +251,7 @@ def _classify_verify(proc: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     passed = sum(value.strip().startswith("matched") for value in comparisons)
     status = STATUS_RE.search(proc.stdout)
     status_value = status.group(1).upper() if status else ""
+    infrastructure_error = _infrastructure_error(proc)
     return {
         "return_code": proc.returncode,
         "status": status_value,
@@ -252,6 +259,7 @@ def _classify_verify(proc: subprocess.CompletedProcess[str]) -> dict[str, Any]:
         "total_outputs": total,
         "match_rate": round(100.0 * passed / total, 4) if total else None,
         "objective_passed": proc.returncode == 0 and status_value == "PASS",
+        "infrastructure_error": infrastructure_error,
     }
 
 
@@ -259,7 +267,16 @@ def _classify_build(proc: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     return {
         "return_code": proc.returncode,
         "passed": proc.returncode == 0,
+        "infrastructure_error": _infrastructure_error(proc),
     }
+
+
+def _infrastructure_error(
+    proc: subprocess.CompletedProcess[str],
+) -> str | None:
+    text = "\n".join((proc.stdout or "", proc.stderr or ""))
+    match = INFRASTRUCTURE_RE.search(text)
+    return match.group(0) if match else None
 
 
 def _evaluate_one(
@@ -330,33 +347,49 @@ def _evaluate_one(
             "skipped_reason": "clean_build_failed",
         }
 
-    anticheat = _docker_run(
-        container=container,
-        npu=npu,
-        repo_root=repo_root,
-        task_dir=work_dir,
-        tilelang_env=tilelang_env,
-        timeout=min(timeout, 900),
-        command=(
-            "python3 skills/ascendc/ascendc-debug/scripts/anticheat.py "
-            "verify {task} --json"
-        ),
+    infrastructure_error = (
+        build_result.get("infrastructure_error")
+        or verify_result.get("infrastructure_error")
     )
-    (logs_dir / "anticheat.stdout").write_text(
-        anticheat.stdout, encoding="utf-8")
-    (logs_dir / "anticheat.stderr").write_text(
-        anticheat.stderr, encoding="utf-8")
-    try:
-        anticheat_payload = json.loads(anticheat.stdout)
-    except json.JSONDecodeError:
+    if infrastructure_error:
         anticheat_payload = {
-            "verdict": "ERROR",
-            "reasons": [anticheat.stderr.strip() or anticheat.stdout.strip()],
+            "verdict": "SKIPPED",
+            "reasons": ["posthoc_infrastructure_error"],
+            "return_code": None,
         }
-    anticheat_payload["return_code"] = anticheat.returncode
+    else:
+        anticheat = _docker_run(
+            container=container,
+            npu=npu,
+            repo_root=repo_root,
+            task_dir=work_dir,
+            tilelang_env=tilelang_env,
+            timeout=min(timeout, 900),
+            command=(
+                "python3 skills/ascendc/ascendc-debug/scripts/anticheat.py "
+                "verify {task} --json"
+            ),
+        )
+        (logs_dir / "anticheat.stdout").write_text(
+            anticheat.stdout, encoding="utf-8")
+        (logs_dir / "anticheat.stderr").write_text(
+            anticheat.stderr, encoding="utf-8")
+        try:
+            anticheat_payload = json.loads(anticheat.stdout)
+        except json.JSONDecodeError:
+            anticheat_payload = {
+                "verdict": "ERROR",
+                "reasons": [
+                    anticheat.stderr.strip() or anticheat.stdout.strip()
+                ],
+            }
+        anticheat_payload["return_code"] = anticheat.returncode
 
     row.update({
-        "run_state": "completed",
+        "run_state": (
+            "infrastructure_error" if infrastructure_error else "completed"
+        ),
+        "infrastructure_error": infrastructure_error,
         "build": build_result,
         "verification": verify_result,
         "anticheat": anticheat_payload,
@@ -370,11 +403,82 @@ def _evaluate_one(
     return row
 
 
+def _archive_transient_attempt(
+    output: Path,
+    target: Target,
+    attempt: int,
+    row: dict[str, Any],
+) -> None:
+    archive = output / "transient_rechecks" / target.rel / f"attempt_{attempt}"
+    archive.mkdir(parents=True, exist_ok=True)
+    (archive / "result.json").write_text(
+        json.dumps(row, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    logs = output / "logs" / target.rel
+    if logs.is_dir():
+        shutil.copytree(logs, archive / "logs", dirs_exist_ok=True)
+
+
+def evaluate_with_transient_rechecks(
+    *,
+    target: Target,
+    output: Path,
+    repo_root: Path,
+    container: str,
+    npu: str,
+    tilelang_env: str,
+    timeout: int,
+    transient_rechecks: int,
+) -> dict[str, Any]:
+    transient_rows = []
+    row: dict[str, Any] = {}
+    for attempt in range(transient_rechecks + 1):
+        row = _evaluate_one(
+            target=target,
+            output=output,
+            repo_root=repo_root,
+            container=container,
+            npu=npu,
+            tilelang_env=tilelang_env,
+            timeout=timeout,
+        )
+        if row.get("run_state") != "infrastructure_error":
+            break
+        _archive_transient_attempt(output, target, attempt, row)
+        transient_rows.append({
+            "attempt": attempt,
+            "signal": row.get("infrastructure_error"),
+            "archive": str(
+                Path("transient_rechecks")
+                / target.rel
+                / f"attempt_{attempt}"
+            ),
+        })
+    if transient_rows:
+        row["transient_infrastructure_rechecks"] = transient_rows
+        row["stable_result_after_transient_recheck"] = (
+            row.get("run_state") != "infrastructure_error"
+        )
+        result_path = (
+            output / "results" / f"{target.rel.replace('/', '__')}.json"
+        )
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(
+            json.dumps(row, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    return row
+
+
 def _write_summary(output: Path, rows: list[dict[str, Any]]) -> None:
     payload = {
         "generated_at": _now(),
         "task_count": len(rows),
         "completed": sum(row.get("run_state") == "completed" for row in rows),
+        "infrastructure_errors": sum(
+            row.get("run_state") == "infrastructure_error" for row in rows
+        ),
         "build_success": sum(
             bool((row.get("build") or {}).get("passed")) for row in rows
         ),
@@ -397,7 +501,8 @@ def _write_summary(output: Path, rows: list[dict[str, Any]]) -> None:
         fields = [
             "task", "npu", "run_state", "build_passed", "objective_passed",
             "anticheat_verdict", "posthoc_clean_success",
-            "full_cases", "coverage_equivalent",
+            "full_cases", "coverage_equivalent", "infrastructure_error",
+            "transient_rechecks",
         ]
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
@@ -415,6 +520,10 @@ def _write_summary(output: Path, rows: list[dict[str, Any]]) -> None:
                 "full_cases": (row.get("coverage") or {}).get("full_cases"),
                 "coverage_equivalent": (
                     row.get("coverage") or {}).get("coverage_equivalent"),
+                "infrastructure_error": row.get("infrastructure_error"),
+                "transient_rechecks": len(
+                    row.get("transient_infrastructure_rechecks") or []
+                ),
             })
 
 
@@ -427,9 +536,10 @@ def _evaluate_partition(
     npu: str,
     tilelang_env: str,
     timeout: int,
+    transient_rechecks: int,
 ) -> list[dict[str, Any]]:
     return [
-        _evaluate_one(
+        evaluate_with_transient_rechecks(
             target=target,
             output=output,
             repo_root=repo_root,
@@ -437,6 +547,7 @@ def _evaluate_partition(
             npu=npu,
             tilelang_env=tilelang_env,
             timeout=timeout,
+            transient_rechecks=transient_rechecks,
         )
         for target in targets
     ]
@@ -456,6 +567,7 @@ def main() -> int:
     )
     parser.add_argument("--timeout", type=int, default=43200)
     parser.add_argument("--expected-tasks", type=int, default=27)
+    parser.add_argument("--transient-rechecks", type=int, default=2)
     args = parser.parse_args()
 
     if args.output.exists():
@@ -497,6 +609,7 @@ def main() -> int:
                 npu=npus[index],
                 tilelang_env=args.tilelang_env,
                 timeout=args.timeout,
+                transient_rechecks=max(0, args.transient_rechecks),
             )
             for index, partition in enumerate(partitions)
             if partition

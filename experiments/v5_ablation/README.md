@@ -31,7 +31,8 @@ commit to:
 Then run `prepare_v5_runtime.sh`. It builds/starts the container, regenerates
 fingerprints, verifies the actual model, proves all ablation profiles, runs the
 27-task clean-build and initial-validation preflight across NPU 3-7, and makes
-source/KB inputs read-only. Preparation also verifies that every frozen arm
+the code, control, source and KB mounts read-only while leaving only `outputs`
+writable in the container. Preparation also verifies that every frozen arm
 manifest matches the executable profile and launch constants.
 An explicit `507015`/`NPU_AICORE_EXCEPTION` preflight result is clean-built
 again at most twice; every transient attempt is archived, and a stable
@@ -40,9 +41,12 @@ non-infrastructure result becomes the formal initial classification.
 During a formal run, code/control-plane/source/KB fingerprints are checked
 before and after every arm. Provider environment files live in an ephemeral
 directory below `.secrets` and are removed by the supervisor. Each post-hoc
-task is rebuilt with `build_ascendc.py --clean` before verification. After all seven arms,
-`utils/analyze_v5_ablation.py` writes the paired success, final-valid-cycle
-cost, long-failure, failed-cycle and arm-compliance closure package.
+task is rebuilt with `build_ascendc.py --clean` before verification; recognized
+NPU infrastructure faults receive two isolated rechecks and block closure if
+they remain unresolved. Terminal, observability, model, post-hoc and worker
+closure must pass before the next arm starts. After all seven arms,
+`utils/analyze_v5_ablation.py` writes full-vs-arm paired success and cost,
+full-arm-threshold long-failure, failed-cycle and arm-compliance evidence.
 
 Preparation does not start a formal arm. `launch_v5_ablation.sh` remains locked
 until

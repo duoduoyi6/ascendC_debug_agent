@@ -154,6 +154,67 @@ class V5PosthocIsolationTests(unittest.TestCase):
             self.assertEqual(
                 row["verification"]["skipped_reason"], "clean_build_failed")
 
+    def test_507015_is_retried_and_not_counted_as_completed(self) -> None:
+        module = _load()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = module.Target(
+                rel="level1/001_Foo",
+                treatment=root / "treatment",
+                source=root / "source",
+            )
+            infrastructure = {
+                "task": target.rel,
+                "run_state": "infrastructure_error",
+                "infrastructure_error": "507015",
+                "posthoc_clean_success": False,
+            }
+            stable = {
+                "task": target.rel,
+                "run_state": "completed",
+                "infrastructure_error": None,
+                "posthoc_clean_success": False,
+            }
+            with (
+                mock.patch.object(
+                    module,
+                    "_evaluate_one",
+                    side_effect=[infrastructure, stable],
+                ) as evaluate,
+                mock.patch.object(module, "_archive_transient_attempt") as archive,
+            ):
+                row = module.evaluate_with_transient_rechecks(
+                    target=target,
+                    output=root / "posthoc",
+                    repo_root=root,
+                    container="v5_cann",
+                    npu="3",
+                    tilelang_env="/env.sh",
+                    timeout=30,
+                    transient_rechecks=2,
+                )
+
+            self.assertEqual(evaluate.call_count, 2)
+            archive.assert_called_once()
+            self.assertEqual(row["run_state"], "completed")
+            self.assertTrue(row["stable_result_after_transient_recheck"])
+            self.assertEqual(len(row["transient_infrastructure_rechecks"]), 1)
+
+    def test_persistent_507015_blocks_posthoc_closure(self) -> None:
+        module = _load()
+        proc = subprocess.CompletedProcess(
+            [],
+            1,
+            "RuntimeError: ACL stream synchronize failed, error code:507015\n"
+            "Status : FAIL\n",
+            "",
+        )
+
+        result = module._classify_verify(proc)
+
+        self.assertFalse(result["objective_passed"])
+        self.assertEqual(result["infrastructure_error"], "ACL stream synchronize failed")
+
 
 if __name__ == "__main__":
     unittest.main()

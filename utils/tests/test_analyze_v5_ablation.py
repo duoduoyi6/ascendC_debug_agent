@@ -103,6 +103,90 @@ class V5AnalysisTests(unittest.TestCase):
             self.assertFalse(arm_rows[0]["long_failure"])
             self.assertTrue(arm_rows[1]["long_failure"])
 
+    def test_long_failure_uses_full_arm_thresholds_for_every_arm(self) -> None:
+        module = _load()
+        rows = []
+        for arm in module.ARMS:
+            scale = 100 if arm == "no_loopguard" else 1
+            for value in range(1, 28):
+                rows.append({
+                    "arm": arm,
+                    "posthoc_clean_success": False,
+                    "turns": value * scale,
+                    "total_tokens": value * 1000 * scale,
+                    "cost_usd": value * 0.1 * scale,
+                })
+
+        thresholds = module.classify_long_failures(rows)
+
+        self.assertEqual(thresholds["turns"], 20.5)
+        self.assertEqual(sum(
+            row["long_failure"] for row in rows if row["arm"] == "full"
+        ), 7)
+        self.assertEqual(sum(
+            row["long_failure"]
+            for row in rows if row["arm"] == "no_loopguard"
+        ), 27)
+        self.assertTrue(all(
+            row["long_failure_threshold_source"] == "full_arm_p75"
+            for row in rows
+        ))
+
+    def test_paired_cost_uses_each_full_treatment_intersection(self) -> None:
+        module = _load()
+        rows = []
+        for arm in module.ARMS:
+            for task in ("a", "b", "c"):
+                rows.append({
+                    "arm": arm,
+                    "task": task,
+                    "posthoc_clean_success": (
+                        task != "c" if arm == "full"
+                        else task != "b" if arm == "no_kb"
+                        else task == "a"
+                    ),
+                    "evidence_backed_success": task == "a",
+                    "turns": 1,
+                    "total_tokens": 10,
+                    "cost_usd": 0.5,
+                })
+
+        paired, intersections = module._paired_rows(rows)
+
+        scope = "full_vs_no_kb_common_posthoc"
+        selected = [row for row in paired if row["scope"] == scope]
+        self.assertEqual(
+            intersections["full_pairwise"]["no_kb"]["common_posthoc_tasks"],
+            ["a"],
+        )
+        self.assertEqual([row["arm"] for row in selected], ["full", "no_kb"])
+        self.assertTrue(all(row["task_count"] == 1 for row in selected))
+
+    def test_arm_summary_reports_risk_and_cost_per_ebs(self) -> None:
+        module = _load()
+        rows = []
+        for arm in module.ARMS:
+            rows.append({
+                "arm": arm,
+                "objective_success": True,
+                "reportable_success": True,
+                "evidence_backed_success": arm == "full",
+                "posthoc_clean_success": True,
+                "long_failure": False,
+                "turns": 4,
+                "total_tokens": 100,
+                "cost_usd": 2.0,
+            })
+
+        summaries = {
+            row["arm"]: row for row in module._arm_summary(rows)
+        }
+
+        self.assertEqual(summaries["full"]["rsir"], 0.0)
+        self.assertEqual(summaries["full"]["osre"], 0.0)
+        self.assertEqual(summaries["full"]["tokens_per_ebs"], 100.0)
+        self.assertEqual(summaries["no_anticheat"]["rsir"], 1.0)
+
     def test_observability_uses_real_direction_and_rollback_records(self) -> None:
         module = _load()
         with tempfile.TemporaryDirectory() as tmp:
@@ -298,6 +382,12 @@ class V5AnalysisTests(unittest.TestCase):
             }
             (root / "arm_full" / "experiment_manifest.json").write_text(
                 json.dumps(runtime))
+            (root / "arm_full" / "quota_batch_cc_state.json").write_text(
+                json.dumps({
+                    "event": "completed",
+                    "done": 1,
+                    "pending": 0,
+                }))
             frozen = {
                 "task_count": 1,
                 "containers": ["v5_cann"],
@@ -327,12 +417,14 @@ class V5AnalysisTests(unittest.TestCase):
                 "result_count": 1,
                 "models": ["qwen3.8-max-preview"],
                 "context_windows": [1000000],
+                "observability_complete": True,
             }
             posthoc = {"level1/op": {"run_state": "completed"}}
 
             passed = module._manifest_compliance(
                 root, "full", [task_row], posthoc)
             self.assertTrue(passed["passed"])
+            self.assertTrue(passed["supervisor_completed"])
 
             task_row["terminal_complete"] = False
             missing_terminal = module._manifest_compliance(
@@ -346,6 +438,14 @@ class V5AnalysisTests(unittest.TestCase):
                 root, "full", [task_row], posthoc)
             self.assertFalse(wrong_context["passed"])
             self.assertEqual(len(wrong_context["model_usage_violations"]), 1)
+
+            task_row["context_windows"] = [1000000]
+            task_row["observability_complete"] = False
+            missing_observability = module._manifest_compliance(
+                root, "full", [task_row], posthoc)
+            self.assertFalse(missing_observability["passed"])
+            self.assertEqual(
+                missing_observability["observability_complete_count"], 0)
 
 
 if __name__ == "__main__":

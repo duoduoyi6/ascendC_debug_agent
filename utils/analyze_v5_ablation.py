@@ -422,6 +422,12 @@ def task_row(
         "evidence_backed_success": evidence_backed,
         "posthoc_clean_success": (
             posthoc_row.get("posthoc_clean_success") is True),
+        "posthoc_run_state": posthoc_row.get("run_state"),
+        "posthoc_infrastructure_error": posthoc_row.get(
+            "infrastructure_error"),
+        "posthoc_transient_rechecks": len(
+            posthoc_row.get("transient_infrastructure_rechecks") or []
+        ),
         "posthoc_build_pass": (
             (posthoc_row.get("build") or {}).get("passed") is True),
         "notes": str(status.get("notes") or ""),
@@ -448,25 +454,30 @@ def percentile(values: list[float], fraction: float) -> float:
     return values[lower] * (1 - weight) + values[upper] * weight
 
 
-def classify_long_failures(rows: list[dict[str, Any]]) -> None:
-    for arm in ARMS:
-        arm_rows = [row for row in rows if row["arm"] == arm]
-        thresholds = {
-            key: percentile(
-                [float(row[key]) for row in arm_rows if float(row[key]) > 0],
-                0.75,
-            )
-            for key in ("turns", "total_tokens", "cost_usd")
-        }
-        for row in arm_rows:
-            components = [
-                key for key, threshold in thresholds.items()
-                if threshold > 0 and float(row[key]) >= threshold
-            ]
-            row["long_failure_components"] = components
-            row["long_failure"] = (
-                not row["posthoc_clean_success"] and len(components) >= 2
-            )
+def classify_long_failures(
+    rows: list[dict[str, Any]],
+) -> dict[str, float]:
+    """Apply one frozen full-arm burden threshold to every arm."""
+
+    full_rows = [row for row in rows if row["arm"] == "full"]
+    thresholds = {
+        key: percentile(
+            [float(row[key]) for row in full_rows if float(row[key]) > 0],
+            0.75,
+        )
+        for key in ("turns", "total_tokens", "cost_usd")
+    }
+    for row in rows:
+        components = [
+            key for key, threshold in thresholds.items()
+            if threshold > 0 and float(row[key]) >= threshold
+        ]
+        row["long_failure_components"] = components
+        row["long_failure_threshold_source"] = "full_arm_p75"
+        row["long_failure"] = (
+            not row["posthoc_clean_success"] and len(components) >= 2
+        )
+    return thresholds
 
 
 def mcnemar_exact(full: list[bool], treatment: list[bool]) -> dict[str, Any]:
@@ -570,6 +581,9 @@ def _manifest_compliance(
             prohibited.append(str(path.relative_to(root)))
     task_count = len(task_rows)
     terminal_count = sum(row["terminal_complete"] for row in task_rows)
+    observability_complete_count = sum(
+        row.get("observability_complete") is True for row in task_rows
+    )
     posthoc_count = len(posthoc_rows)
     posthoc_completed_count = sum(
         row.get("run_state") == "completed"
@@ -590,11 +604,20 @@ def _manifest_compliance(
             or row["context_windows"] != [expected_context]
         )
     ]
+    supervisor_state = _load_json(
+        root / f"arm_{arm}" / "quota_batch_cc_state.json", {})
+    supervisor_completed = (
+        supervisor_state.get("event") == "completed"
+        and supervisor_state.get("done") == int(frozen.get("task_count") or 0)
+        and supervisor_state.get("pending") == 0
+    )
     complete = (
         task_count == int(frozen.get("task_count") or 0)
         and terminal_count == int(frozen.get("task_count") or 0)
+        and observability_complete_count == int(frozen.get("task_count") or 0)
         and posthoc_count == int(frozen.get("task_count") or 0)
         and posthoc_completed_count == int(frozen.get("task_count") or 0)
+        and supervisor_completed
     )
     return {
         "arm": arm,
@@ -606,8 +629,11 @@ def _manifest_compliance(
         ),
         "task_directory_count": task_count,
         "terminal_task_count": terminal_count,
+        "observability_complete_count": observability_complete_count,
         "posthoc_task_count": posthoc_count,
         "posthoc_completed_count": posthoc_completed_count,
+        "supervisor_completed": supervisor_completed,
+        "supervisor_status": supervisor_state.get("event"),
         "expected_task_count": frozen.get("task_count"),
         "manifest_mismatches": mismatches,
         "prohibited_artifacts": prohibited,
@@ -649,12 +675,20 @@ def _arm_summary(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for arm in ARMS:
         selected = [row for row in rows if row["arm"] == arm]
         ebs = sum(row["evidence_backed_success"] for row in selected)
+        objective = sum(row["objective_success"] for row in selected)
+        reportable = sum(row["reportable_success"] for row in selected)
         output.append({
             "arm": arm,
             "tasks": len(selected),
-            "objective_success": sum(row["objective_success"] for row in selected),
-            "reportable_success": sum(row["reportable_success"] for row in selected),
+            "objective_success": objective,
+            "reportable_success": reportable,
             "evidence_backed_success": ebs,
+            "rsir_count": reportable - ebs,
+            "rsir": round((reportable - ebs) / len(selected), 6)
+            if selected else None,
+            "osre_count": objective - ebs,
+            "osre": round((objective - ebs) / len(selected), 6)
+            if selected else None,
             "posthoc_clean_success": sum(
                 row["posthoc_clean_success"] for row in selected),
             "long_failures": sum(row["long_failure"] for row in selected),
@@ -690,10 +724,13 @@ def _paired_rows(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict
         for arm in sorted(EVIDENCE_CAPABLE_ARMS)
     ])
     paired = []
-    for scope, tasks, arms in (
-        ("common_posthoc_all_arms", common_posthoc, ARMS),
-        ("common_ebs_evidence_arms", common_ebs, sorted(EVIDENCE_CAPABLE_ARMS)),
-    ):
+    pairwise_intersections: dict[str, dict[str, list[str]]] = {}
+
+    def append_cost_rows(
+        scope: str,
+        tasks: set[str],
+        arms: Iterable[str],
+    ) -> None:
         for arm in arms:
             selected = [by_arm[arm][task] for task in sorted(tasks)]
             paired.append({
@@ -702,19 +739,74 @@ def _paired_rows(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict
                 "task_count": len(selected),
                 "turns": sum(row["turns"] for row in selected),
                 "tokens": sum(row["total_tokens"] for row in selected),
-                "cost_usd": round(sum(row["cost_usd"] for row in selected), 8),
+                "cost_usd": round(
+                    sum(row["cost_usd"] for row in selected), 8),
                 "tokens_per_task": (
-                    round(sum(row["total_tokens"] for row in selected) / len(selected), 2)
+                    round(
+                        sum(row["total_tokens"] for row in selected)
+                        / len(selected),
+                        2,
+                    )
                     if selected else None
                 ),
                 "cost_per_task_usd": (
-                    round(sum(row["cost_usd"] for row in selected) / len(selected), 8)
+                    round(
+                        sum(row["cost_usd"] for row in selected)
+                        / len(selected),
+                        8,
+                    )
                     if selected else None
                 ),
             })
+
+    for arm in ARMS[1:]:
+        posthoc_tasks = (
+            {
+                task for task, row in by_arm["full"].items()
+                if row["posthoc_clean_success"]
+            }
+            & {
+                task for task, row in by_arm[arm].items()
+                if row["posthoc_clean_success"]
+            }
+        )
+        ebs_tasks: set[str] = set()
+        if arm in EVIDENCE_CAPABLE_ARMS:
+            ebs_tasks = (
+                {
+                    task for task, row in by_arm["full"].items()
+                    if row["evidence_backed_success"]
+                }
+                & {
+                    task for task, row in by_arm[arm].items()
+                    if row["evidence_backed_success"]
+                }
+            )
+        pairwise_intersections[arm] = {
+            "common_posthoc_tasks": sorted(posthoc_tasks),
+            "common_evidence_backed_tasks": sorted(ebs_tasks),
+        }
+        append_cost_rows(
+            f"full_vs_{arm}_common_posthoc",
+            posthoc_tasks,
+            ("full", arm),
+        )
+        if arm in EVIDENCE_CAPABLE_ARMS:
+            append_cost_rows(
+                f"full_vs_{arm}_common_ebs",
+                ebs_tasks,
+                ("full", arm),
+            )
+
+    for scope, tasks, arms in (
+        ("common_posthoc_all_arms", common_posthoc, ARMS),
+        ("common_ebs_evidence_arms", common_ebs, sorted(EVIDENCE_CAPABLE_ARMS)),
+    ):
+        append_cost_rows(scope, tasks, arms)
     return paired, {
         "common_posthoc_tasks": sorted(common_posthoc),
         "common_evidence_backed_tasks": sorted(common_ebs),
+        "full_pairwise": pairwise_intersections,
     }
 
 
@@ -728,7 +820,8 @@ def _paired_success_tests(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]))
     output = []
     for metric in (
-        "objective_success", "reportable_success", "posthoc_clean_success",
+        "objective_success", "reportable_success",
+        "evidence_backed_success", "posthoc_clean_success",
     ):
         full = [bool(by_arm["full"][task][metric]) for task in tasks]
         for arm in ARMS[1:]:
@@ -746,6 +839,7 @@ def _write_report(
     output: Path,
     summaries: list[dict[str, Any]],
     compliance: list[dict[str, Any]],
+    paired: list[dict[str, Any]],
     intersections: dict[str, Any],
     failed_cycles: list[dict[str, Any]],
 ) -> None:
@@ -759,27 +853,44 @@ def _write_report(
         "",
         "## Arm Summary",
         "",
-        "| Arm | OSR | WRSR | EBSR | Post-hoc clean | Long failures | Tokens | Cost USD |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| Arm | OSR | WRSR | EBSR | Post-hoc clean | RSIR | OSRE | "
+        "Long failures | Tokens/EBS | Cost/EBS USD |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in summaries:
         n = row["tasks"]
+        rsir = f"{row['rsir']:.4f}" if row["rsir"] is not None else "NA"
+        osre = f"{row['osre']:.4f}" if row["osre"] is not None else "NA"
         lines.append(
             f"| {row['arm']} | {row['objective_success']}/{n} | "
             f"{row['reportable_success']}/{n} | "
             f"{row['evidence_backed_success']}/{n} | "
             f"{row['posthoc_clean_success']}/{n} | "
-            f"{row['long_failures']} | {row['final_cycle_tokens']} | "
-            f"{row['final_cycle_cost_usd']:.6f} |"
+            f"{rsir} | {osre} | "
+            f"{row['long_failures']} | "
+            f"{row['tokens_per_ebs'] if row['tokens_per_ebs'] is not None else 'NA'} | "
+            f"{row['cost_per_ebs_usd'] if row['cost_per_ebs_usd'] is not None else 'NA'} |"
         )
     lines.extend([
         "",
-        "## Paired Cost Sets",
+        "## Full-vs-Arm Paired Cost",
         "",
-        f"- Common post-hoc clean tasks across all arms: "
-        f"{len(intersections['common_posthoc_tasks'])}.",
-        f"- Common evidence-backed tasks across evidence-capable arms: "
-        f"{len(intersections['common_evidence_backed_tasks'])}.",
+        "| Scope | Arm | Common successes | Tokens/task | Cost/task USD |",
+        "|---|---|---:|---:|---:|",
+    ])
+    for row in paired:
+        if not row["scope"].startswith("full_vs_"):
+            continue
+        lines.append(
+            f"| {row['scope']} | {row['arm']} | {row['task_count']} | "
+            f"{row['tokens_per_task'] if row['tokens_per_task'] is not None else 'NA'} | "
+            f"{row['cost_per_task_usd'] if row['cost_per_task_usd'] is not None else 'NA'} |"
+        )
+    lines.extend([
+        "",
+        "The all-arm intersections are supplemental only: "
+        f"post-hoc={len(intersections['common_posthoc_tasks'])}, "
+        f"evidence-backed={len(intersections['common_evidence_backed_tasks'])}.",
         "",
         "## Contract Closure",
         "",
@@ -788,7 +899,9 @@ def _write_report(
         lines.append(
             f"- `{row['arm']}`: {'PASS' if row['passed'] else 'FAIL'}; "
             f"terminal={row['terminal_task_count']}, "
-            f"posthoc_completed={row['posthoc_completed_count']}."
+            f"observability={row['observability_complete_count']}, "
+            f"posthoc_completed={row['posthoc_completed_count']}, "
+            f"supervisor_completed={row['supervisor_completed']}."
         )
     lines.extend([
         "",
@@ -805,14 +918,67 @@ def _write_report(
         "\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _verify_arm_closure(
+    root: Path,
+    arm: str,
+    expected_tasks: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    coverage = _coverage_map(root)
+    task_root = root / f"arm_{arm}" / "tasks"
+    tasks = sorted(path for path in task_root.glob("level*/*") if path.is_dir())
+    posthoc = _posthoc_map(root, arm)
+    rows = [
+        task_row(
+            root,
+            arm,
+            task,
+            coverage=coverage,
+            posthoc=posthoc,
+        )
+        for task in tasks
+    ]
+    compliance = _manifest_compliance(root, arm, rows, posthoc)
+    compliance["passed"] = (
+        compliance["passed"]
+        and len(rows) == expected_tasks
+    )
+    return compliance, rows
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--experiment-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--expected-tasks", type=int, default=27)
     parser.add_argument("--allow-incomplete", action="store_true")
+    parser.add_argument("--verify-arm", choices=ARMS)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
+
+    if args.verify_arm:
+        compliance, rows = _verify_arm_closure(
+            args.experiment_root,
+            args.verify_arm,
+            args.expected_tasks,
+        )
+        (args.output / "arm_closure.json").write_text(
+            json.dumps(compliance, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        _write_csv(
+            args.output / "per_task.csv",
+            rows,
+            [
+                "arm", "task", "terminal_complete", "objective_success",
+                "reportable_success", "evidence_backed_success",
+                "posthoc_clean_success", "observability_complete",
+                "posthoc_run_state", "posthoc_infrastructure_error",
+                "posthoc_transient_rechecks",
+                "models", "context_windows", "turns", "total_tokens",
+                "cost_usd",
+            ],
+        )
+        return 0 if compliance["passed"] else 2
 
     coverage = _coverage_map(args.experiment_root)
     rows: list[dict[str, Any]] = []
@@ -832,7 +998,7 @@ def main() -> int:
         compliance.append(_manifest_compliance(
             args.experiment_root, arm, arm_rows, posthoc))
 
-    classify_long_failures(rows)
+    long_failure_thresholds = classify_long_failures(rows)
     summaries = _arm_summary(rows)
     paired, intersections = _paired_rows(rows)
     success_tests = _paired_success_tests(rows) if rows else []
@@ -844,6 +1010,10 @@ def main() -> int:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "primary_cost_scope": "final_valid_cycle_only",
         "failed_cycles_excluded_from_primary_cost": True,
+        "long_failure_thresholds": {
+            "source": "full_arm_p75",
+            **long_failure_thresholds,
+        },
         "arm_summary": summaries,
         "paired_intersections": intersections,
         "paired_success_tests": success_tests,
@@ -873,7 +1043,10 @@ def main() -> int:
         "input_tokens", "output_tokens", "cache_creation_tokens",
         "cache_read_tokens", "total_tokens", "cost_usd",
         "long_failure", "long_failure_components", "models",
+        "long_failure_threshold_source",
         "context_windows", "max_output_tokens", "provider_errors", "notes",
+        "posthoc_run_state", "posthoc_infrastructure_error",
+        "posthoc_transient_rechecks",
         "observability_complete",
     ]
     _write_csv(args.output / "per_task.csv", rows, per_task_fields)
@@ -893,7 +1066,13 @@ def main() -> int:
         ["arm", "task", "reason", "excluded_from_primary_cost", "archive"],
     )
     _write_report(
-        args.output, summaries, compliance, intersections, failed_cycles)
+        args.output,
+        summaries,
+        compliance,
+        paired,
+        intersections,
+        failed_cycles,
+    )
 
     complete = (
         all(row["passed"] for row in compliance)

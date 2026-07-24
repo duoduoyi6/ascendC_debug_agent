@@ -30,6 +30,27 @@ class V5AssetPathTests(unittest.TestCase):
         for old_path in OLD_PATHS:
             self.assertNotIn(old_path, payload)
 
+    def test_runtime_mounts_freeze_code_control_and_dataset(self) -> None:
+        prepare = (
+            V5_ROOT / "prepare_v5_runtime.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn('-v "$ROOT:$ROOT:ro"', prepare)
+        self.assertIn('-v "$ROOT/outputs:$ROOT/outputs"', prepare)
+        self.assertIn('-v "$DATASET:$DATASET:ro"', prepare)
+        self.assertIn('-v "$CONTROL:$CONTROL:ro"', prepare)
+
+    def test_launcher_closes_each_arm_before_continuing(self) -> None:
+        launcher = (
+            V5_ROOT / "launch_v5_ablation.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("--verify-arm \"$arm\"", launcher)
+        self.assertIn("verify_v5_no_workers.py", launcher)
+        self.assertIn("--transient-rechecks 2", launcher)
+        self.assertLess(
+            launcher.index("--verify-arm \"$arm\""),
+            launcher.index("posthoc completed arm=$arm"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
