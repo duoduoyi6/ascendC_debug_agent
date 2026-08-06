@@ -12,6 +12,10 @@ framework_profile*
 .claude/agents/*
 !.claude/agents/ascendc-debug-agent-constructive.md
 !.claude/agents/ascendc-debug-agent-discovery.md
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/cannbench-hidden-followup/
+!.claude/skills/cannbench-hidden-followup/**
 output*
 build/
 extra-info/
