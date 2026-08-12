@@ -1,0 +1,640 @@
+{
+  "schema_version": 1,
+  "scope": {
+    "benchmark": "official-tasks",
+    "hardware": "A3",
+    "version": "1.1.0",
+    "first_place_display_name": "CANNBOT LINGXI-EVO",
+    "ours_display_name": "Debug-Agent Claude Code Kimi K3",
+    "first_place_snapshot": {
+      "entry_id": "sol_f82c1d6f66cc6fe6",
+      "entry_updated_at": "2026-08-12T16:43:37.081579",
+      "snapshot_sha256": "eb5f1dddd66c61562fce6cab8a02c503c50ab010e3797aa714d9c7ee536b1c0f",
+      "exported_at": "2026-08-12T17:10:20.432671Z"
+    },
+    "ours_snapshot_captured_at": "2026-08-12T17:19:18.226Z",
+    "selection_rule": "first_speedup > 1.0 and first_speedup > ours_speedup",
+    "stage_selection_rule": "selection_rule and first-place stage passes every case",
+    "knowledge_promotion_candidate_rule": "stage_selection_rule and the same immutable artifact has a full hidden result",
+    "causality_boundary": "leaderboard association plus source inspection is not a controlled ablation; mechanisms remain evidence-backed hypotheses until independently reproduced"
+  },
+  "truth_boundary": "Public-only artifacts and artifacts with incomplete hidden correctness are not canonical optimization knowledge. Hidden inputs are not inferred.",
+  "records": [
+    {
+      "operator": "Exp",
+      "stage": "standard",
+      "knowledge_evidence_tier": "supported_hypothesis",
+      "artifact_validation": "public_full_hidden_unknown",
+      "first_place": {
+        "speedup": 2.1134505196845295,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_85c8a6679475",
+        "submission_id": "sub_6e1a06991e18",
+        "display_user": "jjljhj"
+      },
+      "ours": {
+        "speedup": 1.871,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_de758a79a4aa"
+      },
+      "speedup_delta": 0.24245051968452946,
+      "disposition": "retain for reproduction; do not inject into the general optimization KB"
+    },
+    {
+      "operator": "ForeachNorm",
+      "stage": "standard",
+      "knowledge_evidence_tier": "supported_hypothesis",
+      "artifact_validation": "public_full_hidden_unknown",
+      "first_place": {
+        "speedup": 1.5687860124858797,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_2fb1f786beb7",
+        "submission_id": "sub_7e6f4b1b47d0",
+        "display_user": "jjljhj"
+      },
+      "ours": {
+        "speedup": 0.909,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_dc772ea3fa70"
+      },
+      "speedup_delta": 0.6597860124858796,
+      "disposition": "retain for reproduction; do not inject into the general optimization KB"
+    },
+    {
+      "operator": "MaskedScale",
+      "stage": "standard",
+      "knowledge_evidence_tier": "supported_hypothesis",
+      "artifact_validation": "public_full_hidden_unknown",
+      "first_place": {
+        "speedup": 2.4560852451832598,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_88696c5a7f69",
+        "submission_id": "sub_0a22de38ab21",
+        "display_user": "yyzhang0715"
+      },
+      "ours": {
+        "speedup": 2.236,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_05daab251897"
+      },
+      "speedup_delta": 0.22008524518325956,
+      "disposition": "retain for reproduction; do not inject into the general optimization KB"
+    },
+    {
+      "operator": "SwiGlu",
+      "stage": "standard",
+      "knowledge_evidence_tier": "supported_hypothesis",
+      "artifact_validation": "public_full_hidden_unknown",
+      "first_place": {
+        "speedup": 1.5468596726795005,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_b3ecbade2133",
+        "submission_id": "sub_5c9c01772daf",
+        "display_user": "jjljhj"
+      },
+      "ours": {
+        "speedup": 1.41,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_7c4a0829a1fb"
+      },
+      "speedup_delta": 0.1368596726795006,
+      "disposition": "retain for reproduction; do not inject into the general optimization KB"
+    },
+    {
+      "operator": "ApplyAdamW",
+      "stage": "standard",
+      "knowledge_evidence_tier": "supported_hypothesis",
+      "artifact_validation": "public_full_hidden_unknown",
+      "first_place": {
+        "speedup": 1.859697403812128,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_7f704da88c9d",
+        "submission_id": "sub_fdddd1ba9ea0",
+        "display_user": "jjljhj"
+      },
+      "ours": {
+        "speedup": 1.358,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_699cea5ef6a1"
+      },
+      "speedup_delta": 0.5016974038121278,
+      "disposition": "retain for reproduction; do not inject into the general optimization KB"
+    },
+    {
+      "operator": "ApplyRotaryPosEmb",
+      "stage": "standard",
+      "knowledge_evidence_tier": "supported_hypothesis",
+      "artifact_validation": "public_full_hidden_unknown",
+      "first_place": {
+        "speedup": 1.0858915293961027,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_ca884d0963f0",
+        "submission_id": "sub_23161c916842",
+        "display_user": "yyzhang0715"
+      },
+      "ours": {
+        "speedup": 0.127,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_270ac75477bd"
+      },
+      "speedup_delta": 0.9588915293961027,
+      "disposition": "retain for reproduction; do not inject into the general optimization KB"
+    },
+    {
+      "operator": "ArgMax",
+      "stage": "standard",
+      "knowledge_evidence_tier": "supported_hypothesis",
+      "artifact_validation": "public_full_hidden_unknown",
+      "first_place": {
+        "speedup": 1.342473027171809,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_20ce0a24de6b",
+        "submission_id": "sub_e5f49b2634ca",
+        "display_user": "ariel_zjl"
+      },
+      "ours": {
+        "speedup": 0.295,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_2a7a276e5ab6"
+      },
+      "speedup_delta": 1.0474730271718091,
+      "disposition": "retain for reproduction; do not inject into the general optimization KB"
+    },
+    {
+      "operator": "Gather",
+      "stage": "standard",
+      "knowledge_evidence_tier": "supported_hypothesis",
+      "artifact_validation": "public_full_hidden_unknown",
+      "first_place": {
+        "speedup": 1.0744691674813613,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_f1d249d848db",
+        "submission_id": "sub_a0bde9d9ff4f",
+        "display_user": "yyzhang0715"
+      },
+      "ours": {
+        "speedup": 0.031,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_69348266b737"
+      },
+      "speedup_delta": 1.0434691674813614,
+      "disposition": "retain for reproduction; do not inject into the general optimization KB"
+    },
+    {
+      "operator": "Gcd",
+      "stage": "standard",
+      "knowledge_evidence_tier": "counterexample_or_rejected",
+      "artifact_validation": "hidden_incomplete",
+      "first_place": {
+        "speedup": 1.0008569595998558,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_8a6624991d95",
+        "submission_id": "sub_e215abc0ade5",
+        "display_user": "yyzhang0715"
+      },
+      "ours": {
+        "speedup": 0.102,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_78b950d2ee3b"
+      },
+      "speedup_delta": 0.8988569595998558,
+      "disposition": "retain as a guardrail/counterexample; do not promote"
+    },
+    {
+      "operator": "ResizeBilinear",
+      "stage": "standard",
+      "knowledge_evidence_tier": "supported_hypothesis",
+      "artifact_validation": "public_full_hidden_unknown",
+      "first_place": {
+        "speedup": 2.0229855307091316,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_345c45c18b44",
+        "submission_id": "sub_81d0392760d2",
+        "display_user": "jjljhj"
+      },
+      "ours": {
+        "speedup": 0.06,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_a23d44fa41e7"
+      },
+      "speedup_delta": 1.9629855307091315,
+      "disposition": "retain for reproduction; do not inject into the general optimization KB"
+    },
+    {
+      "operator": "Softmax",
+      "stage": "standard",
+      "knowledge_evidence_tier": "supported_hypothesis",
+      "artifact_validation": "public_full_hidden_unknown",
+      "first_place": {
+        "speedup": 1.0031768287235443,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_21d42a7c1152",
+        "submission_id": "sub_cb3b5ee15e4d",
+        "display_user": "ariel_zjl"
+      },
+      "ours": {
+        "speedup": 0.424,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_643b6fe67592"
+      },
+      "speedup_delta": 0.5791768287235444,
+      "disposition": "retain for reproduction; do not inject into the general optimization KB"
+    },
+    {
+      "operator": "AddRmsNormDynamicQuant",
+      "stage": "standard",
+      "knowledge_evidence_tier": "supported_hypothesis",
+      "artifact_validation": "public_full_hidden_unknown",
+      "first_place": {
+        "speedup": 1.1533379326767839,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_ce750269e5e9",
+        "submission_id": "sub_63b4557dc0bc",
+        "display_user": "yyzhang0715"
+      },
+      "ours": {
+        "speedup": 0.352,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_28e49e3f765d"
+      },
+      "speedup_delta": 0.8013379326767839,
+      "disposition": "retain for reproduction; do not inject into the general optimization KB"
+    },
+    {
+      "operator": "Conv3DBackpropFilter",
+      "stage": "standard",
+      "knowledge_evidence_tier": "counterexample_or_rejected",
+      "artifact_validation": "hidden_incomplete",
+      "first_place": {
+        "speedup": 1.0699351014272889,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_a72d0328c56c",
+        "submission_id": "sub_989a190646a4",
+        "display_user": "yyzhang0715"
+      },
+      "ours": {
+        "speedup": 0.001,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_4e238c310fb5"
+      },
+      "speedup_delta": 1.068935101427289,
+      "disposition": "retain as a guardrail/counterexample; do not promote"
+    },
+    {
+      "operator": "DequantSwigluQuant",
+      "stage": "standard",
+      "knowledge_evidence_tier": "supported_hypothesis",
+      "artifact_validation": "public_full_hidden_unknown",
+      "first_place": {
+        "speedup": 1.2479144031014533,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_a9621e51580e",
+        "submission_id": "sub_95523c3ce2fd",
+        "display_user": "yyzhang0715"
+      },
+      "ours": {
+        "speedup": 0.491,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_8d7560c3b6ce"
+      },
+      "speedup_delta": 0.7569144031014533,
+      "disposition": "retain for reproduction; do not inject into the general optimization KB"
+    },
+    {
+      "operator": "GroupedMatmul",
+      "stage": "standard",
+      "knowledge_evidence_tier": "rejected_incomplete_correctness",
+      "artifact_validation": "public_full_hidden_unknown",
+      "first_place": {
+        "speedup": 1.0368055426353355,
+        "passed_cases": 14,
+        "total_cases": 20,
+        "job_id": "job_84795642d15d",
+        "submission_id": "sub_a5dbf61bcc3e",
+        "display_user": "lhpaul"
+      },
+      "ours": {
+        "speedup": 0.014,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_f42be2b85af0"
+      },
+      "speedup_delta": 1.0228055426353355,
+      "disposition": "retain as a guardrail/counterexample; do not promote"
+    },
+    {
+      "operator": "MhcSinkhorn",
+      "stage": "standard",
+      "knowledge_evidence_tier": "counterexample_or_rejected",
+      "artifact_validation": "hidden_incomplete",
+      "first_place": {
+        "speedup": 1.0189690626528551,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_157a28bee61a",
+        "submission_id": "sub_c2cee02c2fbc",
+        "display_user": "yyzhang0715"
+      },
+      "ours": {
+        "speedup": 0.158,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_2aa7f0e63a94"
+      },
+      "speedup_delta": 0.8609690626528551,
+      "disposition": "retain as a guardrail/counterexample; do not promote"
+    },
+    {
+      "operator": "NMS",
+      "stage": "standard",
+      "knowledge_evidence_tier": "counterexample_or_rejected",
+      "artifact_validation": "hidden_incomplete",
+      "first_place": {
+        "speedup": 1.2864685221264607,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_adcbd33469f3",
+        "submission_id": "sub_01e6411bebc0",
+        "display_user": "yyzhang0715"
+      },
+      "ours": {
+        "speedup": 0.038,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_606d731f4129"
+      },
+      "speedup_delta": 1.2484685221264606,
+      "disposition": "retain as a guardrail/counterexample; do not promote"
+    },
+    {
+      "operator": "StridedSlice",
+      "stage": "standard",
+      "knowledge_evidence_tier": "counterexample_or_rejected",
+      "artifact_validation": "hidden_incomplete",
+      "first_place": {
+        "speedup": 1.9057499930236013,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_b27bd7e63be2",
+        "submission_id": "sub_2cab8c9f0aee",
+        "display_user": "yyzhang0715"
+      },
+      "ours": {
+        "speedup": 0.168,
+        "passed_cases": 20,
+        "total_cases": 20,
+        "job_id": "job_7badbd39e59b"
+      },
+      "speedup_delta": 1.7377499930236013,
+      "disposition": "retain as a guardrail/counterexample; do not promote"
+    },
+    {
+      "operator": "AddRmsNormDynamicQuant",
+      "stage": "hidden",
+      "knowledge_evidence_tier": "rejected_incomplete_correctness",
+      "artifact_validation": "hidden_incomplete",
+      "first_place": {
+        "speedup": 2.1249487745177764,
+        "passed_cases": 78,
+        "total_cases": 80,
+        "job_id": "job_ee19909610cd",
+        "submission_id": "sub_bb6157790b20",
+        "display_user": "yyzhang0715"
+      },
+      "ours": {
+        "speedup": 0.908,
+        "passed_cases": 80,
+        "total_cases": 80,
+        "job_id": "job_28b742246320"
+      },
+      "speedup_delta": 1.2169487745177765,
+      "disposition": "retain as a guardrail/counterexample; do not promote"
+    },
+    {
+      "operator": "DequantSwigluQuant",
+      "stage": "hidden",
+      "knowledge_evidence_tier": "rejected_incomplete_correctness",
+      "artifact_validation": "hidden_incomplete",
+      "first_place": {
+        "speedup": 1.962735677315658,
+        "passed_cases": 78,
+        "total_cases": 80,
+        "job_id": "job_aced8bddea2e",
+        "submission_id": "sub_d379c8fb381f",
+        "display_user": "yyzhang0715"
+      },
+      "ours": {
+        "speedup": 0.984,
+        "passed_cases": 80,
+        "total_cases": 80,
+        "job_id": "job_ef495e4683e4"
+      },
+      "speedup_delta": 0.9787356773156579,
+      "disposition": "retain as a guardrail/counterexample; do not promote"
+    },
+    {
+      "operator": "Gcd",
+      "stage": "hidden",
+      "knowledge_evidence_tier": "rejected_incomplete_correctness",
+      "artifact_validation": "hidden_incomplete",
+      "first_place": {
+        "speedup": 1.1028537559421983,
+        "passed_cases": 78,
+        "total_cases": 80,
+        "job_id": "job_31e06211d3db",
+        "submission_id": "sub_e215abc0ade5",
+        "display_user": "yyzhang0715"
+      },
+      "ours": {
+        "speedup": 0.297,
+        "passed_cases": 80,
+        "total_cases": 80,
+        "job_id": "job_e87de28e5679"
+      },
+      "speedup_delta": 0.8058537559421983,
+      "disposition": "retain as a guardrail/counterexample; do not promote"
+    },
+    {
+      "operator": "GQA",
+      "stage": "hidden",
+      "knowledge_evidence_tier": "rejected_incomplete_correctness",
+      "artifact_validation": "hidden_incomplete",
+      "first_place": {
+        "speedup": 1.0990566027997681,
+        "passed_cases": 78,
+        "total_cases": 80,
+        "job_id": "job_d58d8d90d1eb",
+        "submission_id": "sub_d5a34124de0b",
+        "display_user": "junming222"
+      },
+      "ours": {
+        "speedup": 0.178,
+        "passed_cases": 77,
+        "total_cases": 80,
+        "job_id": "job_d47ef5e806e8"
+      },
+      "speedup_delta": 0.9210566027997682,
+      "disposition": "retain as a guardrail/counterexample; do not promote"
+    },
+    {
+      "operator": "MHA",
+      "stage": "hidden",
+      "knowledge_evidence_tier": "rejected_incomplete_correctness",
+      "artifact_validation": "hidden_incomplete",
+      "first_place": {
+        "speedup": 1.1894284951548355,
+        "passed_cases": 77,
+        "total_cases": 80,
+        "job_id": "job_081f83e7e51c",
+        "submission_id": "sub_82bbe6f4c564",
+        "display_user": "junming222"
+      },
+      "ours": {
+        "speedup": 0.234,
+        "passed_cases": 80,
+        "total_cases": 80,
+        "job_id": "job_6ac4ac24a3ae"
+      },
+      "speedup_delta": 0.9554284951548355,
+      "disposition": "retain as a guardrail/counterexample; do not promote"
+    },
+    {
+      "operator": "MhcSinkhorn",
+      "stage": "hidden",
+      "knowledge_evidence_tier": "rejected_incomplete_correctness",
+      "artifact_validation": "hidden_incomplete",
+      "first_place": {
+        "speedup": 1.0972067186865455,
+        "passed_cases": 78,
+        "total_cases": 80,
+        "job_id": "job_0b9ebc76d456",
+        "submission_id": "sub_c2cee02c2fbc",
+        "display_user": "yyzhang0715"
+      },
+      "ours": {
+        "speedup": 0.256,
+        "passed_cases": 80,
+        "total_cases": 80,
+        "job_id": "job_28f11ccefda3"
+      },
+      "speedup_delta": 0.8412067186865455,
+      "disposition": "retain as a guardrail/counterexample; do not promote"
+    },
+    {
+      "operator": "MLA",
+      "stage": "hidden",
+      "knowledge_evidence_tier": "rejected_incomplete_correctness",
+      "artifact_validation": "hidden_incomplete",
+      "first_place": {
+        "speedup": 1.6207351393158704,
+        "passed_cases": 77,
+        "total_cases": 80,
+        "job_id": "job_c2bc0e8d8abf",
+        "submission_id": "sub_da7e90781c78",
+        "display_user": "junming222"
+      },
+      "ours": {
+        "speedup": 0.02,
+        "passed_cases": 79,
+        "total_cases": 80,
+        "job_id": "job_65fba01e4cc6"
+      },
+      "speedup_delta": 1.6007351393158704,
+      "disposition": "retain as a guardrail/counterexample; do not promote"
+    },
+    {
+      "operator": "MoeFinalizeRouting",
+      "stage": "hidden",
+      "knowledge_evidence_tier": "rejected_incomplete_correctness",
+      "artifact_validation": "hidden_incomplete",
+      "first_place": {
+        "speedup": 1.759199458119115,
+        "passed_cases": 74,
+        "total_cases": 80,
+        "job_id": "job_4cdf20f30268",
+        "submission_id": "sub_a31b9a7396a6",
+        "display_user": "wenzhongzhen"
+      },
+      "ours": {
+        "speedup": 1.522,
+        "passed_cases": 74,
+        "total_cases": 80,
+        "job_id": "job_53962fe88378"
+      },
+      "speedup_delta": 0.23719945811911503,
+      "disposition": "retain as a guardrail/counterexample; do not promote"
+    },
+    {
+      "operator": "ResizeBilinear",
+      "stage": "hidden",
+      "knowledge_evidence_tier": "rejected_incomplete_correctness",
+      "artifact_validation": "hidden_incomplete",
+      "first_place": {
+        "speedup": 6.36190184865491,
+        "passed_cases": 77,
+        "total_cases": 80,
+        "job_id": "job_a863e33819dd",
+        "submission_id": "sub_cd9c6ef24855",
+        "display_user": "junming222"
+      },
+      "ours": {
+        "speedup": 6.207,
+        "passed_cases": 79,
+        "total_cases": 80,
+        "job_id": "job_9d235ae5e803"
+      },
+      "speedup_delta": 0.15490184865491052,
+      "disposition": "retain as a guardrail/counterexample; do not promote"
+    },
+    {
+      "operator": "StridedSlice",
+      "stage": "hidden",
+      "knowledge_evidence_tier": "rejected_incomplete_correctness",
+      "artifact_validation": "hidden_incomplete",
+      "first_place": {
+        "speedup": 2.2017718846631347,
+        "passed_cases": 79,
+        "total_cases": 80,
+        "job_id": "job_6e5af19d1175",
+        "submission_id": "sub_2cab8c9f0aee",
+        "display_user": "yyzhang0715"
+      },
+      "ours": {
+        "speedup": 0.473,
+        "passed_cases": 80,
+        "total_cases": 80,
+        "job_id": "job_d39de099a2f4"
+      },
+      "speedup_delta": 1.7287718846631348,
+      "disposition": "retain as a guardrail/counterexample; do not promote"
+    }
+  ]
+}

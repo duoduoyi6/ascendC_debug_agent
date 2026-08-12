@@ -18,6 +18,7 @@ skills/ascendc/ascendc-debug/
 │   ├── runner.py                      # run_debug_session 主循环：Continue→attempt_started / Action→dispatch / Done/Abort→终态+产物
 │   ├── exit_artifacts.py              # 从 events 重建 debug_status.json（10 键）+ debug_trace.md（4 节）
 │   ├── agent_backend.py               # spawn_diagnose_agent（唯一 spawn 点：claude --bare -p，单轮诊断+改 kernel）+ make_agent_callback
+│   ├── optimization_policy.py          # 后置性能阶段 entry/Pareto 纯函数门禁（当前仅 shadow/opt-in 组件，未接入主循环）
 │   └── tests/ut/engine/               # 单元测试（119 UT，stdlib unittest）
 │       ├── run_all.py                 # 全量跑：python engine/tests/ut/engine/run_all.py
 │       ├── test_events.py             # EventWriter / read_events / _advisory_lock
@@ -31,6 +32,7 @@ skills/ascendc/ascendc-debug/
 │
 ├── references/                        # 静态参考资料
 │   ├── precision_knowledge_base.json  # 精度问题知识库（45 条：40 问题模式 + 5 算子 CHECKLIST）
+│   ├── optimization_knowledge_base.json # 通用 AscendC 性能优化知识库（硬件无关；证据审核后离线晋级）
 │   ├── branch-build.md                # Step 1-B 编译错误分析（SKILL.md 外置）
 │   ├── branch-import.md               # Step 1-I import 错误分析（SKILL.md 外置）
 │   ├── branch-runtime.md              # Step 1-R 运行时错误分析（SKILL.md 外置）
@@ -63,6 +65,7 @@ skills/ascendc/ascendc-debug/
     ├── precision_gate.py              # Gate 入口路由器：先跑通用层，再按 failure_type 派发到 gates/ 分支层
     ├── verify_status.py               # verify_status.json loader / validator（读取 utils/classify_verify_result.py 产出）
     ├── precision_knowledge.py         # 知识库管理：load / search / check / dump
+    ├── optimization_knowledge.py      # 通用优化 KB 只读 coarse/fine 检索与审计日志；无在线写入命令
     ├── anticheat.py                   # 反作弊检测：sha256 hash + Python AST + C++ 源码扫描（snapshot/verify/restore 子命令）
     ├── debug_precision_template.py    # 精度调试分析脚本模板（误差分布 + 固定输入 + shape 二分）
     │

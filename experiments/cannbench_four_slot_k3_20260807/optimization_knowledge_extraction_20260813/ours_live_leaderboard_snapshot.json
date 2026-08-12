@@ -1,0 +1,1679 @@
+{
+  "captured_at": "2026-08-12T17:19:18.226Z",
+  "display_name": "Debug-Agent Claude Code Kimi K3",
+  "entry_id": "sol_e7b0248b55f3bc13",
+  "filters": {
+    "benchmark": "official-tasks",
+    "hardware": "A3",
+    "version": "1.1.0"
+  },
+  "rank": 4,
+  "rows": [
+    {
+      "average_score": null,
+      "benchmark_speedup": null,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_de63c9b508d6",
+      "operator": "AdaptiveAvgPool3D",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": null,
+      "total_score": 50,
+      "updated": "2026.08.08",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.22,
+      "benchmark_speedup": 0.352,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_28e49e3f765d",
+      "operator": "AddRmsNormDynamicQuant",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.049,
+      "total_score": 61.23,
+      "updated": "2026.08.09",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.42,
+      "benchmark_speedup": 0.908,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_28b742246320",
+      "operator": "AddRmsNormDynamicQuant",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.064,
+      "total_score": 71.12,
+      "updated": "2026.08.09",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.59,
+      "benchmark_speedup": 1.358,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_699cea5ef6a1",
+      "operator": "ApplyAdamW",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.332,
+      "total_score": 79.26,
+      "updated": "2026.08.11",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.79,
+      "benchmark_speedup": 3.19,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_b27919a8c4be",
+      "operator": "ApplyAdamW",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.304,
+      "total_score": 89.61,
+      "updated": "2026.08.11",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.09,
+      "benchmark_speedup": 0.127,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_270ac75477bd",
+      "operator": "ApplyRotaryPosEmb",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.017,
+      "total_score": 54.55,
+      "updated": "2026.08.11",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.22,
+      "benchmark_speedup": 0.365,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_8f73f682fa29",
+      "operator": "ApplyRotaryPosEmb",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.024,
+      "total_score": 60.85,
+      "updated": "2026.08.11",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.15,
+      "benchmark_speedup": 0.295,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_2a7a276e5ab6",
+      "operator": "ArgMax",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.015,
+      "total_score": 57.64,
+      "updated": "2026.08.11",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.2,
+      "benchmark_speedup": 0.331,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_a6caf71a6c75",
+      "operator": "ArgMax",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.017,
+      "total_score": 59.89,
+      "updated": "2026.08.11",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.01,
+      "benchmark_speedup": 0.007,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_0ceb141063b9",
+      "operator": "Conv2D",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0,
+      "total_score": 50.28,
+      "updated": "2026.08.09",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.02,
+      "benchmark_speedup": 0.027,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_251f69e2957d",
+      "operator": "Conv2D",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0,
+      "total_score": 51.11,
+      "updated": "2026.08.09",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0,
+      "benchmark_speedup": 0.001,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_4e238c310fb5",
+      "operator": "Conv3DBackpropFilter",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0,
+      "total_score": 50.05,
+      "updated": "2026.08.10",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0,
+      "benchmark_speedup": 0.005,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_dfe55cf9d6b1",
+      "operator": "Conv3DBackpropFilter",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0,
+      "total_score": 50.23,
+      "updated": "2026.08.10",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.24,
+      "benchmark_speedup": 0.42,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_a60807eaea12",
+      "operator": "CrossEntropyLoss",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.019,
+      "total_score": 61.79,
+      "updated": "2026.08.11",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.27,
+      "benchmark_speedup": 0.533,
+      "cases": {
+        "passed": 77,
+        "total": 80
+      },
+      "job_id": "job_de3291d6dc99",
+      "operator": "CrossEntropyLoss",
+      "pass_rate": "96.3%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.025,
+      "total_score": 61.07,
+      "updated": "2026.08.11",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.07,
+      "benchmark_speedup": 0.117,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_0100ee7a6a0d",
+      "operator": "Cummin",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.004,
+      "total_score": 53.56,
+      "updated": "2026.08.11",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.09,
+      "benchmark_speedup": 0.247,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_408f14748ea5",
+      "operator": "Cummin",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.004,
+      "total_score": 54.63,
+      "updated": "2026.08.11",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.08,
+      "benchmark_speedup": 0.117,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_c22fc14ade9d",
+      "operator": "DepthwiseConv2D",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.007,
+      "total_score": 54.09,
+      "updated": "2026.08.10",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.18,
+      "benchmark_speedup": 0.303,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_4073a613d27f",
+      "operator": "DepthwiseConv2D",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.015,
+      "total_score": 59.14,
+      "updated": "2026.08.10",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.29,
+      "benchmark_speedup": 0.491,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_8d7560c3b6ce",
+      "operator": "DequantSwigluQuant",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.075,
+      "total_score": 64.55,
+      "updated": "2026.08.10",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.47,
+      "benchmark_speedup": 0.984,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_ef495e4683e4",
+      "operator": "DequantSwigluQuant",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.085,
+      "total_score": 73.7,
+      "updated": "2026.08.10",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.14,
+      "benchmark_speedup": 0.218,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_1fd0c7b1741b",
+      "operator": "Dilation2D",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.012,
+      "total_score": 57.08,
+      "updated": "2026.08.10",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.28,
+      "benchmark_speedup": 0.5,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_f35d3b1d84be",
+      "operator": "Dilation2D",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.033,
+      "total_score": 63.84,
+      "updated": "2026.08.10",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.3,
+      "benchmark_speedup": 0.558,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_3f92e8ee40ee",
+      "operator": "DynamicQuant",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.093,
+      "total_score": 65.22,
+      "updated": "2026.08.11",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.59,
+      "benchmark_speedup": 1.795,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_f83b8f9cf235",
+      "operator": "DynamicQuant",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.133,
+      "total_score": 79.62,
+      "updated": "2026.08.11",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.07,
+      "benchmark_speedup": 0.09,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_fc85ae1e80d3",
+      "operator": "EngramGateFusion",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.008,
+      "total_score": 53.73,
+      "updated": "2026.08.10",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.1,
+      "benchmark_speedup": 0.121,
+      "cases": {
+        "passed": 9,
+        "total": 80
+      },
+      "job_id": "job_b793bbc355c8",
+      "operator": "EngramGateFusion",
+      "pass_rate": "11.3%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.012,
+      "total_score": 23.93,
+      "updated": "2026.08.10",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.65,
+      "benchmark_speedup": 1.871,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_de758a79a4aa",
+      "operator": "Exp",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.265,
+      "total_score": 82.68,
+      "updated": "2026.08.10",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.8,
+      "benchmark_speedup": 3.302,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_32cbfc6bba90",
+      "operator": "Exp",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.312,
+      "total_score": 89.92,
+      "updated": "2026.08.10",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.62,
+      "benchmark_speedup": 1.425,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_3dd96e54dfb7",
+      "operator": "ForeachAddcdivScalar",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.459,
+      "total_score": 81.07,
+      "updated": "2026.08.10",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.85,
+      "benchmark_speedup": 4.104,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_b5ac0ab63a83",
+      "operator": "ForeachAddcdivScalar",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.393,
+      "total_score": 92.42,
+      "updated": "2026.08.11",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.44,
+      "benchmark_speedup": 0.909,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_dc772ea3fa70",
+      "operator": "ForeachNorm",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.165,
+      "total_score": 72.1,
+      "updated": "2026.08.11",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.68,
+      "benchmark_speedup": 2.143,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_48824ee386aa",
+      "operator": "ForeachNorm",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.195,
+      "total_score": 67.03,
+      "updated": "2026.08.11",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.03,
+      "benchmark_speedup": 0.031,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_69348266b737",
+      "operator": "Gather",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.002,
+      "total_score": 51.34,
+      "updated": "2026.08.11",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.09,
+      "benchmark_speedup": 0.246,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_dce474f3c4ca",
+      "operator": "Gather",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.006,
+      "total_score": 54.5,
+      "updated": "2026.08.11",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.08,
+      "benchmark_speedup": 0.102,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_78b950d2ee3b",
+      "operator": "Gcd",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.009,
+      "total_score": 54.04,
+      "updated": "2026.08.11",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.11,
+      "benchmark_speedup": 0.297,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_e87de28e5679",
+      "operator": "Gcd",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.008,
+      "total_score": 55.54,
+      "updated": "2026.08.11",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.25,
+      "benchmark_speedup": 0.46,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_ac3a7f0e27e4",
+      "operator": "Gelu",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.107,
+      "total_score": 62.55,
+      "updated": "2026.08.11",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.59,
+      "benchmark_speedup": 1.97,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_5f536bf46780",
+      "operator": "Gelu",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.139,
+      "total_score": 79.52,
+      "updated": "2026.08.11",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.04,
+      "benchmark_speedup": 0.055,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_21a2009a60e7",
+      "operator": "GQA",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.009,
+      "total_score": 52.11,
+      "updated": "2026.08.12",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.12,
+      "benchmark_speedup": 0.178,
+      "cases": {
+        "passed": 77,
+        "total": 80
+      },
+      "job_id": "job_d47ef5e806e8",
+      "operator": "GQA",
+      "pass_rate": "96.3%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.012,
+      "total_score": 54.37,
+      "updated": "2026.08.12",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.01,
+      "benchmark_speedup": 0.009,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_e3cc845d3e48",
+      "operator": "GridSampler3D",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0,
+      "total_score": 50.37,
+      "updated": "2026.08.11",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.02,
+      "benchmark_speedup": 0.072,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_3cb4b2274f22",
+      "operator": "GridSampler3D",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.001,
+      "total_score": 51.13,
+      "updated": "2026.08.11",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.01,
+      "benchmark_speedup": 0.014,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_f42be2b85af0",
+      "operator": "GroupedMatmul",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0,
+      "total_score": 50.57,
+      "updated": "2026.08.07",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.03,
+      "benchmark_speedup": 0.079,
+      "cases": {
+        "passed": 55,
+        "total": 80
+      },
+      "job_id": "job_ba511ae7c8ed",
+      "operator": "GroupedMatmul",
+      "pass_rate": "68.8%",
+      "stage": "hidden",
+      "theoretical_speedup": 0,
+      "total_score": 39.73,
+      "updated": "2026.08.07",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.57,
+      "benchmark_speedup": 1.519,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_c688560d5bf5",
+      "operator": "GroupedMatmulSwigluQuant",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.175,
+      "total_score": 78.25,
+      "updated": "2026.08.12",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.5,
+      "benchmark_speedup": 1.27,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_8f0b46cedd24",
+      "operator": "GroupedMatmulSwigluQuant",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.097,
+      "total_score": 74.97,
+      "updated": "2026.08.12",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.24,
+      "benchmark_speedup": 0.402,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_a37be2790da7",
+      "operator": "GroupNorm",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.047,
+      "total_score": 62.03,
+      "updated": "2026.08.12",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.53,
+      "benchmark_speedup": 1.284,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_b2a8419f406d",
+      "operator": "GroupNorm",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.109,
+      "total_score": 76.66,
+      "updated": "2026.08.12",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.02,
+      "benchmark_speedup": 0.023,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_1eed380db4e6",
+      "operator": "GRU",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.001,
+      "total_score": 51,
+      "updated": "2026.08.12",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.03,
+      "benchmark_speedup": 0.037,
+      "cases": {
+        "passed": 79,
+        "total": 80
+      },
+      "job_id": "job_c9227a0f3fe6",
+      "operator": "GRU",
+      "pass_rate": "98.8%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.001,
+      "total_score": 50.38,
+      "updated": "2026.08.12",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0,
+      "benchmark_speedup": 0.005,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_5f69bbed0d0d",
+      "operator": "LSTM",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0,
+      "total_score": 50.24,
+      "updated": "2026.08.10",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0,
+      "benchmark_speedup": 0.004,
+      "cases": {
+        "passed": 61,
+        "total": 80
+      },
+      "job_id": "job_5ed7bb257283",
+      "operator": "LSTM",
+      "pass_rate": "76.3%",
+      "stage": "hidden",
+      "theoretical_speedup": 0,
+      "total_score": 42.02,
+      "updated": "2026.08.11",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.74,
+      "benchmark_speedup": 2.236,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_05daab251897",
+      "operator": "MaskedScale",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.421,
+      "total_score": 86.98,
+      "updated": "2026.08.11",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.87,
+      "benchmark_speedup": 4.295,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_ab248e99e59c",
+      "operator": "MaskedScale",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.421,
+      "total_score": 93.25,
+      "updated": "2026.08.11",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.33,
+      "benchmark_speedup": 0.674,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_368c984ed127",
+      "operator": "Maximum",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.16,
+      "total_score": 66.57,
+      "updated": "2026.08.11",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.72,
+      "benchmark_speedup": 2.912,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_011ec63f6c6b",
+      "operator": "Maximum",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.219,
+      "total_score": 85.81,
+      "updated": "2026.08.12",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.1,
+      "benchmark_speedup": 0.199,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_193bcb5c1a02",
+      "operator": "MHA",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.015,
+      "total_score": 55.09,
+      "updated": "2026.08.12",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.11,
+      "benchmark_speedup": 0.234,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_6ac4ac24a3ae",
+      "operator": "MHA",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.004,
+      "total_score": 55.36,
+      "updated": "2026.08.12",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.1,
+      "benchmark_speedup": 0.158,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_2aa7f0e63a94",
+      "operator": "MhcSinkhorn",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.006,
+      "total_score": 54.89,
+      "updated": "2026.08.10",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.11,
+      "benchmark_speedup": 0.256,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_28f11ccefda3",
+      "operator": "MhcSinkhorn",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.007,
+      "total_score": 55.37,
+      "updated": "2026.08.10",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.48,
+      "benchmark_speedup": 0.939,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_2dacdf97343f",
+      "operator": "Mish",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.132,
+      "total_score": 74.06,
+      "updated": "2026.08.11",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.63,
+      "benchmark_speedup": 1.894,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_8eeb9c9d1d56",
+      "operator": "Mish",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.165,
+      "total_score": 81.67,
+      "updated": "2026.08.11",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.01,
+      "benchmark_speedup": 0.009,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_6ae9c223f245",
+      "operator": "MLA",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.002,
+      "total_score": 50.36,
+      "updated": "2026.08.12",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.02,
+      "benchmark_speedup": 0.02,
+      "cases": {
+        "passed": 79,
+        "total": 80
+      },
+      "job_id": "job_65fba01e4cc6",
+      "operator": "MLA",
+      "pass_rate": "98.8%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.001,
+      "total_score": 50.45,
+      "updated": "2026.08.12",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.02,
+      "benchmark_speedup": 0.029,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_cd37a0fa802e",
+      "operator": "MlaProlog",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.003,
+      "total_score": 51.05,
+      "updated": "2026.08.13",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.03,
+      "benchmark_speedup": 0.041,
+      "cases": {
+        "passed": 53,
+        "total": 80
+      },
+      "job_id": "job_e3e0d0aeba25",
+      "operator": "MlaProlog",
+      "pass_rate": "66.3%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.002,
+      "total_score": 34.22,
+      "updated": "2026.08.12",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.34,
+      "benchmark_speedup": 0.612,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_6795e189e3f6",
+      "operator": "MoeFinalizeRouting",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.069,
+      "total_score": 66.76,
+      "updated": "2026.08.10",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.6,
+      "benchmark_speedup": 1.522,
+      "cases": {
+        "passed": 74,
+        "total": 80
+      },
+      "job_id": "job_53962fe88378",
+      "operator": "MoeFinalizeRouting",
+      "pass_rate": "92.5%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.142,
+      "total_score": 73.83,
+      "updated": "2026.08.10",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.16,
+      "benchmark_speedup": 0.247,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_700e27bffae6",
+      "operator": "MoeGatingTopKSoftmax",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.012,
+      "total_score": 57.82,
+      "updated": "2026.08.10",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.23,
+      "benchmark_speedup": 0.48,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_03f181ab977c",
+      "operator": "MoeGatingTopKSoftmax",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.023,
+      "total_score": 61.66,
+      "updated": "2026.08.10",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.44,
+      "benchmark_speedup": 0.832,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_d3310dd65220",
+      "operator": "MoeReRouting",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.171,
+      "total_score": 71.76,
+      "updated": "2026.08.10",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.64,
+      "benchmark_speedup": 1.95,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_c5f0a10fe51d",
+      "operator": "MoeReRouting",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.167,
+      "total_score": 82.09,
+      "updated": "2026.08.10",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.03,
+      "benchmark_speedup": 0.038,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_606d731f4129",
+      "operator": "NMS",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.002,
+      "total_score": 51.61,
+      "updated": "2026.08.11",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.05,
+      "benchmark_speedup": 0.105,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_c89d84a1745f",
+      "operator": "NMS",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.002,
+      "total_score": 52.29,
+      "updated": "2026.08.11",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.05,
+      "benchmark_speedup": 0.088,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_cf45c1fee2cf",
+      "operator": "QuantMatmul",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.025,
+      "total_score": 52.62,
+      "updated": "2026.08.08",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.2,
+      "benchmark_speedup": 0.303,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_8a8dd50c921b",
+      "operator": "QuantMatmul",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.021,
+      "total_score": 60.12,
+      "updated": "2026.08.08",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.04,
+      "benchmark_speedup": 0.06,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_a23d44fa41e7",
+      "operator": "ResizeBilinear",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.003,
+      "total_score": 52.23,
+      "updated": "2026.08.12",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.17,
+      "benchmark_speedup": 6.207,
+      "cases": {
+        "passed": 79,
+        "total": 80
+      },
+      "job_id": "job_9d235ae5e803",
+      "operator": "ResizeBilinear",
+      "pass_rate": "98.8%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.01,
+      "total_score": 57.83,
+      "updated": "2026.08.13",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.29,
+      "benchmark_speedup": 0.503,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_16e9e2246c18",
+      "operator": "RmsNorm",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.067,
+      "total_score": 64.52,
+      "updated": "2026.08.11",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.49,
+      "benchmark_speedup": 1.276,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_9a925240a740",
+      "operator": "RmsNorm",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.075,
+      "total_score": 74.38,
+      "updated": "2026.08.11",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.01,
+      "benchmark_speedup": 0.012,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_76398e391069",
+      "operator": "ROIAlign",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.001,
+      "total_score": 50.49,
+      "updated": "2026.08.08",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.03,
+      "benchmark_speedup": 0.045,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_6ea1ef04d2d9",
+      "operator": "ROIAlign",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.001,
+      "total_score": 51.4,
+      "updated": "2026.08.08",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.02,
+      "benchmark_speedup": 0.024,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_bf98604b20e5",
+      "operator": "Scatter",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0,
+      "total_score": 50.8,
+      "updated": "2026.08.12",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.02,
+      "benchmark_speedup": 0.061,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_671f0272f851",
+      "operator": "Scatter",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0,
+      "total_score": 51.22,
+      "updated": "2026.08.12",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.34,
+      "benchmark_speedup": 0.674,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_2653ddc2716a",
+      "operator": "Sigmoid",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.266,
+      "total_score": 67.07,
+      "updated": "2026.08.11",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.79,
+      "benchmark_speedup": 3.232,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_9eb3f62edd46",
+      "operator": "Sigmoid",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.304,
+      "total_score": 89.6,
+      "updated": "2026.08.11",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.25,
+      "benchmark_speedup": 0.424,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_643b6fe67592",
+      "operator": "Softmax",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.034,
+      "total_score": 62.5,
+      "updated": "2026.08.12",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.44,
+      "benchmark_speedup": 1.239,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_44d6d2554cb6",
+      "operator": "Softmax",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.067,
+      "total_score": 61.12,
+      "updated": "2026.08.12",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.01,
+      "benchmark_speedup": 0.015,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_9c61351d3ce6",
+      "operator": "SparseFlashAttention",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.001,
+      "total_score": 50.64,
+      "updated": "2026.08.12",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.05,
+      "benchmark_speedup": 0.068,
+      "cases": {
+        "passed": 76,
+        "total": 80
+      },
+      "job_id": "job_3221545b535a",
+      "operator": "SparseFlashAttention",
+      "pass_rate": "95%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.002,
+      "total_score": 50.83,
+      "updated": "2026.08.12",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.11,
+      "benchmark_speedup": 0.168,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_7badbd39e59b",
+      "operator": "StridedSlice",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.007,
+      "total_score": 55.33,
+      "updated": "2026.08.07",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.13,
+      "benchmark_speedup": 0.473,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_d39de099a2f4",
+      "operator": "StridedSlice",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.009,
+      "total_score": 56.68,
+      "updated": "2026.08.08",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.54,
+      "benchmark_speedup": 1.41,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_7c4a0829a1fb",
+      "operator": "SwiGlu",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.163,
+      "total_score": 76.93,
+      "updated": "2026.08.11",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.73,
+      "benchmark_speedup": 2.836,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_a690901e68d1",
+      "operator": "SwiGlu",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.229,
+      "total_score": 86.63,
+      "updated": "2026.08.11",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0,
+      "benchmark_speedup": 0.004,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_ace17af2be1c",
+      "operator": "TopK",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0,
+      "total_score": 50.18,
+      "updated": "2026.08.08",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.06,
+      "benchmark_speedup": 0.189,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_159962d4285b",
+      "operator": "TopK",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.001,
+      "total_score": 52.88,
+      "updated": "2026.08.08",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.03,
+      "benchmark_speedup": 0.037,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_d4365ccde3a2",
+      "operator": "Transpose",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.003,
+      "total_score": 51.54,
+      "updated": "2026.08.08",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.12,
+      "benchmark_speedup": 0.277,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_de02146cafb4",
+      "operator": "Transpose",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.007,
+      "total_score": 55.85,
+      "updated": "2026.08.08",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0,
+      "benchmark_speedup": 0,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_a676fba57996",
+      "operator": "Unique",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0,
+      "total_score": 50.01,
+      "updated": "2026.08.08",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.01,
+      "benchmark_speedup": 0.017,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_50192d45a673",
+      "operator": "Unique",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0,
+      "total_score": 50.62,
+      "updated": "2026.08.08",
+      "user": "duoduoyi6"
+    },
+    {
+      "average_score": 0.1,
+      "benchmark_speedup": 0.141,
+      "cases": {
+        "passed": 20,
+        "total": 20
+      },
+      "job_id": "job_c72c04f4a4f6",
+      "operator": "UnsortedSegmentSum",
+      "pass_rate": "100%",
+      "stage": "standard",
+      "theoretical_speedup": 0.008,
+      "total_score": 55.11,
+      "updated": "2026.08.12",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.21,
+      "benchmark_speedup": 0.453,
+      "cases": {
+        "passed": 80,
+        "total": 80
+      },
+      "job_id": "job_40e01bb8944b",
+      "operator": "UnsortedSegmentSum",
+      "pass_rate": "100%",
+      "stage": "hidden",
+      "theoretical_speedup": 0.017,
+      "total_score": 55.14,
+      "updated": "2026.08.12",
+      "user": "GitCodeVoyager"
+    },
+    {
+      "average_score": 0.01,
+      "benchmark_speedup": 0.01,
+      "cases": {
+        "passed": 15,
+        "total": 20
+      },
+      "job_id": "job_50eb622f564b",
+      "operator": "WeightQuantBatchMatmul",
+      "pass_rate": "75%",
+      "stage": "standard",
+      "theoretical_speedup": 0.001,
+      "total_score": 42.78,
+      "updated": "2026.08.09",
+      "user": "GitCodeVoyager"
+    }
+  ],
+  "summary_text": "04\nDebug-Agent Claude Code Kimi K3\n104 任务 · official-tasks · 1.1.0\nA3\nGitCodeVoyager\nofficial-tasks\n6338.28\n60.98\n0.287×\n0.012×\n53/53\n96.8%\n2026.08.13\nNEW",
+  "url": "https://cannbench.com/leaderboard"
+}

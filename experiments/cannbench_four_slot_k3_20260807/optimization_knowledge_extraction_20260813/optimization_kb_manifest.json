@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "comparison_path": "experiments/cannbench_four_slot_k3_20260807/optimization_knowledge_extraction_20260813/paired_operator_stage_metrics.json",
+  "comparison_sha256": "2a5c923486a3fdeee5478e3e890fe4b4a525e3a785a0555a477017670f8818f4",
+  "optimization_kb_path": "skills/ascendc/ascendc-debug/references/optimization_knowledge_base.json",
+  "optimization_kb_sha256": "a5f2586572170827ccdf2675e89629b02b0e552a508b643d2719d55d618748bf",
+  "optimization_kb_entries": 13,
+  "promoted_entries": 12,
+  "supported_entries": 1,
+  "canonical_scope": "hardware-agnostic mechanisms; snapshot hardware remains only in the audited comparison sidecar and is not a KB retrieval dimension",
+  "evidence_operators": [
+    "ApplyAdamW",
+    "ApplyRotaryPosEmb",
+    "DynamicQuant",
+    "Exp",
+    "ForeachNorm",
+    "Gather",
+    "GroupNorm",
+    "Mish",
+    "RmsNorm",
+    "Sigmoid",
+    "Softmax",
+    "UnsortedSegmentSum"
+  ],
+  "noncanonical_archive_path": "experiments/cannbench_four_slot_k3_20260807/optimization_knowledge_extraction_20260813/optimization_hypotheses_and_counterexamples.json",
+  "noncanonical_archive_sha256": "b7051bbc645fb7c010f9ce94ea393a292b3a80da16767047a01340a00e3954af",
+  "default_agent_injection": false,
+  "reason_default_off": "the current precision engine lacks a same-case repeated-performance baseline and Pareto acceptance gate; the KB is available through a read-only search CLI"
+}

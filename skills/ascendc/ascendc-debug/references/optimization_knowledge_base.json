@@ -1,0 +1,1043 @@
+[
+  {
+    "title": "工作集可驻留 UB 时走单遍快路径，大形状保留流式回退",
+    "patterns": [
+      "redundant_gm_pass",
+      "ub_underutilization",
+      "reduction_scalar_stall"
+    ],
+    "op_types": [
+      "normalization",
+      "reduction",
+      "softmax",
+      "rowwise"
+    ],
+    "feature": "同一行、group 或 plane 在多遍算法中被重复从 GM 读取，且小中形状的完整工作集实际可以放入 UB。",
+    "reason": "统一使用多遍流式实现会在可驻留形状上浪费 GM 带宽，并重复执行 cast、归约准备和同步。",
+    "fix": "先按 dtype、工作集和临时缓冲精确计算 UB 占用；满足预算时一次搬入并在 UB 内完成统计、变换和写回，不满足时回退到经过验证的分块/多遍路径。驻留判断必须是显式、可审计的 shape gate。",
+    "type": "OPT_UB_RESIDENT_FAST_PATH",
+    "applicability": "行归约、归一化、softmax，以及需要两遍读取同一输入的算子。",
+    "risks": "不能只按输入张量大小估算；队列深度、cast 缓冲、归约 scratch、padding 和事件对象都计入 UB。错误预算会导致编译失败、UB 越界或隐藏形状崩溃。",
+    "knowledge_id": "optkb-768d63d84481",
+    "status": "promoted",
+    "confidence": "high",
+    "validation": {
+      "correctness": "every cited immutable artifact passed its 80-case hidden stage",
+      "performance": "first-place hidden benchmark speedup is >1.0 and greater than our paired live snapshot",
+      "causality": "supported by source structure and leaderboard association, not a controlled one-change ablation",
+      "acceptance_requirement": "reproduce on the target task with frozen correctness and repeated same-case timing before adoption"
+    },
+    "evidence": [
+      {
+        "operator": "GroupNorm",
+        "stage": "hidden",
+        "first_place_speedup": 2.2105387320799856,
+        "ours_speedup": 1.284,
+        "speedup_delta": 0.9265387320799856,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_028d337b1730",
+        "first_place_job_id": "job_29a7088b8a59",
+        "inner_zip_sha256": "712076cb729cb501dc02c8070942053706c60a97f6653c456aae8b2ccf73ef3b",
+        "source_member": "submissions/sub_028d337b1730.zip::csrc/ops/group_norm/op_kernel/group_norm_kernel.cpp",
+        "source_sha256": "00866372c5c1335b3a1e5f9181cad3dd20364f2a017a0bbcf39545984c1056ab",
+        "source_lines": "4-15,48-52",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      },
+      {
+        "operator": "RmsNorm",
+        "stage": "hidden",
+        "first_place_speedup": 1.9285374563144626,
+        "ours_speedup": 1.276,
+        "speedup_delta": 0.6525374563144626,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_16b3c07a9a7a",
+        "first_place_job_id": "job_f5b37d01e8e6",
+        "inner_zip_sha256": "52d40988238128b0b5ab04cfabcc1b83b887f78d421971c0375caa88bfd016ba",
+        "source_member": "submissions/sub_16b3c07a9a7a.zip::csrc/ops/rms_norm/op_kernel/rms_norm_kernel.cpp",
+        "source_sha256": "a75de69da714f32915c7564434091a79ff36705fe745e9171729ccd9002c7b1f",
+        "source_lines": "9-28,74-129",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      },
+      {
+        "operator": "Softmax",
+        "stage": "hidden",
+        "first_place_speedup": 1.4936302918811406,
+        "ours_speedup": 1.239,
+        "speedup_delta": 0.2546302918811405,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_3bb996dbeeaa",
+        "first_place_job_id": "job_bff4c3af17e2",
+        "inner_zip_sha256": "8d03dce128e285d148904da1125ff4eef5c228cd070ffb34d0691778fcb9757a",
+        "source_member": "submissions/sub_3bb996dbeeaa.zip::csrc/ops/softmax/op_kernel/softmax_kernel.cpp",
+        "source_sha256": "b9fbf2ac1795a5f4e12160169792cfcc4d843bea414758fe8cc22d7a999475bb",
+        "source_lines": "24-33,64-83",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      }
+    ]
+  },
+  {
+    "title": "将多行或多 group 合批，摊薄逐行标量同步和小 DMA 开销",
+    "patterns": [
+      "scalar_hot_loop",
+      "tiny_dma",
+      "reduction_scalar_stall"
+    ],
+    "op_types": [
+      "normalization",
+      "quantization",
+      "rotary_embedding",
+      "rowwise"
+    ],
+    "feature": "每行计算量较小，但每行都独立发起 DMA、归约读回、除模或同步，scalar pipe 和固定启动成本占主导。",
+    "reason": "逐行循环让固定控制开销随行数线性增长，也使 MTE2/V/MTE3 难以形成足够粗粒度的流水。",
+    "fix": "在 UB 预算内一次处理 R 行或完整 head group；把行归约、scale 生成、广播和写回改为批量向量操作，并预先展开可复用的 cos/sin、gamma 或 scale 表。R 必须随 dtype、行宽和布局自适应。",
+    "type": "OPT_ROW_BATCHING",
+    "applicability": "小/中等行宽且行间语义独立的量化、归一化、位置编码和逐行激活。",
+    "risks": "合批可能增加 padding、广播表和额外 rotary/gamma 载入；必须保留小 R 或单行回退，并按 case 测量而不是假定越大越快。",
+    "knowledge_id": "optkb-e6df3cb7ed6a",
+    "status": "promoted",
+    "confidence": "high",
+    "validation": {
+      "correctness": "every cited immutable artifact passed its 80-case hidden stage",
+      "performance": "first-place hidden benchmark speedup is >1.0 and greater than our paired live snapshot",
+      "causality": "supported by source structure and leaderboard association, not a controlled one-change ablation",
+      "acceptance_requirement": "reproduce on the target task with frozen correctness and repeated same-case timing before adoption"
+    },
+    "evidence": [
+      {
+        "operator": "DynamicQuant",
+        "stage": "hidden",
+        "first_place_speedup": 3.846062528642393,
+        "ours_speedup": 1.795,
+        "speedup_delta": 2.051062528642393,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_bb4b6ab09cd2",
+        "first_place_job_id": "job_932d90fe2657",
+        "inner_zip_sha256": "2166e8e9a43dd2965b775c5653b564ee324786796d2f906783f770e4382723d0",
+        "source_member": "submissions/sub_bb4b6ab09cd2.zip::csrc/ops/dynamic_quant/op_kernel/dynamic_quant_kernel.cpp",
+        "source_sha256": "3afa30971be24a7e3a03b2e99816597eb25c2fe467fef03f610b5a0d1426727e",
+        "source_lines": "7-32,133-240",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      },
+      {
+        "operator": "RmsNorm",
+        "stage": "hidden",
+        "first_place_speedup": 1.9285374563144626,
+        "ours_speedup": 1.276,
+        "speedup_delta": 0.6525374563144626,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_16b3c07a9a7a",
+        "first_place_job_id": "job_f5b37d01e8e6",
+        "inner_zip_sha256": "52d40988238128b0b5ab04cfabcc1b83b887f78d421971c0375caa88bfd016ba",
+        "source_member": "submissions/sub_16b3c07a9a7a.zip::csrc/ops/rms_norm/op_kernel/rms_norm_kernel.cpp",
+        "source_sha256": "a75de69da714f32915c7564434091a79ff36705fe745e9171729ccd9002c7b1f",
+        "source_lines": "12-20,99-129",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      },
+      {
+        "operator": "ApplyRotaryPosEmb",
+        "stage": "hidden",
+        "first_place_speedup": 1.0993013959579563,
+        "ours_speedup": 0.365,
+        "speedup_delta": 0.7343013959579563,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_296efa8fd814",
+        "first_place_job_id": "job_b231e2e14271",
+        "inner_zip_sha256": "28582c56a7290e6ad2f04aab6c8369f593f6f7c8cd8e452926987f5977ba6cd3",
+        "source_member": "submissions/sub_296efa8fd814.zip::csrc/ops/apply_rotary_pos_emb/op_kernel/apply_rotary_pos_emb_kernel.cpp",
+        "source_sha256": "75809cd6c73fd8aa17f8ccf937019a2f722e6e3e7816c8c2b75326678fe8a4e4",
+        "source_lines": "9-25,93-153",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      }
+    ]
+  },
+  {
+    "title": "用双缓冲和精确事件重叠 MTE2、VEC、MTE3，避免宽泛全流水屏障",
+    "patterns": [
+      "pipeline_bubble",
+      "broad_barrier",
+      "tiny_dma"
+    ],
+    "op_types": [
+      "elementwise",
+      "normalization",
+      "softmax",
+      "optimizer",
+      "layout"
+    ],
+    "feature": "kernel 按 CopyIn -> Compute -> CopyOut 串行执行，或在每个 tile 使用 PIPE_ALL，使搬运和向量计算互相等待。",
+    "reason": "单缓冲及过宽同步会排空流水；即使向量算术很少，端到端时间也被 DMA 和队列等待主导。",
+    "fix": "为主输入/输出配置 depth=2 队列或奇偶槽，预取下一 tile，并只在真实 RAW/WAR/WAW 依赖边界使用对应 HardEvent。为不能安全重叠或 UB 不足的形状保留单缓冲回退。",
+    "type": "OPT_PIPELINE_OVERLAP",
+    "applicability": "有连续 tile、搬运和计算可并行的带宽受限或混合受限 kernel。",
+    "risks": "事件 ID 必须正确分配和成对释放；错误复用会造成竞态、挂起或偶发错数。双缓冲还会压缩可用 tile 大小，因此必须联合算 UB。",
+    "knowledge_id": "optkb-9f216622c0e8",
+    "status": "promoted",
+    "confidence": "high",
+    "validation": {
+      "correctness": "every cited immutable artifact passed its 80-case hidden stage",
+      "performance": "first-place hidden benchmark speedup is >1.0 and greater than our paired live snapshot",
+      "causality": "supported by source structure and leaderboard association, not a controlled one-change ablation",
+      "acceptance_requirement": "reproduce on the target task with frozen correctness and repeated same-case timing before adoption"
+    },
+    "evidence": [
+      {
+        "operator": "ApplyAdamW",
+        "stage": "hidden",
+        "first_place_speedup": 4.044622592783388,
+        "ours_speedup": 3.19,
+        "speedup_delta": 0.8546225927833881,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_6160ae15e4da",
+        "first_place_job_id": "job_faf3a220f006",
+        "inner_zip_sha256": "ccb03290872b315ddb0ee8597916915cfab7dc8eb06cc1daf50271b9cd9e8bc4",
+        "source_member": "submissions/sub_6160ae15e4da.zip::csrc/ops/apply_adam_w/op_kernel/apply_adam_w_kernel.cpp",
+        "source_sha256": "12a6a42d920c4c667b1ee17a6dc5dea8d6483373c4d1bba6699eb2e6f80d326f",
+        "source_lines": "10-10,83-103,113-130",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      },
+      {
+        "operator": "GroupNorm",
+        "stage": "hidden",
+        "first_place_speedup": 2.2105387320799856,
+        "ours_speedup": 1.284,
+        "speedup_delta": 0.9265387320799856,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_028d337b1730",
+        "first_place_job_id": "job_29a7088b8a59",
+        "inner_zip_sha256": "712076cb729cb501dc02c8070942053706c60a97f6653c456aae8b2ccf73ef3b",
+        "source_member": "submissions/sub_028d337b1730.zip::csrc/ops/group_norm/op_kernel/group_norm_kernel.cpp",
+        "source_sha256": "00866372c5c1335b3a1e5f9181cad3dd20364f2a017a0bbcf39545984c1056ab",
+        "source_lines": "8-15,23-29",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      },
+      {
+        "operator": "Softmax",
+        "stage": "hidden",
+        "first_place_speedup": 1.4936302918811406,
+        "ours_speedup": 1.239,
+        "speedup_delta": 0.2546302918811405,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_3bb996dbeeaa",
+        "first_place_job_id": "job_bff4c3af17e2",
+        "inner_zip_sha256": "8d03dce128e285d148904da1125ff4eef5c228cd070ffb34d0691778fcb9757a",
+        "source_member": "submissions/sub_3bb996dbeeaa.zip::csrc/ops/softmax/op_kernel/softmax_kernel.cpp",
+        "source_sha256": "b9fbf2ac1795a5f4e12160169792cfcc4d843bea414758fe8cc22d7a999475bb",
+        "source_lines": "36-44,139-180",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      },
+      {
+        "operator": "ApplyRotaryPosEmb",
+        "stage": "hidden",
+        "first_place_speedup": 1.0993013959579563,
+        "ours_speedup": 0.365,
+        "speedup_delta": 0.7343013959579563,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_296efa8fd814",
+        "first_place_job_id": "job_b231e2e14271",
+        "inner_zip_sha256": "28582c56a7290e6ad2f04aab6c8369f593f6f7c8cd8e452926987f5977ba6cd3",
+        "source_member": "submissions/sub_296efa8fd814.zip::csrc/ops/apply_rotary_pos_emb/op_kernel/apply_rotary_pos_emb_kernel.cpp",
+        "source_sha256": "75809cd6c73fd8aa17f8ccf937019a2f722e6e3e7816c8c2b75326678fe8a4e4",
+        "source_lines": "38-40,93-153",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      }
+    ]
+  },
+  {
+    "title": "按 shape、dtype、layout 和属性选择专用快路径，并保留正确回退",
+    "patterns": [
+      "layout_dependent_access",
+      "dtype_cast_overhead",
+      "scalar_hot_loop",
+      "random_access_latency"
+    ],
+    "op_types": [
+      "layout",
+      "normalization",
+      "quantization",
+      "softmax",
+      "gather"
+    ],
+    "feature": "一个通用循环同时覆盖不同布局、行宽、dtype 和属性组合，导致每个 case 都承担分支、cast、随机访问或不适合的 tile 策略。",
+    "reason": "算子的瓶颈会随属性矩阵切换：小行可能受固定开销限制，大行受带宽限制，中间轴可能需要 gather，低精度可能需要或不需要 fp32 桥。单一路径很难同时最优。",
+    "fix": "用少量互斥、可证明的运行时/tiling key 路由 resident、batched、streaming、contiguous、interleaved 或 dtype-specific 路径；每条快路径写明适用谓词，并让未覆盖组合落到完整正确回退。",
+    "type": "OPT_SPECIALIZED_PATH_ROUTING",
+    "applicability": "公开 contract 中存在多 dtype、多布局、动态维度或可选属性的算子。",
+    "risks": "路径数量会增加验证面；不得依据隐藏 case ID 或未公开输入硬编码。每条路径都必须跑全公开回归和独立 surrogate 边界测试。",
+    "knowledge_id": "optkb-69f2deafbff8",
+    "status": "promoted",
+    "confidence": "high",
+    "validation": {
+      "correctness": "every cited immutable artifact passed its 80-case hidden stage",
+      "performance": "first-place hidden benchmark speedup is >1.0 and greater than our paired live snapshot",
+      "causality": "supported by source structure and leaderboard association, not a controlled one-change ablation",
+      "acceptance_requirement": "reproduce on the target task with frozen correctness and repeated same-case timing before adoption"
+    },
+    "evidence": [
+      {
+        "operator": "ApplyRotaryPosEmb",
+        "stage": "hidden",
+        "first_place_speedup": 1.0993013959579563,
+        "ours_speedup": 0.365,
+        "speedup_delta": 0.7343013959579563,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_296efa8fd814",
+        "first_place_job_id": "job_b231e2e14271",
+        "inner_zip_sha256": "28582c56a7290e6ad2f04aab6c8369f593f6f7c8cd8e452926987f5977ba6cd3",
+        "source_member": "submissions/sub_296efa8fd814.zip::csrc/ops/apply_rotary_pos_emb/op_kernel/apply_rotary_pos_emb_kernel.cpp",
+        "source_sha256": "75809cd6c73fd8aa17f8ccf937019a2f722e6e3e7816c8c2b75326678fe8a4e4",
+        "source_lines": "42-50,93-153",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      },
+      {
+        "operator": "DynamicQuant",
+        "stage": "hidden",
+        "first_place_speedup": 3.846062528642393,
+        "ours_speedup": 1.795,
+        "speedup_delta": 2.051062528642393,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_bb4b6ab09cd2",
+        "first_place_job_id": "job_932d90fe2657",
+        "inner_zip_sha256": "2166e8e9a43dd2965b775c5653b564ee324786796d2f906783f770e4382723d0",
+        "source_member": "submissions/sub_bb4b6ab09cd2.zip::csrc/ops/dynamic_quant/op_kernel/dynamic_quant_kernel.cpp",
+        "source_sha256": "3afa30971be24a7e3a03b2e99816597eb25c2fe467fef03f610b5a0d1426727e",
+        "source_lines": "89-129,196-240",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      },
+      {
+        "operator": "RmsNorm",
+        "stage": "hidden",
+        "first_place_speedup": 1.9285374563144626,
+        "ours_speedup": 1.276,
+        "speedup_delta": 0.6525374563144626,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_16b3c07a9a7a",
+        "first_place_job_id": "job_f5b37d01e8e6",
+        "inner_zip_sha256": "52d40988238128b0b5ab04cfabcc1b83b887f78d421971c0375caa88bfd016ba",
+        "source_member": "submissions/sub_16b3c07a9a7a.zip::csrc/ops/rms_norm/op_kernel/rms_norm_kernel.cpp",
+        "source_sha256": "a75de69da714f32915c7564434091a79ff36705fe745e9171729ccd9002c7b1f",
+        "source_lines": "74-129",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      },
+      {
+        "operator": "Softmax",
+        "stage": "hidden",
+        "first_place_speedup": 1.4936302918811406,
+        "ours_speedup": 1.239,
+        "speedup_delta": 0.2546302918811405,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_3bb996dbeeaa",
+        "first_place_job_id": "job_bff4c3af17e2",
+        "inner_zip_sha256": "8d03dce128e285d148904da1125ff4eef5c228cd070ffb34d0691778fcb9757a",
+        "source_member": "submissions/sub_3bb996dbeeaa.zip::csrc/ops/softmax/op_kernel/softmax_kernel.cpp",
+        "source_sha256": "b9fbf2ac1795a5f4e12160169792cfcc4d843bea414758fe8cc22d7a999475bb",
+        "source_lines": "6-8,36-44",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      }
+    ]
+  },
+  {
+    "title": "消除无操作向量趟并融合标量系数、中间量和写回",
+    "patterns": [
+      "excessive_vector_passes",
+      "dtype_cast_overhead",
+      "ub_underutilization"
+    ],
+    "op_types": [
+      "elementwise",
+      "activation",
+      "optimizer"
+    ],
+    "feature": "实现包含 coef=1 的 Muls、coef=0 的 Adds、仅为复制的向量指令、每 tile 重复 Duplicate，或本可复用却另开缓冲的中间量。",
+    "reason": "逐元素算子常受向量 pass 数和 UB 带宽限制；数学工作量很小，但每个冗余 pass 都完整读写一次 UB。",
+    "fix": "在 host/tiling 端预合并常量并生成 pure/skip 标志；使用 Axpy、原位链和生命周期分析复用已死亡缓冲；把缩放融合到最终写回。任何代数重排都先验证 NaN/Inf、舍入顺序和目标 dtype。",
+    "type": "OPT_VECTOR_PASS_ELIMINATION",
+    "applicability": "elementwise、激活函数、优化器更新和短算术链。",
+    "risks": "浮点运算不满足普遍结合律；对 Inf/NaN、相消和 bf16/fp16 rounding 敏感的重排必须保持 golden 的求值顺序。",
+    "knowledge_id": "optkb-cce8118d467b",
+    "status": "promoted",
+    "confidence": "high",
+    "validation": {
+      "correctness": "every cited immutable artifact passed its 80-case hidden stage",
+      "performance": "first-place hidden benchmark speedup is >1.0 and greater than our paired live snapshot",
+      "causality": "supported by source structure and leaderboard association, not a controlled one-change ablation",
+      "acceptance_requirement": "reproduce on the target task with frozen correctness and repeated same-case timing before adoption"
+    },
+    "evidence": [
+      {
+        "operator": "Exp",
+        "stage": "hidden",
+        "first_place_speedup": 3.6540697565636515,
+        "ours_speedup": 3.302,
+        "speedup_delta": 0.35206975656365147,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_99f39dbbce4c",
+        "first_place_job_id": "job_932507e20a3a",
+        "inner_zip_sha256": "472188ae82269c045f8e90ea12cbfc61bb676638373c697e09ac4cc63352663c",
+        "source_member": "submissions/sub_99f39dbbce4c.zip::csrc/ops/exp/op_kernel/exp_kernel.h",
+        "source_sha256": "9bc7459d658960ea8414b2a22df0ff968e2b30ae98670e3861120331106c9c1d",
+        "source_lines": "15-39,85-107",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      },
+      {
+        "operator": "Sigmoid",
+        "stage": "hidden",
+        "first_place_speedup": 3.8878083174964586,
+        "ours_speedup": 3.232,
+        "speedup_delta": 0.6558083174964584,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_1825996b2f3c",
+        "first_place_job_id": "job_e7533fd9db5a",
+        "inner_zip_sha256": "eebad67d7ca647dc01c7b95143f18e86cbde7f2b6edb08bc7c9a132d83fddff7",
+        "source_member": "submissions/sub_1825996b2f3c.zip::csrc/ops/sigmoid/op_kernel/sigmoid_kernel.h",
+        "source_sha256": "8e6f726e49e8552fcd264faea7d85c7d19b321e00f0130f66ce83418fbd9445f",
+        "source_lines": "15-34,57-67,122-159",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      },
+      {
+        "operator": "ApplyAdamW",
+        "stage": "hidden",
+        "first_place_speedup": 4.044622592783388,
+        "ours_speedup": 3.19,
+        "speedup_delta": 0.8546225927833881,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_6160ae15e4da",
+        "first_place_job_id": "job_faf3a220f006",
+        "inner_zip_sha256": "ccb03290872b315ddb0ee8597916915cfab7dc8eb06cc1daf50271b9cd9e8bc4",
+        "source_member": "submissions/sub_6160ae15e4da.zip::csrc/ops/apply_adam_w/op_kernel/apply_adam_w_kernel.cpp",
+        "source_sha256": "12a6a42d920c4c667b1ee17a6dc5dea8d6483373c4d1bba6699eb2e6f80d326f",
+        "source_lines": "31-49,174-249",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      }
+    ]
+  },
+  {
+    "title": "用等价且硬件友好的代数形式替换昂贵复合原语",
+    "patterns": [
+      "expensive_composite_primitive",
+      "excessive_vector_passes",
+      "ub_underutilization"
+    ],
+    "op_types": [
+      "activation",
+      "elementwise"
+    ],
+    "feature": "高阶 API 在目标 SoC 上展开为多条软件模拟指令和额外临时缓冲，例如 Ln/Tanh 或带内部栈缓冲的复合激活。",
+    "reason": "API 级单调用不等于硬件单指令；软件展开会增加向量趟数、临时 UB 和同步。",
+    "fix": "先展开目标 SoC 上的真实 lowering，再寻找减少高代价原语的数学恒等式或短链；逐 dtype 证明截断范围、特殊值和舍入等价，并保留精确路径。",
+    "type": "OPT_ALGEBRAIC_REFORMULATION",
+    "applicability": "激活函数和可由短向量链表达的逐元素复合函数。",
+    "risks": "近似式不能只看普通有限值；必须覆盖 NaN、正负 Inf、subnormal、饱和区和 dtype 转回误差。",
+    "knowledge_id": "optkb-f7da273c6c2e",
+    "status": "promoted",
+    "confidence": "high",
+    "validation": {
+      "correctness": "every cited immutable artifact passed its 80-case hidden stage",
+      "performance": "first-place hidden benchmark speedup is >1.0 and greater than our paired live snapshot",
+      "causality": "supported by source structure and leaderboard association, not a controlled one-change ablation",
+      "acceptance_requirement": "reproduce on the target task with frozen correctness and repeated same-case timing before adoption"
+    },
+    "evidence": [
+      {
+        "operator": "Mish",
+        "stage": "hidden",
+        "first_place_speedup": 3.120387120443841,
+        "ours_speedup": 1.894,
+        "speedup_delta": 1.2263871204438412,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_1219704de8b1",
+        "first_place_job_id": "job_a9839cd1c9e0",
+        "inner_zip_sha256": "291bd25bd4cacd23f1995277646c0b5c2ff01168cc3c9eb86bfc3468ee2a05ac",
+        "source_member": "submissions/sub_1219704de8b1.zip::csrc/ops/mish/op_kernel/mish_kernel.cpp",
+        "source_sha256": "de1b790c28e32f7c231da9ec86a6915e32a7009277e68f58e899c11d7b55a2bc",
+        "source_lines": "4-13,51-65",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      },
+      {
+        "operator": "Sigmoid",
+        "stage": "hidden",
+        "first_place_speedup": 3.8878083174964586,
+        "ours_speedup": 3.232,
+        "speedup_delta": 0.6558083174964584,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_1825996b2f3c",
+        "first_place_job_id": "job_e7533fd9db5a",
+        "inner_zip_sha256": "eebad67d7ca647dc01c7b95143f18e86cbde7f2b6edb08bc7c9a132d83fddff7",
+        "source_member": "submissions/sub_1825996b2f3c.zip::csrc/ops/sigmoid/op_kernel/sigmoid_kernel.h",
+        "source_sha256": "8e6f726e49e8552fcd264faea7d85c7d19b321e00f0130f66ce83418fbd9445f",
+        "source_lines": "15-34,122-159",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      }
+    ]
+  },
+  {
+    "title": "先做核内或分块局部聚合，再执行少量全局原子或最终归约",
+    "patterns": [
+      "atomic_contention",
+      "reduction_scalar_stall",
+      "tiny_global_writes"
+    ],
+    "op_types": [
+      "reduction",
+      "segment",
+      "foreach"
+    ],
+    "feature": "每个输入元素都直接触发 GM 原子加或标量结果写回，造成原子冲突和大量小事务。",
+    "reason": "全局同步/原子的成本远高于 UB 内向量归约；当输出桶较少或分块可控时，重复原子写可以在核内合并。",
+    "fix": "按 UB 容量建立局部累加器或 partial workspace，先在 tile/core 内归约，再由每核一次原子写或独立 final kernel 合并；为输出桶过大、dtype 不支持原子或冲突低的情况保留直接路径。",
+    "type": "OPT_HIERARCHICAL_REDUCTION",
+    "applicability": "segment reduction、foreach reduction、直方图式聚合和多核归约。",
+    "risks": "改变归约顺序可能影响浮点误差；workspace 初始化、跨核可见性、原子 dtype 支持和 final kernel 顺序都必须验证。",
+    "knowledge_id": "optkb-5085594018bf",
+    "status": "promoted",
+    "confidence": "high",
+    "validation": {
+      "correctness": "every cited immutable artifact passed its 80-case hidden stage",
+      "performance": "first-place hidden benchmark speedup is >1.0 and greater than our paired live snapshot",
+      "causality": "supported by source structure and leaderboard association, not a controlled one-change ablation",
+      "acceptance_requirement": "reproduce on the target task with frozen correctness and repeated same-case timing before adoption"
+    },
+    "evidence": [
+      {
+        "operator": "UnsortedSegmentSum",
+        "stage": "hidden",
+        "first_place_speedup": 1.2001893229191254,
+        "ours_speedup": 0.453,
+        "speedup_delta": 0.7471893229191253,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_09bf90d4b2ac",
+        "first_place_job_id": "job_6fa622066d63",
+        "inner_zip_sha256": "f8cd99ddd4155816c9d7126e643e87da6d1d50d051f75f043e546ca6feb6d899",
+        "source_member": "submissions/sub_09bf90d4b2ac.zip::csrc/ops/unsorted_segment_sum/op_kernel/unsorted_segment_sum_kernel.cpp",
+        "source_sha256": "8dd8ada92f1aec8bca4971ebceafa9ab79b7801309264f869a4ad4f0766d81de",
+        "source_lines": "49-121,153-180",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      },
+      {
+        "operator": "ForeachNorm",
+        "stage": "hidden",
+        "first_place_speedup": 3.3892844481306335,
+        "ours_speedup": 2.143,
+        "speedup_delta": 1.2462844481306337,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_f4f3a904f2e3",
+        "first_place_job_id": "job_2891de285bea",
+        "inner_zip_sha256": "6c778c67e0f83b733028419b0d84e236f14ff88a875f4fac3fc98ff0ede9fe3e",
+        "source_member": "submissions/sub_f4f3a904f2e3.zip::csrc/ops/foreach_norm/op_kernel/foreach_norm_kernel.cpp",
+        "source_sha256": "79e9d2ed8e2cc3dc3ab7019250a44295027deaae992e0afbd627f9ff587a6671",
+        "source_lines": "11-15,61-113",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      }
+    ]
+  },
+  {
+    "title": "不规则访存用批量独立 load、向量 Gather、预取和窄类型打包写回",
+    "patterns": [
+      "random_access_latency",
+      "scalar_hot_loop",
+      "subword_store_overhead"
+    ],
+    "op_types": [
+      "gather",
+      "indexing",
+      "layout"
+    ],
+    "feature": "索引和数据依赖形成逐元素随机 GM load；int8/fp16 等窄写回还会产生 partial-line 合并开销。",
+    "reason": "串行地址依赖无法隐藏 cache miss；窄标量 store 可能占用多个流水槽并触发读改写。",
+    "fix": "把相互独立的索引分组展开形成 MLP；对适合的连续条带先 DMA 到 UB 再用向量 Gather；预取下一组索引覆盖 line miss；满足地址对齐时将多个窄输出打包成 word store。每种 dtype/layout 都要有门控回退。",
+    "type": "OPT_IRREGULAR_MEMORY_ACCESS",
+    "applicability": "Gather、embedding/indexing 和可转成条带局部性的随机访问。",
+    "risks": "寄存器压力、额外 ALU 和错误预取可能反而变慢；word-load+shift 等看似减少事务的方案需独立测量，不能默认启用。",
+    "knowledge_id": "optkb-8e032076bdac",
+    "status": "supported",
+    "confidence": "medium",
+    "validation": {
+      "correctness": "every cited immutable artifact passed its 80-case hidden stage",
+      "performance": "first-place hidden benchmark speedup is >1.0 and greater than our paired live snapshot",
+      "causality": "supported by source structure and leaderboard association, not a controlled one-change ablation",
+      "acceptance_requirement": "reproduce on the target task with frozen correctness and repeated same-case timing before adoption"
+    },
+    "evidence": [
+      {
+        "operator": "Gather",
+        "stage": "hidden",
+        "first_place_speedup": 1.7798004339145215,
+        "ours_speedup": 0.246,
+        "speedup_delta": 1.5338004339145215,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_ff498b6a3ad2",
+        "first_place_job_id": "job_8d14e0dad929",
+        "inner_zip_sha256": "463690a66b64eb1f48da2535994785e872ddee90eae560aa1cd5783022dcf71c",
+        "source_member": "submissions/sub_ff498b6a3ad2.zip::csrc/ops/gather/op_kernel/gather_kernel.cpp",
+        "source_sha256": "9407bba207759be15226694f5d6ce612d3163391ce291cac57c6015d6c936577",
+        "source_lines": "1-35,75-155,228-260",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      }
+    ]
+  },
+  {
+    "title": "按生命周期复用 UB 缓冲并用精确预算换取更大 tile",
+    "patterns": [
+      "ub_underutilization",
+      "tiny_dma",
+      "pipeline_bubble"
+    ],
+    "op_types": [
+      "elementwise",
+      "optimizer",
+      "quantization",
+      "activation"
+    ],
+    "feature": "多个中间 buffer 的生命周期不重叠却分别分配，导致 tile 被迫缩小、循环次数和队列同步增多。",
+    "reason": "UB 是固定容量；冗余 scratch 会同时降低单次搬运粒度和双缓冲可行性。",
+    "fix": "画出每个 LocalTensor 的生存区间，只在前值已死亡后复用；按最坏 dtype/path 对每个 queue depth、scratch 和 padding 逐字节核算，留出明确余量后放大 tile。",
+    "type": "OPT_UB_BUFFER_REUSE",
+    "applicability": "中间算术链较长、cast 缓冲多或多输入/输出的 kernel。",
+    "risks": "过早复用会形成隐蔽 WAR/WAW；不同路径的实际缓冲集合不同，预算必须逐路径而不是取平均。",
+    "knowledge_id": "optkb-1326101b0bb1",
+    "status": "promoted",
+    "confidence": "high",
+    "validation": {
+      "correctness": "every cited immutable artifact passed its 80-case hidden stage",
+      "performance": "first-place hidden benchmark speedup is >1.0 and greater than our paired live snapshot",
+      "causality": "supported by source structure and leaderboard association, not a controlled one-change ablation",
+      "acceptance_requirement": "reproduce on the target task with frozen correctness and repeated same-case timing before adoption"
+    },
+    "evidence": [
+      {
+        "operator": "Mish",
+        "stage": "hidden",
+        "first_place_speedup": 3.120387120443841,
+        "ours_speedup": 1.894,
+        "speedup_delta": 1.2263871204438412,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_1219704de8b1",
+        "first_place_job_id": "job_a9839cd1c9e0",
+        "inner_zip_sha256": "291bd25bd4cacd23f1995277646c0b5c2ff01168cc3c9eb86bfc3468ee2a05ac",
+        "source_member": "submissions/sub_1219704de8b1.zip::csrc/ops/mish/op_kernel/mish_kernel.cpp",
+        "source_sha256": "de1b790c28e32f7c231da9ec86a6915e32a7009277e68f58e899c11d7b55a2bc",
+        "source_lines": "21-34,43-68,92-120",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      },
+      {
+        "operator": "ApplyAdamW",
+        "stage": "hidden",
+        "first_place_speedup": 4.044622592783388,
+        "ours_speedup": 3.19,
+        "speedup_delta": 0.8546225927833881,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_6160ae15e4da",
+        "first_place_job_id": "job_faf3a220f006",
+        "inner_zip_sha256": "ccb03290872b315ddb0ee8597916915cfab7dc8eb06cc1daf50271b9cd9e8bc4",
+        "source_member": "submissions/sub_6160ae15e4da.zip::csrc/ops/apply_adam_w/op_kernel/apply_adam_w_kernel.cpp",
+        "source_sha256": "12a6a42d920c4c667b1ee17a6dc5dea8d6483373c4d1bba6699eb2e6f80d326f",
+        "source_lines": "44-53,91-103,186-198",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      },
+      {
+        "operator": "DynamicQuant",
+        "stage": "hidden",
+        "first_place_speedup": 3.846062528642393,
+        "ours_speedup": 1.795,
+        "speedup_delta": 2.051062528642393,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_bb4b6ab09cd2",
+        "first_place_job_id": "job_932d90fe2657",
+        "inner_zip_sha256": "2166e8e9a43dd2965b775c5653b564ee324786796d2f906783f770e4382723d0",
+        "source_member": "submissions/sub_bb4b6ab09cd2.zip::csrc/ops/dynamic_quant/op_kernel/dynamic_quant_kernel.cpp",
+        "source_sha256": "3afa30971be24a7e3a03b2e99816597eb25c2fe467fef03f610b5a0d1426727e",
+        "source_lines": "133-195,247-254",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      }
+    ]
+  },
+  {
+    "title": "主循环使用对齐大块 DataCopy，非对齐尾块单独走 DataCopyPad",
+    "patterns": [
+      "tail_branch_overhead",
+      "tiny_dma",
+      "alignment_overhead"
+    ],
+    "op_types": [
+      "elementwise",
+      "reduction",
+      "optimizer"
+    ],
+    "feature": "每个完整 tile 都执行 count 判断、pad 参数构造或 DataCopyPad，尾块逻辑污染高频主循环。",
+    "reason": "大多数 tile 已满足 32B/更高粒度对齐；为罕见尾块支付通用 pad 逻辑会增加 scalar 和 DMA setup 开销。",
+    "fix": "将 fullTiles 与 tail 提前拆开；完整 tile 只走固定 count 的 DataCopy，并适度展开主循环；最多一个尾 tile 使用 DataCopyPad。块起点和 tile 长度需按 dtype 对齐。",
+    "type": "OPT_ALIGNED_MAIN_LOOP",
+    "applicability": "连续 elementwise、归约输入扫描和规则分块的多输入 kernel。",
+    "risks": "不能用向上取整的 DataCopy 越过 GM 边界；最后一核、零长度和非整块输入必须走安全尾路径。",
+    "knowledge_id": "optkb-f3b4830a3150",
+    "status": "promoted",
+    "confidence": "high",
+    "validation": {
+      "correctness": "every cited immutable artifact passed its 80-case hidden stage",
+      "performance": "first-place hidden benchmark speedup is >1.0 and greater than our paired live snapshot",
+      "causality": "supported by source structure and leaderboard association, not a controlled one-change ablation",
+      "acceptance_requirement": "reproduce on the target task with frozen correctness and repeated same-case timing before adoption"
+    },
+    "evidence": [
+      {
+        "operator": "ForeachNorm",
+        "stage": "hidden",
+        "first_place_speedup": 3.3892844481306335,
+        "ours_speedup": 2.143,
+        "speedup_delta": 1.2462844481306337,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_f4f3a904f2e3",
+        "first_place_job_id": "job_2891de285bea",
+        "inner_zip_sha256": "6c778c67e0f83b733028419b0d84e236f14ff88a875f4fac3fc98ff0ede9fe3e",
+        "source_member": "submissions/sub_f4f3a904f2e3.zip::csrc/ops/foreach_norm/op_kernel/foreach_norm_kernel.cpp",
+        "source_sha256": "79e9d2ed8e2cc3dc3ab7019250a44295027deaae992e0afbd627f9ff587a6671",
+        "source_lines": "85-103,117-163",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      },
+      {
+        "operator": "Exp",
+        "stage": "hidden",
+        "first_place_speedup": 3.6540697565636515,
+        "ours_speedup": 3.302,
+        "speedup_delta": 0.35206975656365147,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_99f39dbbce4c",
+        "first_place_job_id": "job_932507e20a3a",
+        "inner_zip_sha256": "472188ae82269c045f8e90ea12cbfc61bb676638373c697e09ac4cc63352663c",
+        "source_member": "submissions/sub_99f39dbbce4c.zip::csrc/ops/exp/op_kernel/exp_vector_tile.h",
+        "source_sha256": "48994fd29a62cb37545cc8108b0384b30e91402d574c87fbf462f83b5a971ac3",
+        "source_lines": "7-24",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      },
+      {
+        "operator": "Sigmoid",
+        "stage": "hidden",
+        "first_place_speedup": 3.8878083174964586,
+        "ours_speedup": 3.232,
+        "speedup_delta": 0.6558083174964584,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_1825996b2f3c",
+        "first_place_job_id": "job_e7533fd9db5a",
+        "inner_zip_sha256": "eebad67d7ca647dc01c7b95143f18e86cbde7f2b6edb08bc7c9a132d83fddff7",
+        "source_member": "submissions/sub_1825996b2f3c.zip::csrc/ops/sigmoid/op_kernel/sigmoid_kernel.h",
+        "source_sha256": "8e6f726e49e8552fcd264faea7d85c7d19b321e00f0130f66ce83418fbd9445f",
+        "source_lines": "99-119",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      },
+      {
+        "operator": "ApplyAdamW",
+        "stage": "hidden",
+        "first_place_speedup": 4.044622592783388,
+        "ours_speedup": 3.19,
+        "speedup_delta": 0.8546225927833881,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_6160ae15e4da",
+        "first_place_job_id": "job_faf3a220f006",
+        "inner_zip_sha256": "ccb03290872b315ddb0ee8597916915cfab7dc8eb06cc1daf50271b9cd9e8bc4",
+        "source_member": "submissions/sub_6160ae15e4da.zip::csrc/ops/apply_adam_w/op_kernel/apply_adam_w_kernel.cpp",
+        "source_sha256": "12a6a42d920c4c667b1ee17a6dc5dea8d6483373c4d1bba6699eb2e6f80d326f",
+        "source_lines": "113-130,141-155,257-266",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      }
+    ]
+  },
+  {
+    "title": "按真实工作量均衡分核，避免余数和三角工作集造成尾核空闲",
+    "patterns": [
+      "core_tail_imbalance",
+      "scalar_hot_loop",
+      "pipeline_bubble"
+    ],
+    "op_types": [
+      "normalization",
+      "reduction",
+      "quantization",
+      "irregular"
+    ],
+    "feature": "任务数不能整除核数、不同任务成本不等，或连续块划分让部分核提前结束。",
+    "reason": "端到端耗时由最慢核决定；平均工作量相同并不代表尾部延迟相同。",
+    "fix": "规则等成本任务用 base+remainder 或 stride 分配；不规则任务按可解释的成本函数切分；确保所有已启动核有工作，并记录对齐和局部性权衡。",
+    "type": "OPT_CORE_LOAD_BALANCE",
+    "applicability": "多行、多 group、多 tile 或任务成本随索引变化的 kernel。",
+    "risks": "round-robin 可能破坏连续访问和 cache locality；成本模型必须由 profiling 校准，不能只看任务个数。",
+    "knowledge_id": "optkb-e39b7c50945b",
+    "status": "promoted",
+    "confidence": "high",
+    "validation": {
+      "correctness": "every cited immutable artifact passed its 80-case hidden stage",
+      "performance": "first-place hidden benchmark speedup is >1.0 and greater than our paired live snapshot",
+      "causality": "supported by source structure and leaderboard association, not a controlled one-change ablation",
+      "acceptance_requirement": "reproduce on the target task with frozen correctness and repeated same-case timing before adoption"
+    },
+    "evidence": [
+      {
+        "operator": "GroupNorm",
+        "stage": "hidden",
+        "first_place_speedup": 2.2105387320799856,
+        "ours_speedup": 1.284,
+        "speedup_delta": 0.9265387320799856,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_028d337b1730",
+        "first_place_job_id": "job_29a7088b8a59",
+        "inner_zip_sha256": "712076cb729cb501dc02c8070942053706c60a97f6653c456aae8b2ccf73ef3b",
+        "source_member": "submissions/sub_028d337b1730.zip::csrc/ops/group_norm/op_kernel/group_norm_kernel.cpp",
+        "source_sha256": "00866372c5c1335b3a1e5f9181cad3dd20364f2a017a0bbcf39545984c1056ab",
+        "source_lines": "39-51,97-100",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      },
+      {
+        "operator": "RmsNorm",
+        "stage": "hidden",
+        "first_place_speedup": 1.9285374563144626,
+        "ours_speedup": 1.276,
+        "speedup_delta": 0.6525374563144626,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_16b3c07a9a7a",
+        "first_place_job_id": "job_f5b37d01e8e6",
+        "inner_zip_sha256": "52d40988238128b0b5ab04cfabcc1b83b887f78d421971c0375caa88bfd016ba",
+        "source_member": "submissions/sub_16b3c07a9a7a.zip::csrc/ops/rms_norm/op_kernel/rms_norm_kernel.cpp",
+        "source_sha256": "a75de69da714f32915c7564434091a79ff36705fe745e9171729ccd9002c7b1f",
+        "source_lines": "55-68",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      },
+      {
+        "operator": "DynamicQuant",
+        "stage": "hidden",
+        "first_place_speedup": 3.846062528642393,
+        "ours_speedup": 1.795,
+        "speedup_delta": 2.051062528642393,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_bb4b6ab09cd2",
+        "first_place_job_id": "job_932d90fe2657",
+        "inner_zip_sha256": "2166e8e9a43dd2965b775c5653b564ee324786796d2f906783f770e4382723d0",
+        "source_member": "submissions/sub_bb4b6ab09cd2.zip::csrc/ops/dynamic_quant/op_kernel/dynamic_quant_kernel.cpp",
+        "source_sha256": "3afa30971be24a7e3a03b2e99816597eb25c2fe467fef03f610b5a0d1426727e",
+        "source_lines": "89-129",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      }
+    ]
+  },
+  {
+    "title": "按输出 dtype 的误差预算选择 fast math，精度不足时保留精确路径",
+    "patterns": [
+      "expensive_vector_instruction",
+      "dtype_cast_overhead",
+      "precision_performance_tradeoff"
+    ],
+    "op_types": [
+      "activation",
+      "elementwise"
+    ],
+    "feature": "同一近似指令在 fp16/bf16 输出上误差会被最终舍入吸收，但 fp32 输出无法通过精度阈值。",
+    "reason": "硬件 Reciprocal、Rsqrt 等通常是估计值；是否可用取决于最终 dtype、误差门限和后续运算，而不是 API 名称。",
+    "fix": "逐 dtype 建立误差预算：低精度路径可在全量验证后采用 fast math，fp32 或敏感区间使用 Div/精化迭代；在代码中显式模板分流，不让一种选择覆盖所有 dtype。",
+    "type": "OPT_DTYPE_AWARE_FAST_MATH",
+    "applicability": "激活、归一化、除法/倒数/平方根密集的逐元素和行归约算子。",
+    "risks": "必须覆盖特殊值、接近零分母、subnormal 和边界舍入；不能用平均误差掩盖最坏 case。",
+    "knowledge_id": "optkb-f61f2a71636f",
+    "status": "promoted",
+    "confidence": "high",
+    "validation": {
+      "correctness": "every cited immutable artifact passed its 80-case hidden stage",
+      "performance": "first-place hidden benchmark speedup is >1.0 and greater than our paired live snapshot",
+      "causality": "supported by source structure and leaderboard association, not a controlled one-change ablation",
+      "acceptance_requirement": "reproduce on the target task with frozen correctness and repeated same-case timing before adoption"
+    },
+    "evidence": [
+      {
+        "operator": "Sigmoid",
+        "stage": "hidden",
+        "first_place_speedup": 3.8878083174964586,
+        "ours_speedup": 3.232,
+        "speedup_delta": 0.6558083174964584,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_1825996b2f3c",
+        "first_place_job_id": "job_e7533fd9db5a",
+        "inner_zip_sha256": "eebad67d7ca647dc01c7b95143f18e86cbde7f2b6edb08bc7c9a132d83fddff7",
+        "source_member": "submissions/sub_1825996b2f3c.zip::csrc/ops/sigmoid/op_kernel/sigmoid_kernel.h",
+        "source_sha256": "8e6f726e49e8552fcd264faea7d85c7d19b321e00f0130f66ce83418fbd9445f",
+        "source_lines": "28-34,122-159",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      },
+      {
+        "operator": "Mish",
+        "stage": "hidden",
+        "first_place_speedup": 3.120387120443841,
+        "ours_speedup": 1.894,
+        "speedup_delta": 1.2263871204438412,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_1219704de8b1",
+        "first_place_job_id": "job_a9839cd1c9e0",
+        "inner_zip_sha256": "291bd25bd4cacd23f1995277646c0b5c2ff01168cc3c9eb86bfc3468ee2a05ac",
+        "source_member": "submissions/sub_1219704de8b1.zip::csrc/ops/mish/op_kernel/mish_kernel.cpp",
+        "source_sha256": "de1b790c28e32f7c231da9ec86a6915e32a7009277e68f58e899c11d7b55a2bc",
+        "source_lines": "51-65",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      },
+      {
+        "operator": "RmsNorm",
+        "stage": "hidden",
+        "first_place_speedup": 1.9285374563144626,
+        "ours_speedup": 1.276,
+        "speedup_delta": 0.6525374563144626,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_16b3c07a9a7a",
+        "first_place_job_id": "job_f5b37d01e8e6",
+        "inner_zip_sha256": "52d40988238128b0b5ab04cfabcc1b83b887f78d421971c0375caa88bfd016ba",
+        "source_member": "submissions/sub_16b3c07a9a7a.zip::csrc/ops/rms_norm/op_kernel/rms_norm_kernel.cpp",
+        "source_sha256": "a75de69da714f32915c7564434091a79ff36705fe745e9171729ccd9002c7b1f",
+        "source_lines": "12-28",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      }
+    ]
+  },
+  {
+    "title": "把负向性能实验作为一等证据，按 case 回退而不是累积所有优化",
+    "patterns": [
+      "performance_regression",
+      "path_overgeneralization",
+      "register_pressure"
+    ],
+    "op_types": [
+      "all"
+    ],
+    "feature": "局部上看更少 load、更大对齐或更多预取，但部分 shape/dtype 的端到端性能显著回退。",
+    "reason": "优化会改变寄存器压力、tile 尾块、cache locality、DMA 粒度和编译器调度；静态指令数下降不等于真实耗时下降。",
+    "fix": "每次只引入一个可归因变化，保存逐 case 基线、候选和噪声区间；仅在正确性不退化且目标 case 集稳定改善时接受。回退结果写入知识条目的 risks/negative_evidence，后续路径路由显式避开。",
+    "type": "OPT_MEASURED_ROLLBACK_POLICY",
+    "applicability": "所有 performance attempt，尤其是预取、对齐、展开、路径合并和 tile 放大。",
+    "risks": "只看聚合均值会掩盖严重 case 回退；同一设备上的一次测量也可能受噪声影响，应使用重复测量和稳健统计。",
+    "knowledge_id": "optkb-35b6e198739e",
+    "status": "promoted",
+    "confidence": "high",
+    "validation": {
+      "correctness": "every cited immutable artifact passed its 80-case hidden stage",
+      "performance": "first-place hidden benchmark speedup is >1.0 and greater than our paired live snapshot",
+      "causality": "supported by source structure and leaderboard association, not a controlled one-change ablation",
+      "acceptance_requirement": "reproduce on the target task with frozen correctness and repeated same-case timing before adoption"
+    },
+    "evidence": [
+      {
+        "operator": "Gather",
+        "stage": "hidden",
+        "first_place_speedup": 1.7798004339145215,
+        "ours_speedup": 0.246,
+        "speedup_delta": 1.5338004339145215,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_ff498b6a3ad2",
+        "first_place_job_id": "job_8d14e0dad929",
+        "inner_zip_sha256": "463690a66b64eb1f48da2535994785e872ddee90eae560aa1cd5783022dcf71c",
+        "source_member": "submissions/sub_ff498b6a3ad2.zip::csrc/ops/gather/op_kernel/gather_kernel.cpp",
+        "source_sha256": "9407bba207759be15226694f5d6ce612d3163391ce291cac57c6015d6c936577",
+        "source_lines": "22-35",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      },
+      {
+        "operator": "Mish",
+        "stage": "hidden",
+        "first_place_speedup": 3.120387120443841,
+        "ours_speedup": 1.894,
+        "speedup_delta": 1.2263871204438412,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_1219704de8b1",
+        "first_place_job_id": "job_a9839cd1c9e0",
+        "inner_zip_sha256": "291bd25bd4cacd23f1995277646c0b5c2ff01168cc3c9eb86bfc3468ee2a05ac",
+        "source_member": "submissions/sub_1219704de8b1.zip::csrc/ops/mish/op_kernel/mish_kernel.cpp",
+        "source_sha256": "de1b790c28e32f7c231da9ec86a6915e32a7009277e68f58e899c11d7b55a2bc",
+        "source_lines": "70-74",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      },
+      {
+        "operator": "ApplyRotaryPosEmb",
+        "stage": "hidden",
+        "first_place_speedup": 1.0993013959579563,
+        "ours_speedup": 0.365,
+        "speedup_delta": 0.7343013959579563,
+        "first_place_passed_cases": 80,
+        "first_place_total_cases": 80,
+        "first_place_submission_id": "sub_296efa8fd814",
+        "first_place_job_id": "job_b231e2e14271",
+        "inner_zip_sha256": "28582c56a7290e6ad2f04aab6c8369f593f6f7c8cd8e452926987f5977ba6cd3",
+        "source_member": "submissions/sub_296efa8fd814.zip::csrc/ops/apply_rotary_pos_emb/op_kernel/apply_rotary_pos_emb_kernel.cpp",
+        "source_sha256": "75809cd6c73fd8aa17f8ccf937019a2f722e6e3e7816c8c2b75326678fe8a4e4",
+        "source_lines": "93-97,123-153",
+        "artifact_validation": "hidden_full",
+        "local_exact_source_pair_available": true
+      }
+    ]
+  }
+]
